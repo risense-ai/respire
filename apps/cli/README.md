@@ -1,7 +1,7 @@
 # apps/cli
 
-本目录承载 `respire-cli`（超薄 CLI / TUI / `rsrs mcp` / 守护启停），**在 OpenSpec `003` 阶段从 `risense-ai/respire-cli` 过滤掉 5.4 万行遗留服务端 crate 与历史脚本后保留历史导入**。
+Hosts `respire-cli` (ultra-thin CLI, TUI, `rsrs mcp` stdio bridge, and Runtime lifecycle launcher), imported from `risense-ai/respire-cli` during OpenSpec `003` (`CARD-007`) after stripping ~54.5k legacy server lines and 23 obsolete workflows.
 
-- 必须保留独立 `Cargo.toml` 与 `Cargo.lock`；
-- 严禁依赖 `apps/runtime` 内部 crate、`storage`、`core-sdk`、`app` 或 `axum`；
-- 唯一通信契约消费 `packages/runtime-sdk-rs`。
+- Owns an independent `Cargo.toml` and `Cargo.lock`;
+- MUST NEVER depend on `apps/runtime`, `apps/core`, `storage`, `core-sdk`, `app`, `axum`, or `tiny_http`;
+- Consumes `packages/runtime-sdk-rs` exclusively.

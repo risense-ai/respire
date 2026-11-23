@@ -20,6 +20,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
+      core: ${{ steps.detect.outputs.core }}
       runtime: ${{ steps.detect.outputs.runtime }}
       cli: ${{ steps.detect.outputs.cli }}
       client2: ${{ steps.detect.outputs.client2 }}
@@ -44,6 +45,7 @@ jobs:
           set -euo pipefail
 
           run_all() {
+            echo "core=true" >> "$GITHUB_OUTPUT"
             echo "runtime=true" >> "$GITHUB_OUTPUT"
             echo "cli=true" >> "$GITHUB_OUTPUT"
             echo "client2=true" >> "$GITHUB_OUTPUT"
@@ -81,11 +83,13 @@ jobs:
             grep -qE "$1" <<< "$changed"
           }
 
+          core=false
           runtime=false
           cli=false
           client2=false
           contracts=false
 
+          if match_path '^apps/core/'; then core=true; fi
           if match_path '^apps/runtime/'; then runtime=true; fi
           if match_path '^apps/cli/'; then cli=true; fi
           if match_path '^apps/client2/'; then client2=true; fi
@@ -93,6 +97,7 @@ jobs:
             contracts=true
           fi
 
+          echo "core=$core" >> "$GITHUB_OUTPUT"
           echo "runtime=$runtime" >> "$GITHUB_OUTPUT"
           echo "cli=$cli" >> "$GITHUB_OUTPUT"
           echo "client2=$client2" >> "$GITHUB_OUTPUT"
@@ -113,7 +118,7 @@ jobs:
         with:
           node-version: "22"
 
-      - name: Run architecture guardrails
+      - name: Run architecture & Zero-CJK guardrails
         run: node scripts/check-guardrails.mjs
 
   contract-check:
@@ -135,10 +140,36 @@ jobs:
           grep -q '^info:' contracts/runtime-api/openapi.yaml
           grep -q '^paths:' contracts/runtime-api/openapi.yaml
 
+  core-ci:
+    name: core-ci
+    needs: detect-changes
+    if: needs.detect-changes.outputs.core == 'true' || needs.detect-changes.outputs.contracts == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Check Core manifest presence
+        id: manifest
+        run: |
+          if [ -f "apps/core/Cargo.toml" ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "apps/core/Cargo.toml not imported yet (pending OpenSpec 003/004); skipping Rust build."
+          fi
+
+      - name: Check Core workspace
+        if: steps.manifest.outputs.exists == 'true'
+        run: cargo check --manifest-path apps/core/Cargo.toml --locked
+
   runtime-ci:
     name: runtime-ci
     needs: detect-changes
-    if: needs.detect-changes.outputs.runtime == 'true' || needs.detect-changes.outputs.contracts == 'true'
+    if: needs.detect-changes.outputs.runtime == 'true' || needs.detect-changes.outputs.core == 'true' || needs.detect-changes.outputs.contracts == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -224,7 +255,7 @@ jobs:
 
   ci-gate:
     name: ci-gate
-    needs: [detect-changes, guardrails, contract-check, runtime-ci, cli-ci, client2-ci]
+    needs: [detect-changes, guardrails, contract-check, core-ci, runtime-ci, cli-ci, client2-ci]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -235,12 +266,13 @@ jobs:
           DETECT: ${{ needs.detect-changes.result }}
           GUARDRAILS: ${{ needs.guardrails.result }}
           CONTRACTS: ${{ needs.contract-check.result }}
+          CORE: ${{ needs.core-ci.result }}
           RUNTIME: ${{ needs.runtime-ci.result }}
           CLI: ${{ needs.cli-ci.result }}
           CLIENT2: ${{ needs.client2-ci.result }}
         run: |
           set -euo pipefail
-          for name in DETECT GUARDRAILS CONTRACTS RUNTIME CLI CLIENT2; do
+          for name in DETECT GUARDRAILS CONTRACTS CORE RUNTIME CLI CLIENT2; do
             val="${!name}"
             echo "$name=$val"
             if [ "$val" != "success" ] && [ "$val" != "skipped" ]; then

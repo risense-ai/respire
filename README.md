@@ -1,34 +1,33 @@
 # Respire
 
-Respire 开源产品 Monorepo，统一承载三大独立应用与契约生成包：
+Open-source Monorepo hosting Respire's four product components and generated contract SDKs:
 
-- **`apps/runtime/`** — 权威控制面与数据面守护进程（Rust：SQLite 持久化、模型目录与托管下载、OpenAPI 3.1 + SSE 服务、旧 RPC 薄兼容）
-- **`apps/cli/`** — 超薄 CLI / TUI / `rsrs mcp` stdio 桥与 Runtime 启停安装器（Rust）
-- **`apps/client2/`** — 桌面应用壳、系统托盘与 OS 胶水适配器（Go + Wails + WebUI）
-- **`packages/`** — 根据唯一 OpenAPI 3.1 契约自动生成的强类型客户端 SDK（`runtime-sdk-rs` / `runtime-sdk-go` / `runtime-sdk-ts`，禁止手改）
-- **`contracts/`** — 从权威中枢仓 [risense-ai/respire-resources](https://github.com/risense-ai/respire-resources) 同步并锁定 SHA-256 的只读契约快照
-
----
-
-## 核心工程原则（合仓不拖累）
-
-1. **物理构建清单隔离**：`apps/runtime`、`apps/cli`、`apps/client2` 各自保留独立的 `Cargo.toml`/`Cargo.lock` 或 `go.mod`/`go.sum`，严禁共享顶层 Cargo Workspace，严禁跨 `apps/*` 源码相互引用。
-2. **路径路由 CI（改谁只跑谁）**：改动 `apps/client2/**` 只触发 `client2-ci`，`runtime-ci` 与 `cli-ci` 0 秒跳过；分支保护只要求单一聚合门禁 `ci-gate`。
-3. **组件独立发版**：三大端独立演进、**永不配对版本号**，通过组件前缀 Tag 触发各自流水线：
-   - `runtime-vX.Y.Z`
-   - `cli-vX.Y.Z`
-   - `client2-vX.Y.Z`
-4. **Spec-First（规范先行）**：任何新功能、接口改动或大重构必须先在 `risense-ai/respire-resources` 通过 OpenSpec 审批。
+- **`apps/core/`** — Pure in-memory retrieval, embedding, and clustering kernel (open-source, C/Rust ABI, zero filesystem/DB/network I/O)
+- **`apps/runtime/`** — Authoritative control & data plane daemon (Rust: SQLite persistence, model catalog, managed downloads, OpenAPI 3.1 + SSE server, frozen legacy JSON-RPC shim)
+- **`apps/cli/`** — Ultra-thin CLI, TUI, `rsrs mcp` stdio bridge, and Runtime daemon launcher/installer (Rust)
+- **`apps/client2/`** — Desktop shell, system tray, OS proxy/keyring bridge, and WebUI (Go + Wails)
+- **`packages/`** — Auto-generated typed client SDKs (`runtime-sdk-rs`, `runtime-sdk-go`, `runtime-sdk-ts` — never hand-edited)
+- **`contracts/`** — Read-only contract snapshot synced from [risense-ai/respire-resources](https://github.com/risense-ai/respire-resources) and pinned by SHA-256
 
 ---
 
-## AI Agent 与开发者入口
+## Core Engineering Rules
 
-- **[AGENTS.md](AGENTS.md)** — 本仓开发红线（继承自 `respire-resources/AGENTS.md`）
-- **[冷启动执行手册](https://github.com/risense-ai/respire-resources/blob/main/openspec/AGENT_EXECUTION_GUIDE.md)** — 多 Agent 接手推进 `001`–`006` 的操作规程与派单提示词
-- **[OpenSpec 总路线图](https://github.com/risense-ai/respire-resources/blob/main/openspec/ROADMAP.md)** — 全系统演进计划
+1. **English-Only Code & Docs**: All docs, source files, comments, scripts, PRs, and commits MUST be written in English. Non-English UI translations are allowed ONLY inside dedicated UI i18n paths (`**/i18n/**`, `**/locales/**`, etc.).
+2. **Isolated Build Manifests**: `apps/core`, `apps/runtime`, `apps/cli`, and `apps/client2` each own separate dependency manifests and lockfiles. Never add a root `Cargo.toml`.
+3. **Path-Filtered CI (`ci-gate`)**: Modifying `apps/client2/**` skips `core-ci`, `runtime-ci`, and `cli-ci` in 0s; modifying `apps/core/**` tests `core-ci` + `runtime-ci` without blocking `cli-ci` or `client2-ci`.
+4. **Independent Component Releases**: Components ship independently on separate schedules with component-prefixed tags: `runtime-vX.Y.Z`, `cli-vX.Y.Z`, `client2-vX.Y.Z`.
+5. **Spec-First**: Every change requires an approved OpenSpec Change and Milestone Issue in `risense-ai/respire-resources`.
 
-## 本地护栏检查
+---
+
+## Entry Points for AI Agents & Contributors
+
+- **[AGENTS.md](AGENTS.md)** — Repository rules inheriting `risense-ai/respire-resources/AGENTS.md`
+- **[Cold-Start Agent Execution Guide](https://github.com/risense-ai/respire-resources/blob/main/openspec/AGENT_EXECUTION_GUIDE.md)** — Mandatory `respire-process.mjs next` loop
+- **[OpenSpec Master Roadmap](https://github.com/risense-ai/respire-resources/blob/main/openspec/ROADMAP.md)** — Six-stage transformation DAG
+
+## Local Guardrails
 
 ```sh
 node scripts/check-guardrails.mjs

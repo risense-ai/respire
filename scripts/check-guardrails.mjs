@@ -1,11 +1,13 @@
 #!/usr/bin/env node
-// Respire Monorepo 架构护栏校验脚本（零外部依赖）
-// 校验内容：
-// 1. 禁止根目录出现 Cargo.toml（严禁合并 runtime 与 cli 为单一 Workspace）；
-// 2. 若 apps/cli/Cargo.toml 存在，严禁引用 ../runtime 或服务端/存储 crate；
-// 3. 若 apps/client2/go.mod 存在，严禁引入 sqlite 驱动（如 go-sqlite3）；
-// 4. contracts/sync.lock.json 必须与 contracts/runtime-api/openapi.yaml 校验和一致；
-// 5. .github/workflows/ 下文件数量 <= 5。
+// Respire Monorepo architecture and language guardrail checker (zero dependencies).
+// Verifies:
+// 1. No root Cargo.toml exists (forbids merging apps/core, apps/runtime, apps/cli into one Cargo workspace);
+// 2. Any Cargo.toml under apps/core forbids I/O crates (rusqlite, sqlx, reqwest, ureq, axum, tiny_http);
+// 3. Any Cargo.toml under apps/cli forbids ../runtime, ../core, and server/storage crates;
+// 4. apps/client2/go.mod forbids go-sqlite3 or any sqlite3 driver;
+// 5. contracts/sync.lock.json exists and matches contracts/runtime-api/openapi.yaml SHA-256;
+// 6. .github/workflows/*.yml count <= 5;
+// 7. Zero CJK characters outside dedicated UI i18n files/fixtures.
 
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -14,96 +16,164 @@ import path from "node:path";
 const root = process.cwd();
 const errors = [];
 
-// 1. 禁止根 Cargo.toml
-if (fs.existsSync(path.join(root, "Cargo.toml"))) {
-  errors.push("禁止在 Monorepo 根目录放置 Cargo.toml，apps/runtime 与 apps/cli 必须保持物理独立构建清单");
-}
+const CJK_REGEX = /[\u3000-\u303F\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF\uFF00-\uFFEF]/;
+const I18N_EXEMPT_REGEXES = [
+  /(^|\/)i18n(\/|\.js$|\.ts$|\.json$)/,
+  /(^|\/)locales\//,
+  /_zh(-CN|-TW)?\.(json|js|ts)$/,
+  /\.zh(-CN|-TW)?\.(json|js|ts)$/,
+  /^test-cases\/fixtures\/i18n\//,
+];
+const TEXT_EXTENSIONS = new Set([
+  ".md",
+  ".yml",
+  ".yaml",
+  ".mjs",
+  ".js",
+  ".ts",
+  ".json",
+  ".html",
+  ".css",
+  ".sh",
+  ".ps1",
+  ".txt",
+  ".toml",
+  ".rs",
+  ".go",
+]);
 
-// 2. 扫描 apps/cli 禁用依赖
-function findFilesNamed(dir, fileName, acc = []) {
+function walkFiles(dir, predicate, acc = []) {
   if (!fs.existsSync(dir)) return acc;
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-    if (entry.name === "target" || entry.name === "node_modules" || entry.name === ".git") continue;
+    if (
+      entry.name === ".git" ||
+      entry.name === "node_modules" ||
+      entry.name === "target" ||
+      entry.name === ".worktrees" ||
+      entry.name === "vendor"
+    ) {
+      continue;
+    }
     const full = path.join(dir, entry.name);
     if (entry.isDirectory()) {
-      findFilesNamed(full, fileName, acc);
-    } else if (entry.isFile() && entry.name === fileName) {
+      walkFiles(full, predicate, acc);
+    } else if (entry.isFile() && predicate(entry.name, full)) {
       acc.push(full);
     }
   }
   return acc;
 }
 
-const forbiddenCliPatterns = [
-  { label: "跨应用引用 runtime", regex: /\.\.\/runtime|\bapps\/runtime\b/ },
-  { label: "respire_storage", regex: /\brespire_storage\b/ },
-  { label: "respire_core_sdk", regex: /\brespire_core_sdk\b/ },
-  { label: "respire_app / respire_app_domain", regex: /\brespire_app(_domain)?\b/ },
-  { label: "axum / tiny_http 服务端框架", regex: /\b(axum|tiny_http)\b/ },
+// 1. Forbid root Cargo.toml
+if (fs.existsSync(path.join(root, "Cargo.toml"))) {
+  errors.push("Root Cargo.toml is forbidden: apps/core, apps/runtime, and apps/cli MUST keep isolated build manifests");
+}
+
+// 2. Forbid I/O crates inside apps/core
+const forbiddenCorePatterns = [
+  { label: "SQLite / SQL crates", regex: /\b(rusqlite|sqlx)\b/ },
+  { label: "HTTP / network crates", regex: /\b(reqwest|ureq|axum|tiny_http)\b/ },
 ];
 
-for (const cargoToml of findFilesNamed(path.join(root, "apps", "cli"), "Cargo.toml")) {
+for (const cargoToml of walkFiles(path.join(root, "apps", "core"), (name) => name === "Cargo.toml")) {
   const text = fs.readFileSync(cargoToml, "utf8");
-  const rel = path.relative(root, cargoToml);
-  for (const rule of forbiddenCliPatterns) {
+  const rel = path.relative(root, cargoToml).replace(/\\/g, "/");
+  for (const rule of forbiddenCorePatterns) {
     if (rule.regex.test(text)) {
-      errors.push(`${rel} 触发 CLI 禁用依赖规则: ${rule.label}`);
+      errors.push(`${rel} violates Core pure-memory boundary: ${rule.label}`);
     }
   }
 }
 
-// 3. 扫描 apps/client2 禁用 SQLite 驱动
+// 3. Forbid server/cross-app dependencies inside apps/cli
+const forbiddenCliPatterns = [
+  { label: "cross-app path dependency (runtime/core)", regex: /\.\.\/(runtime|core)\b|\bapps\/(runtime|core)\b/ },
+  { label: "respire_storage", regex: /\brespire_storage\b/ },
+  { label: "respire_core_sdk", regex: /\brespire_core_sdk\b/ },
+  { label: "respire_app / respire_app_domain", regex: /\brespire_app(_domain)?\b/ },
+  { label: "axum / tiny_http server crates", regex: /\b(axum|tiny_http)\b/ },
+];
+
+for (const cargoToml of walkFiles(path.join(root, "apps", "cli"), (name) => name === "Cargo.toml")) {
+  const text = fs.readFileSync(cargoToml, "utf8");
+  const rel = path.relative(root, cargoToml).replace(/\\/g, "/");
+  for (const rule of forbiddenCliPatterns) {
+    if (rule.regex.test(text)) {
+      errors.push(`${rel} triggers CLI forbidden dependency rule: ${rule.label}`);
+    }
+  }
+}
+
+// 4. Forbid SQLite drivers inside apps/client2/go.mod
 const client2GoMod = path.join(root, "apps", "client2", "go.mod");
 if (fs.existsSync(client2GoMod)) {
   const goModText = fs.readFileSync(client2GoMod, "utf8");
   if (/go-sqlite3|\bsqlite3\b/i.test(goModText)) {
-    errors.push("apps/client2/go.mod 禁止引入 go-sqlite3 或任何 SQLite 驱动");
+    errors.push("apps/client2/go.mod MUST NOT import go-sqlite3 or any SQLite driver");
   }
 }
 
-// 4. 校验 contracts/sync.lock.json 与 openapi.yaml 校验和一致
+// 5. Verify contracts/sync.lock.json matches contracts/runtime-api/openapi.yaml
 const lockPath = path.join(root, "contracts", "sync.lock.json");
 const openapiPath = path.join(root, "contracts", "runtime-api", "openapi.yaml");
 
 if (!fs.existsSync(lockPath)) {
-  errors.push("缺失契约锁文件: contracts/sync.lock.json");
+  errors.push("Missing contract lock file: contracts/sync.lock.json");
 } else if (!fs.existsSync(openapiPath)) {
-  errors.push("缺失同步契约文件: contracts/runtime-api/openapi.yaml");
+  errors.push("Missing synced OpenAPI contract: contracts/runtime-api/openapi.yaml");
 } else {
   try {
     const lock = JSON.parse(fs.readFileSync(lockPath, "utf8"));
     const openapiBytes = fs.readFileSync(openapiPath);
     const actualSha256 = crypto.createHash("sha256").update(openapiBytes).digest("hex");
     if (!lock.commit || !/^[a-f0-9]{40}$/.test(lock.commit)) {
-      errors.push("contracts/sync.lock.json 缺少有效的 40 位 commit SHA");
+      errors.push("contracts/sync.lock.json must contain a 40-char source commit SHA");
     }
     if (lock.openapi_sha256 !== actualSha256) {
       errors.push(
-        `contracts/runtime-api/openapi.yaml 校验和不匹配: lock=${lock.openapi_sha256}, actual=${actualSha256}`
+        `contracts/runtime-api/openapi.yaml checksum mismatch: lock=${lock.openapi_sha256}, actual=${actualSha256}`
       );
     }
   } catch (err) {
-    errors.push(`解析 contracts/sync.lock.json 失败: ${err.message}`);
+    errors.push(`Failed to parse contracts/sync.lock.json: ${err.message}`);
   }
 }
 
-// 5. 校验 Workflow 数量上限 <= 5
+// 6. Cap .github/workflows/*.yml count <= 5
 const workflowsDir = path.join(root, ".github", "workflows");
 if (fs.existsSync(workflowsDir)) {
   const wfFiles = fs
     .readdirSync(workflowsDir, { withFileTypes: true })
     .filter((d) => d.isFile() && (d.name.endsWith(".yml") || d.name.endsWith(".yaml")));
   if (wfFiles.length > 5) {
-    errors.push(`.github/workflows 下文件数量为 ${wfFiles.length}，超过核心流水线 5 个上限`);
+    errors.push(`.github/workflows has ${wfFiles.length} workflow files (limit: 5)`);
+  }
+}
+
+// 7. Strict Zero-CJK scan outside UI i18n paths
+const textFiles = walkFiles(root, (name) => {
+  const ext = path.extname(name).toLowerCase();
+  return TEXT_EXTENSIONS.has(ext) || name === ".gitattributes" || name === ".gitignore";
+});
+
+for (const file of textFiles) {
+  const relUnix = path.relative(root, file).replace(/\\/g, "/");
+  if (I18N_EXEMPT_REGEXES.some((re) => re.test(relUnix))) continue;
+  const lines = fs.readFileSync(file, "utf8").split(/\r?\n/);
+  for (let i = 0; i < lines.length; i += 1) {
+    if (CJK_REGEX.test(lines[i])) {
+      errors.push(`Non-i18n CJK text forbidden: ${relUnix}:${i + 1}`);
+      break;
+    }
   }
 }
 
 if (errors.length > 0) {
-  console.error("Respire 架构护栏校验失败:");
+  console.error("Respire guardrail checks failed:");
   for (const err of errors) {
     console.error(`  - ${err}`);
   }
   process.exit(1);
 }
 
-console.log("Respire 架构护栏校验通过。");
+console.log(`Respire guardrails passed (0 violations across ${textFiles.length} scanned files).`);
