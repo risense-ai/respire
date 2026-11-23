@@ -29,3 +29,7 @@ npm-debug.log*
 .tmp/
 tmp/
 *.log
+
+# Reproducible SDK generation outputs
+/packages/runtime-sdk-go/contract.generated.go
+/packages/runtime-sdk-ts/src/contract.generated.ts

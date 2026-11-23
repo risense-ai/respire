@@ -1,0 +1,21 @@
+{
+  "name": "@respire/runtime-sdk",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": "./src/index.ts",
+  "scripts": {
+    "generate": "openapi-typescript ../../contracts/runtime-api/openapi.yaml -o src/contract.generated.ts",
+    "check": "tsc --noEmit",
+    "test": "tsx --test test/*.test.ts"
+  },
+  "dependencies": {
+    "openapi-fetch": "0.15.2"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3",
+    "openapi-typescript": "7.10.1",
+    "tsx": "4.20.6",
+    "@types/node": "22.19.0"
+  }
+}
