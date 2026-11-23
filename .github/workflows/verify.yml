@@ -5,18 +5,25 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+  issue_comment:
+    types: [created, edited]
   workflow_dispatch:
 
 permissions:
   contents: read
+  issues: write
+  pull-requests: read
+  statuses: write
 
 concurrency:
-  group: verify-${{ github.ref }}
-  cancel-in-progress: true
+  group: verify-${{ github.event.pull_request.number || github.event.issue.number || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   verify-guardrails:
     name: verify-guardrails
+    if: github.event_name != 'issue_comment'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -30,5 +37,67 @@ jobs:
         with:
           node-version: "22"
 
-      - name: Run architecture guardrails
+      - name: Run architecture & Zero-CJK guardrails
         run: node scripts/check-guardrails.mjs
+
+  verdict-gate:
+    name: verdict-gate
+    if: >-
+      github.event_name == 'pull_request' ||
+      (github.event_name == 'issue_comment' &&
+       github.event.issue.pull_request != null &&
+       contains(github.event.comment.body, 'respire-verdict:'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout trusted governance scripts from respire-resources
+        uses: actions/checkout@v4
+        with:
+          repository: risense-ai/respire-resources
+          ref: main
+          path: _resources
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Evaluate trusted Verifier verdict & publish commit status
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+        run: |
+          node _resources/process/scripts/respire-process.mjs verify-merge \
+            "risense-ai/respire#${PR_NUMBER}" \
+            --verdict-only \
+            --publish-status
+
+  evidence-register:
+    name: evidence-register
+    needs: [verify-guardrails]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout trusted governance scripts from respire-resources
+        uses: actions/checkout@v4
+        with:
+          repository: risense-ai/respire-resources
+          ref: main
+          path: _resources
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Register trusted post-merge Evidence & sync DAG
+        env:
+          GH_TOKEN: ${{ secrets.RESPIRE_BOT_TOKEN || github.token }}
+        run: |
+          node _resources/process/scripts/respire-process.mjs evidence-register \
+            --repo risense-ai/respire \
+            --sha "${{ github.sha }}" \
+            --run-id "${{ github.run_id }}"
