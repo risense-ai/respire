@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "source_repo": "risense-ai/respire-resources",
+  "ref": "main",
+  "commit": "8b0836da4e662dd340eec9d9f9b8440a3199fc45",
+  "openapi_path": "contracts/runtime-api/openapi.yaml",
+  "openapi_sha256": "f67512b992e7e46758093bc45b25b325f11e4084f5ba28a6051498be132fdd4b"
+}

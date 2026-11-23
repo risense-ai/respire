@@ -1,0 +1,31 @@
+# OS / Editors
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*.swo
+.vscode/
+.idea/
+
+# Rust
+**/target/
+**/*.rs.bk
+
+# Go / Wails / Installers
+**/build/bin/
+dist/
+*.exe~
+*.syso
+
+# Node / Playwright
+node_modules/
+test-results/
+playwright-report/
+.playwright/
+npm-debug.log*
+
+# Local Worktrees / Temp
+.worktrees/
+.tmp/
+tmp/
+*.log

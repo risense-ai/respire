@@ -1,0 +1,251 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  detect-changes:
+    name: detect-changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      runtime: ${{ steps.detect.outputs.runtime }}
+      cli: ${{ steps.detect.outputs.cli }}
+      client2: ${{ steps.detect.outputs.client2 }}
+      contracts: ${{ steps.detect.outputs.contracts }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Detect affected components
+        id: detect
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_BEFORE: ${{ github.event.before }}
+          EVENT_AFTER: ${{ github.event.after }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          run_all() {
+            echo "runtime=true" >> "$GITHUB_OUTPUT"
+            echo "cli=true" >> "$GITHUB_OUTPUT"
+            echo "client2=true" >> "$GITHUB_OUTPUT"
+            echo "contracts=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            run_all
+          fi
+
+          base=""
+          range_args=()
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            base="$PR_BASE_SHA"
+            range_args=("${base}...${PR_HEAD_SHA}")
+          elif [ "$EVENT_NAME" = "push" ]; then
+            case "$EVENT_BEFORE" in
+              0000000000000000000000000000000000000000) base="" ;;
+              *) base="$EVENT_BEFORE" ;;
+            esac
+            range_args=("$base" "$EVENT_AFTER")
+          fi
+
+          if [ -z "$base" ] || ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+            echo "No usable diff base; enabling all component checks."
+            run_all
+          fi
+
+          changed=$(git diff --name-only -z --no-renames "${range_args[@]}" | tr '\0' '\n')
+          echo "Changed files:"
+          printf '%s\n' "$changed"
+
+          match_path() {
+            grep -qE "$1" <<< "$changed"
+          }
+
+          runtime=false
+          cli=false
+          client2=false
+          contracts=false
+
+          if match_path '^apps/runtime/'; then runtime=true; fi
+          if match_path '^apps/cli/'; then cli=true; fi
+          if match_path '^apps/client2/'; then client2=true; fi
+          if match_path '^(contracts/|packages/|\.github/workflows/ci\.yml$|scripts/check-guardrails\.mjs$)'; then
+            contracts=true
+          fi
+
+          echo "runtime=$runtime" >> "$GITHUB_OUTPUT"
+          echo "cli=$cli" >> "$GITHUB_OUTPUT"
+          echo "client2=$client2" >> "$GITHUB_OUTPUT"
+          echo "contracts=$contracts" >> "$GITHUB_OUTPUT"
+
+  guardrails:
+    name: guardrails
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Run architecture guardrails
+        run: node scripts/check-guardrails.mjs
+
+  contract-check:
+    name: contract-check
+    needs: detect-changes
+    if: needs.detect-changes.outputs.contracts == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Verify synced OpenAPI 3.1 contract baseline
+        run: |
+          set -euo pipefail
+          grep -q '^openapi: 3\.1\.0' contracts/runtime-api/openapi.yaml
+          grep -q '^info:' contracts/runtime-api/openapi.yaml
+          grep -q '^paths:' contracts/runtime-api/openapi.yaml
+
+  runtime-ci:
+    name: runtime-ci
+    needs: detect-changes
+    if: needs.detect-changes.outputs.runtime == 'true' || needs.detect-changes.outputs.contracts == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Check Runtime manifest presence
+        id: manifest
+        run: |
+          if [ -f "apps/runtime/Cargo.toml" ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "apps/runtime/Cargo.toml not imported yet (pending OpenSpec 003); skipping Rust build."
+          fi
+
+      - name: Check Runtime workspace
+        if: steps.manifest.outputs.exists == 'true'
+        run: cargo check --manifest-path apps/runtime/Cargo.toml --locked
+
+  cli-ci:
+    name: cli-ci
+    needs: detect-changes
+    if: needs.detect-changes.outputs.cli == 'true' || needs.detect-changes.outputs.contracts == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Check CLI manifest presence
+        id: manifest
+        run: |
+          if [ -f "apps/cli/Cargo.toml" ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "apps/cli/Cargo.toml not imported yet (pending OpenSpec 003); skipping Rust build."
+          fi
+
+      - name: Check CLI workspace
+        if: steps.manifest.outputs.exists == 'true'
+        run: cargo check --manifest-path apps/cli/Cargo.toml --locked
+
+  client2-ci:
+    name: client2-ci
+    needs: detect-changes
+    if: needs.detect-changes.outputs.client2 == 'true' || needs.detect-changes.outputs.contracts == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Check Client2 go.mod presence
+        id: manifest
+        run: |
+          if [ -f "apps/client2/go.mod" ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "apps/client2/go.mod not imported yet (pending OpenSpec 003); skipping Go test."
+          fi
+
+      - name: Setup Go
+        if: steps.manifest.outputs.exists == 'true'
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: apps/client2/go.mod
+
+      - name: Run Client2 Go vet and tests
+        if: steps.manifest.outputs.exists == 'true'
+        working-directory: apps/client2
+        run: |
+          go vet ./...
+          go test ./...
+
+  ci-gate:
+    name: ci-gate
+    needs: [detect-changes, guardrails, contract-check, runtime-ci, cli-ci, client2-ci]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Aggregate required job results
+        shell: bash
+        env:
+          DETECT: ${{ needs.detect-changes.result }}
+          GUARDRAILS: ${{ needs.guardrails.result }}
+          CONTRACTS: ${{ needs.contract-check.result }}
+          RUNTIME: ${{ needs.runtime-ci.result }}
+          CLI: ${{ needs.cli-ci.result }}
+          CLIENT2: ${{ needs.client2-ci.result }}
+        run: |
+          set -euo pipefail
+          for name in DETECT GUARDRAILS CONTRACTS RUNTIME CLI CLIENT2; do
+            val="${!name}"
+            echo "$name=$val"
+            if [ "$val" != "success" ] && [ "$val" != "skipped" ]; then
+              echo "::error::Gate failed because $name ended with '$val'"
+              exit 1
+            fi
+          done
+          echo "All triggered CI jobs passed (untouched components skipped)."
