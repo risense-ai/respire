@@ -93,7 +93,7 @@ jobs:
           if match_path '^apps/runtime/'; then runtime=true; fi
           if match_path '^apps/cli/'; then cli=true; fi
           if match_path '^apps/client2/'; then client2=true; fi
-          if match_path '^(contracts/|packages/|\.github/workflows/ci\.yml$|scripts/check-guardrails\.mjs$)'; then
+          if match_path '^(contracts/|packages/|\.github/workflows/ci\.yml$|scripts/(check-guardrails|sync-contracts(\.test)?)\.mjs$)'; then
             contracts=true
           fi
 
@@ -126,19 +126,58 @@ jobs:
     needs: detect-changes
     if: needs.detect-changes.outputs.contracts == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           persist-credentials: false
 
-      - name: Verify synced OpenAPI 3.1 contract baseline
+      - name: Checkout contract source
+        uses: actions/checkout@v4
+        with:
+          repository: risense-ai/respire-resources
+          ref: main
+          path: contract-source
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Verify contract snapshot and lock
         run: |
-          set -euo pipefail
-          grep -q '^openapi: 3\.1\.0' contracts/runtime-api/openapi.yaml
-          grep -q '^info:' contracts/runtime-api/openapi.yaml
-          grep -q '^paths:' contracts/runtime-api/openapi.yaml
+          node scripts/sync-contracts.mjs --check contract-source
+          node --test scripts/sync-contracts.test.mjs
+
+      - name: Generate and test the Rust SDK
+        run: |
+          rustup toolchain install 1.95.0 --profile minimal
+          cargo +1.95.0 test --locked --manifest-path packages/runtime-sdk-rs/Cargo.toml
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: packages/runtime-sdk-go/go.mod
+          cache-dependency-path: packages/runtime-sdk-go/go.sum
+
+      - name: Generate and test the Go SDK
+        working-directory: packages/runtime-sdk-go
+        env:
+          GOTOOLCHAIN: local
+          GOFLAGS: -mod=readonly
+        run: |
+          go generate ./...
+          go test ./...
+
+      - name: Generate and test the TypeScript SDK
+        working-directory: packages/runtime-sdk-ts
+        run: |
+          npm ci --ignore-scripts
+          npm run generate
+          npm run check
+          npm test
+
 
   core-ci:
     name: core-ci
