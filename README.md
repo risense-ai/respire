@@ -32,3 +32,7 @@ Open-source Monorepo hosting Respire's four product components and generated con
 ```sh
 node scripts/check-guardrails.mjs
 ```
+
+## License
+
+Published under the [Respire Noncommercial License 1.0](LICENSE). Commercial use requires a separate written license — see [COMMERCIAL-LICENSE.md](COMMERCIAL-LICENSE.md). All third-party dependency licenses and attribution notices remain preserved.
