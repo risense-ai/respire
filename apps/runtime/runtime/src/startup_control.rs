@@ -1,4 +1,5 @@
 //! Hold only the historical installation startup exclusion for a local host.
+//! The same OS user already has access to this installation lock.
 //! This grants no maintenance, launch, credential, or business authority.
 #[cfg(test)]
 mod tests;
@@ -17,10 +18,13 @@ use std::{
 };
 use wire::{Acquire, Endpoint, Finish, Held, Released, MAX_FRAME, SCHEMA};
 
+const STARTUP_HOLD_TIMEOUT: Duration = Duration::from_secs(90);
+
 pub(crate) fn run() -> Result<i32> {
     let request: Acquire = read_frame(&mut std::io::stdin().lock())?;
     validate_controller(&request)?;
-    // Parent liveness also bounds a wait behind an older compatible CLI.
+    // Same-user coordination only. The supplied PID and birth are a liveness
+    // check, not authenticated parent identity or a grant to touch the serving store.
     let pid = request.controller_pid;
     let birth = request.controller_birth.clone();
     std::thread::Builder::new()
@@ -61,9 +65,7 @@ pub(crate) fn run() -> Result<i32> {
         "startup configuration changed while waiting for exclusion"
     );
     write_frame(&mut std::io::stdout().lock(), &held)?;
-    let finish = finish_receive
-        .recv()
-        .context("startup input disconnected")?;
+    let finish = wait_for_finish(&finish_receive, STARTUP_HOLD_TIMEOUT)?;
     anyhow::ensure!(
         finish.guard_id == held.guard_id,
         "startup guard ID mismatch"
@@ -87,6 +89,18 @@ pub(crate) fn run() -> Result<i32> {
         },
     )?;
     Ok(0)
+}
+
+fn wait_for_finish(input: &std::sync::mpsc::Receiver<Finish>, timeout: Duration) -> Result<Finish> {
+    match input.recv_timeout(timeout) {
+        Ok(finish) => Ok(finish),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            anyhow::bail!("startup exclusion timed out")
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            anyhow::bail!("startup input disconnected")
+        }
+    }
 }
 
 fn validate_controller(request: &Acquire) -> Result<()> {

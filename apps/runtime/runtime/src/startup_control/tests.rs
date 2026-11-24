@@ -246,3 +246,10 @@ fn endpoint_receipt_requires_same_process_profile_account_and_publication() -> R
     .is_err());
     Ok(())
 }
+
+#[test]
+fn finish_wait_expires_with_a_connected_controller() {
+    let (_active_sender, receiver) = std::sync::mpsc::sync_channel(1);
+    let error = super::wait_for_finish(&receiver, Duration::ZERO).expect_err("held wait timed out");
+    assert!(error.to_string().contains("exclusion timed out"));
+}
