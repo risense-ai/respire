@@ -269,14 +269,20 @@ fn response_after_client_deadline_reports_unknown_and_can_be_inspected_without_r
         std::env::set_var("RSRS_DATA_DIR", directory.path());
         std::env::remove_var("RSRS_RPC_TOKEN");
         let test_root = directory.path().to_path_buf();
+        let fixture_budget = Duration::from_secs(5);
+        let request_deadline = Duration::from_millis(250);
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
         let actor = std::thread::spawn(move || -> Result<String> {
+            ready_tx.send(())?;
             fn receive_rpc(
                 server: &loopback_http::Server,
                 root: &std::path::Path,
+                fixture_budget: Duration,
             ) -> Result<loopback_http::Request> {
                 loop {
                     let request = server
-                        .recv_timeout(Duration::from_secs(2))?
+                        .recv_timeout(fixture_budget)?
                         .ok_or_else(|| anyhow::anyhow!("RPC never arrived"))?;
                     if request.url() == "/api/health" {
                         request.reply(json!({
@@ -288,7 +294,7 @@ fn response_after_client_deadline_reports_unknown_and_can_be_inspected_without_r
                     }
                 }
             }
-            let request = receive_rpc(&server, &test_root)?;
+            let request = receive_rpc(&server, &test_root, fixture_budget)?;
             let write: Value = serde_json::from_slice(request.body())?;
             anyhow::ensure!(write["method"] == method, "unexpected first request");
             anyhow::ensure!(
@@ -305,12 +311,12 @@ fn response_after_client_deadline_reports_unknown_and_can_be_inspected_without_r
                 .as_str()
                 .ok_or_else(|| anyhow::anyhow!("missing operation ID"))?
                 .to_owned();
-            // Simulated committed write returns after the shortened client deadline.
-            std::thread::sleep(Duration::from_millis(150));
+            // Health has its own budget; release this response only after dispatch times out.
+            release_rx.recv_timeout(fixture_budget)?;
             let _ = request.reply(
                 json!({"v":1,"id":id,"ok":true}).to_string());
             let inspect = server
-                .recv_timeout(Duration::from_secs(2))?
+                .recv_timeout(fixture_budget)?
                 .ok_or_else(|| anyhow::anyhow!("result query never arrived"))?;
             anyhow::ensure!(
                 inspect.url() == "/api/rpc",
@@ -345,10 +351,11 @@ fn response_after_client_deadline_reports_unknown_and_can_be_inspected_without_r
             Ok(operation_id)
         });
         let result = (|| -> Result<()> {
+            ready_rx.recv_timeout(fixture_budget)?;
             let error = rpc_method_with_timeout(
                 method,
                 vec!["remember".into(), "synthetic write".into()],
-                Some(Duration::from_millis(50)),
+                Some(request_deadline),
             )
             .err()
             .ok_or_else(|| {
@@ -374,6 +381,7 @@ fn response_after_client_deadline_reports_unknown_and_can_be_inspected_without_r
                 rpc_method("runtime.result", vec![operation.operation_id.clone()]).is_err(),
                 "result query without original context must fail before contacting runtime"
             );
+            release_tx.send(())?;
             let inspected = rpc_result(&operation)?;
             anyhow::ensure!(
                 inspected["envelope"]["summary"]["state"] == "completed",

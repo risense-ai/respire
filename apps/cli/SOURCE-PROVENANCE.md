@@ -45,8 +45,11 @@ whole crate would break real host callers.
 acknowledgement. `model_granite.rs` still has a frontend installer caller.
 Both files were restored from the same source commit after inspecting their
 callers. Their migration is outstanding, rather than silently disabling the
-commands. SQLite ownership locks and the authenticated client host HTTP
-boundary also remain unchanged pending a compatible replacement.
+commands. SQLite ownership locks and Vault custody remain pending a compatible
+Runtime authority. The import continuation removed the production CLI host HTTP
+listener and both `tiny_http` dependencies. `client2-host-prototype` remains an
+empty build feature; the retired private launcher entry points report failure.
+Ordinary CLI startup selects an independent Runtime, never a CLI server shim.
 
 Chinese recall-fusion UI strings were moved verbatim into
 `crates/commands/src/i18n/cli_zh.rs`. The synthetic Unicode path fixture lives
@@ -59,6 +62,14 @@ Frozen legacy `contracts/runtime-control` fixtures and consumer assertions
 were extracted from this same commit into ignored `target/contracts` only.
 Tests require `RSRS_CONTRACT_FIXTURES` to name that directory explicitly.
 No duplicate contracts were added to the product source or canonical contracts.
+
+HTTP regressions now share `test-support/loopback_http.rs`, compiled only by
+test targets. This synthetic fixture accepts empty TCP connectivity probes
+before HTTP health requests; incomplete HTTP headers still fail explicitly.
+The ambiguous-write regression gives fixture readiness a separate budget and
+withholds the write reply until the client dispatch deadline has expired.
+It preserves operation scope, result inspection, and no-replay assertions.
+This fixture is not evidence of packaged Client2 or real Runtime acceptance.
 
 First-party imports use the repository's [Respire Noncommercial License
 1.0](../../LICENSE). Third-party components retain their original licenses.

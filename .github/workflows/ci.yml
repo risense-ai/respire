@@ -448,6 +448,13 @@ jobs:
             cargo +1.95.0 test --locked -p respire --features client2-host-prototype --lib "$suite"
           done
 
+      # These fixtures use disposable profiles and synthetic images, not a Runtime bundle.
+      - name: Test isolated Runtime resolution and lifecycle
+        run: |
+          for suite in rpc::runtime_resolution_tests:: autostart::lifecycle::tests::; do
+            cargo +1.95.0 test --locked -p respire --features client2-host-prototype --lib "$suite"
+          done
+
       - name: Test account and space rejection contracts
         shell: pwsh
         run: |

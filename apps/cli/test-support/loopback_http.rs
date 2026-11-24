@@ -27,7 +27,14 @@ impl Server {
         let deadline = Instant::now() + timeout;
         loop {
             match self.listener.accept() {
-                Ok((socket, _)) => return Request::read(socket, timeout).map(Some),
+                Ok((socket, _)) => {
+                    if let Some(request) = Request::read(socket, timeout)? {
+                        return Ok(Some(request));
+                    }
+                    if Instant::now() >= deadline {
+                        return Ok(None);
+                    }
+                }
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                     if Instant::now() >= deadline {
                         return Ok(None);
@@ -48,7 +55,7 @@ pub struct Request {
 }
 
 impl Request {
-    fn read(socket: TcpStream, timeout: Duration) -> io::Result<Self> {
+    fn read(socket: TcpStream, timeout: Duration) -> io::Result<Option<Self>> {
         socket.set_nonblocking(false)?;
         socket.set_read_timeout(Some(timeout))?;
         socket.set_write_timeout(Some(timeout))?;
@@ -56,7 +63,14 @@ impl Request {
         let mut raw = Vec::new();
         while !raw.ends_with(b"\r\n\r\n") {
             let remaining = 8192usize - raw.len();
-            if remaining == 0 || (&mut reader).take(remaining as u64).read_until(b'\n', &mut raw)? == 0 {
+            if remaining == 0 {
+                return Err(io::Error::other("incomplete fixture request headers"));
+            }
+            if (&mut reader).take(remaining as u64).read_until(b'\n', &mut raw)? == 0 {
+                // Runtime health probes connect and close without sending HTTP.
+                if raw.is_empty() {
+                    return Ok(None);
+                }
                 return Err(io::Error::other("incomplete fixture request headers"));
             }
         }
@@ -82,7 +96,7 @@ impl Request {
         }
         let mut body = vec![0; length.unwrap_or(0)];
         reader.read_exact(&mut body)?;
-        Ok(Self { socket: reader.into_inner(), path, headers, body })
+        Ok(Some(Self { socket: reader.into_inner(), path, headers, body }))
     }
 
     pub fn into_stream(self) -> TcpStream {
@@ -124,5 +138,30 @@ impl Request {
         }
         self.socket.write_all(b"\r\n")?;
         self.socket.write_all(body)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_probe_is_not_an_http_request_but_partial_headers_are_an_error() -> io::Result<()> {
+        let server = Server::bind()?;
+        drop(TcpStream::connect(server.addr())?);
+        let mut client = TcpStream::connect(server.addr())?;
+        client.write_all(b"GET /api/health HTTP/1.1\r\nHost: localhost\r\n\r\n")?;
+        let request = server.recv_timeout(Duration::from_secs(5))?
+            .ok_or_else(|| io::Error::other("health request never arrived after TCP probe"))?;
+        assert_eq!(request.url(), "/api/health");
+        request.reply("{}")?;
+
+        let mut partial = TcpStream::connect(server.addr())?;
+        partial.write_all(b"GET /api/health HTTP/1.1\r\n")?;
+        partial.shutdown(std::net::Shutdown::Write)?;
+        let error = server.recv_timeout(Duration::from_secs(5)).err()
+            .ok_or_else(|| io::Error::other("partial HTTP request was discarded"))?;
+        assert_eq!(error.to_string(), "incomplete fixture request headers");
+        Ok(())
     }
 }
