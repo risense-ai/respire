@@ -1,0 +1,19 @@
+[package]
+name = "respire_protocol"
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.88"
+description = "respire wire protocol and serde-only domain types"
+license-file = "../../SOURCE-INTERFACE-LICENSE.txt"
+repository = "https://github.com/risense-ai/respire"
+publish = false
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[dev-dependencies]
+anyhow = "1.0"
+
+[lints.rust]
+unsafe_code = "forbid"

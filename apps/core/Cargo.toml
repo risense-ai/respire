@@ -1,0 +1,22 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/protocol",
+    "crates/memory-core",
+    "crates/core-ffi",
+]
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
+panic = "abort"
+
+[profile.sdk]
+inherits = "release"
+panic = "unwind"
+lto = false
+strip = "debuginfo"
+
+[patch.crates-io]
+tokenizers = { path = "vendor/tokenizers" }

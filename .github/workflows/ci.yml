@@ -184,26 +184,39 @@ jobs:
     needs: detect-changes
     if: needs.detect-changes.outputs.core == 'true' || needs.detect-changes.outputs.contracts == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 45
+    env:
+      RUST_TEST_THREADS: "1"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           persist-credentials: false
 
-      - name: Check Core manifest presence
-        id: manifest
+      - name: Install the matching Rust toolchain
         run: |
-          if [ -f "apps/core/Cargo.toml" ]; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-            echo "apps/core/Cargo.toml not imported yet (pending OpenSpec 003/004); skipping Rust build."
-          fi
+          rustup toolchain install 1.95.0 --profile minimal
+          rustup override set 1.95.0
 
-      - name: Check Core workspace
-        if: steps.manifest.outputs.exists == 'true'
-        run: cargo check --manifest-path apps/core/Cargo.toml --locked
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Prepare verified public model fixtures
+        timeout-minutes: 12
+        shell: bash
+        run: |
+          set -euo pipefail
+          fixtures="$RUNNER_TEMP/core-m3-fixtures"
+          node apps/core/scripts/prepare-test-fixtures.mjs "$fixtures"
+          {
+            printf 'RSRS_CORE_TEST_MODEL_DIR=%s\n' "$fixtures"
+            printf 'RSRS_CORE_TEST_ORT_FILE=%s\n' "$fixtures/onnx/model_quantized.cpu-v1.ort"
+          } >> "$GITHUB_ENV"
+
+      - name: Test the Core workspace
+        run: cargo test --manifest-path apps/core/Cargo.toml --locked
 
   runtime-ci:
     name: runtime-ci

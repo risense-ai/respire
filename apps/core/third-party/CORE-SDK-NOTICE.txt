@@ -1,0 +1,9 @@
+Respire Core SDK
+
+SDK use, linking and redistribution terms are provided in LICENSE.txt.
+Preserve that license and the accompanying third-party notices when distributing
+applications that include the SDK.
+
+Third-party components retain their respective licenses. Their notices and the
+dependency inventory are included in the SDK. Model weights are downloaded
+separately and retain their upstream licenses and model cards.

@@ -1,0 +1,11 @@
+mlx-rs, mlx-macros and mlx-internal-macros 0.33.0
+
+The published crates omit their workspace license files. Their
+.cargo_vcs_info.json files identify source revision:
+01595fc4e05648175e4b52a5c209955ecdfb7638
+
+The accompanying mlx-rs-LICENSE-MIT.txt and mlx-rs-LICENSE-APACHE.txt
+are verbatim copies from that revision:
+https://github.com/oxiglade/mlx-rs/tree/01595fc4e05648175e4b52a5c209955ecdfb7638
+
+Package-specific copies are also included under notices/rust/ in the SDK.
