@@ -2372,8 +2372,11 @@ dependencies = [
 name = "respire_spawn"
 version = "1.0.10"
 dependencies = [
+ "getrandom 0.3.4",
+ "hmac",
  "libc",
  "libloading",
+ "sha2",
  "windows-sys 0.61.2",
 ]
 

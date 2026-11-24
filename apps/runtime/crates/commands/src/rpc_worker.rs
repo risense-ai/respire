@@ -358,6 +358,17 @@ impl WriteGate {
         state.held = true;
         WriteGuard(self)
     }
+    // Scoped HTTP never waits behind an existing writer from the dispatch
+    // loop. Preserve the priority of every previously reserved legacy writer.
+    pub(crate) fn try_owner_foreground(&self) -> Option<WriteGuard<'_>> {
+        let mut state = self.state.try_lock().ok()?;
+        if state.held || state.foreground != 0 {
+            return None;
+        }
+        state.held = true;
+        Some(WriteGuard(self))
+    }
+
     pub(crate) fn acquire_foreground_unless(&self, cancelled: impl Fn() -> bool) -> Option<WriteGuard<'_>> {
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         state.foreground += 1;

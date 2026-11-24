@@ -3,6 +3,59 @@
 //! Split-era home: this module serves both the CLI-hosted runtime and the
 //! standalone `rsrs-runtime` binary through `respire_commands`; host-specific
 //! concerns (MCP bridge, managed-registration id) arrive via `host_hooks`.
+mod legacy_rpc;
+mod v1;
+pub(crate) use v1::owner_control::start_dispatch as start_owner_dispatch;
+#[cfg(test)]
+mod tests;
+
+enum Denied {
+    Token,
+    Host,
+    Origin,
+}
+
+fn authorize(request: &HttpRequest, bound: SocketAddr) -> Result<(), Denied> {
+    if !token_ok(request) {
+        return Err(Denied::Token);
+    }
+    let host = header_value(request, "Host");
+    let authority = bound.to_string();
+    let default_port_host = bound.port() == 80
+        && (host.eq_ignore_ascii_case("localhost")
+            || authority
+                .strip_suffix(":80")
+                .is_some_and(|canonical| host.eq_ignore_ascii_case(canonical)));
+    if !host.eq_ignore_ascii_case(&authority)
+        && !host.eq_ignore_ascii_case(&format!("localhost:{}", bound.port()))
+        && !default_port_host
+    {
+        return Err(Denied::Host);
+    }
+    if !crate::net_rpc::origin_ok(&header_value(request, "Origin"), &format!("http://{bound}")) {
+        return Err(Denied::Origin);
+    }
+    Ok(())
+}
+
+fn request_metadata(parts: &axum::http::request::Parts, peer: SocketAddr) -> Option<HttpRequest> {
+    let method = parts.method.as_str().parse::<tiny_http::Method>().ok()?;
+    Some(HttpRequest {
+        method,
+        url: parts.uri.to_string(),
+        headers: parts
+            .headers
+            .iter()
+            .filter_map(|(key, value)| {
+                tiny_http::Header::from_bytes(key.as_str(), value.as_bytes()).ok()
+            })
+            .collect(),
+        peer,
+        body: std::io::Cursor::new(Vec::new()),
+    })
+}
+
+
 use serde_json::json;
 use std::io::Read;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
@@ -148,53 +201,21 @@ fn mcp_http(
     })
 }
 
-fn dispatch_rpc(body: &[u8], action: impl FnOnce(crate::rpc_serve::RpcResponse) + Send + 'static) -> anyhow::Result<()> {
-    crate::rpc_serve::handle_http_rpc_deferred(body, action)
-}
-fn dispatch_rpc_sync(body: &[u8]) -> anyhow::Result<crate::rpc_serve::RpcResponse> {
-    crate::rpc_serve::handle_http_rpc(body)
-}
-
 fn handle_request(req: &mut HttpRequest, bound: SocketAddr) -> (u16, &'static str, Vec<u8>) {
     let url = req.url().to_owned();
     let method = req.method().to_owned();
 
-    // Only actual loopback peers are exempt; Host and forwarded headers are ignored.
-    if !token_ok(req) {
+    // Preserve legacy status/response bodies while sharing the exact admission gate.
+    if let Err(denied) = authorize(req, bound) {
+        let (status, message) = match denied {
+            Denied::Token => (401, "unauthorized: send Authorization: Bearer or X-respire-Token"),
+            Denied::Host => (403, "forbidden host"),
+            Denied::Origin => (403, "forbidden origin"),
+        };
         return (
-            401,
+            status,
             "application/json; charset=utf-8",
-            serde_json::json!({"error":"unauthorized: send Authorization: Bearer or X-respire-Token"}).to_string().into_bytes(),
-        );
-    }
-
-    let host = header_value(req, "Host");
-    let authority = bound.to_string();
-    let default_port_host = bound.port() == 80
-        && (host.eq_ignore_ascii_case("localhost")
-            || authority
-                .strip_suffix(":80")
-                .is_some_and(|canonical| host.eq_ignore_ascii_case(canonical)));
-    if !host.eq_ignore_ascii_case(&authority)
-        && !host.eq_ignore_ascii_case(&format!("localhost:{}", bound.port()))
-        && !default_port_host
-    {
-        return (
-            403,
-            "application/json; charset=utf-8",
-            serde_json::json!({"error":"forbidden host"})
-                .to_string()
-                .into_bytes(),
-        );
-    }
-    let origin = header_value(req, "Origin");
-    if !crate::net_rpc::origin_ok(&origin, &format!("http://{bound}")) {
-        return (
-            403,
-            "application/json; charset=utf-8",
-            serde_json::json!({"error":"forbidden origin"})
-                .to_string()
-                .into_bytes(),
+            json!({"error": message}).to_string().into_bytes(),
         );
     }
     let path = url.split('?').next().unwrap_or(url.as_str());
@@ -296,45 +317,8 @@ fn handle_request(req: &mut HttpRequest, bound: SocketAddr) -> (u16, &'static st
             .into_bytes(),
         );
     }
-    if path == "/api/rpc" && method == tiny_http::Method::Post {
-        let mut body = String::new();
-        if req
-            .as_reader()
-            .take(MAX_BODY + 1)
-            .read_to_string(&mut body)
-            .is_err()
-        {
-            return (
-                400,
-                "application/json; charset=utf-8",
-                serde_json::json!({"error":"request body unreadable"})
-                    .to_string()
-                    .into_bytes(),
-            );
-        }
-        if body.len() as u64 > MAX_BODY {
-            return (
-                413,
-                "application/json; charset=utf-8",
-                json!({"error":"request body exceeds runtime frame limit"})
-                    .to_string()
-                    .into_bytes(),
-            );
-        }
-        return match dispatch_rpc_sync(body.as_bytes()) {
-            Ok(response) => (
-                200,
-                "application/json; charset=utf-8",
-                serde_json::to_vec(&response).unwrap_or_default(),
-            ),
-            Err(error) => (
-                400,
-                "application/json; charset=utf-8",
-                serde_json::json!({"error": error.to_string()})
-                    .to_string()
-                    .into_bytes(),
-            ),
-        };
+    if legacy_rpc::matches(&method, path) {
+        return legacy_rpc::synchronous(req);
     }
     if path == "/mcp" || path == "/sse" {
         return mcp_http(req, &method, path, bound);
@@ -407,6 +391,13 @@ pub(crate) fn shutdown() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn router(bound: SocketAddr) -> axum::Router {
+    axum::Router::new()
+        .fallback(serve_request)
+        .with_state(bound)
+        .merge(v1::router(bound))
+}
+
 pub fn serve_loop(server: std::net::TcpListener) -> anyhow::Result<()> {
     let bound = server.local_addr()?;
     let (finished, drained) = std::sync::mpsc::sync_channel(1);
@@ -421,9 +412,7 @@ pub fn serve_loop(server: std::net::TcpListener) -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("HTTP shutdown state unavailable"))?;
     crate::network::runtime()?.block_on(async move {
         let listener = tokio::net::TcpListener::from_std(server)?;
-        let app = axum::Router::new()
-            .fallback(serve_request)
-            .with_state(bound);
+        let app = router(bound);
         axum::serve(
             crate::network::Listener(listener),
             app.into_make_service_with_connect_info::<crate::network::Peer>(),
@@ -468,28 +457,8 @@ async fn serve_request(
     request: axum::extract::Request,
 ) -> axum::response::Response {
     let (parts, body) = request.into_parts();
-    let method = match parts.method.as_str().parse::<tiny_http::Method>() {
-        Ok(method) => method,
-        Err(_) => {
-            return response(
-                400,
-                "application/json",
-                b"{\"error\":\"invalid method\"}".to_vec(),
-            )
-        }
-    };
-    let mut local = HttpRequest {
-        method,
-        url: parts.uri.to_string(),
-        headers: parts
-            .headers
-            .iter()
-            .filter_map(|(key, value)| {
-                tiny_http::Header::from_bytes(key.as_str(), value.as_bytes()).ok()
-            })
-            .collect(),
-        peer,
-        body: std::io::Cursor::new(Vec::new()),
+    let Some(mut local) = request_metadata(&parts, peer) else {
+        return response(400, "application/json", br#"{"error":"invalid method"}"#.to_vec());
     };
     if !request_authorized(&local, bound) {
         let (status, content_type, bytes) = handle_request(&mut local, bound);
@@ -518,46 +487,12 @@ async fn serve_request(
         }
     };
     let path = local.url().split('?').next().unwrap_or("").to_owned();
-    if local.method() == &tiny_http::Method::Post && path == "/api/rpc" {
-        let (send, receive) = tokio::sync::oneshot::channel();
-        // The completion callback only sends an in-memory result. Hyper owns
-        // response ordering and all socket backpressure in its async task.
-        // Admission may wait for a business gate; never block a network worker.
-        match tokio::task::spawn_blocking(move || {
-            dispatch_rpc(&bytes, move |value| {
-                let _ = send.send(value);
-            })
-        })
-        .await
-        {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => {
-                return response(
-                    400,
-                    "application/json",
-                    json!({"error": error.to_string()}).to_string().into_bytes(),
-                )
-            }
-            Err(_) => {
-                return response(
-                    503,
-                    "application/json",
-                    b"{\"error\":\"runtime admission unavailable\"}".to_vec(),
-                )
-            }
+    if legacy_rpc::matches(local.method(), &path) {
+        #[cfg(test)]
+        if let Some(observer) = parts.extensions.get::<tests::LegacyBodyObserver>() {
+            observer.record(&path, &bytes);
         }
-        return match receive.await {
-            Ok(value) => response(
-                200,
-                "application/json; charset=utf-8",
-                serde_json::to_vec(&value).unwrap_or_default(),
-            ),
-            Err(_) => response(
-                503,
-                "application/json",
-                b"{\"error\":\"runtime reply unavailable\"}".to_vec(),
-            ),
-        };
+        return legacy_rpc::deferred(bytes).await;
     }
     local.body = std::io::Cursor::new(bytes.to_vec());
     // Health and stop also acquire synchronous state locks.
@@ -576,16 +511,5 @@ async fn serve_request(
 }
 
 fn request_authorized(request: &HttpRequest, bound: SocketAddr) -> bool {
-    let host = header_value(request, "Host");
-    let authority = bound.to_string();
-    let default_port_host = bound.port() == 80
-        && (host.eq_ignore_ascii_case("localhost")
-            || authority
-                .strip_suffix(":80")
-                .is_some_and(|canonical| host.eq_ignore_ascii_case(canonical)));
-    token_ok(request)
-        && (host.eq_ignore_ascii_case(&authority)
-            || host.eq_ignore_ascii_case(&format!("localhost:{}", bound.port()))
-            || default_port_host)
-        && crate::net_rpc::origin_ok(&header_value(request, "Origin"), &format!("http://{bound}"))
+    authorize(request, bound).is_ok()
 }

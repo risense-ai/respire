@@ -119,6 +119,7 @@ struct RuntimeSession {
     session: String,
     keys: SessionKeys,
     owner: Option<String>,
+    authority_epoch: uuid::Uuid,
 }
 
 static RUNTIME_SESSION: std::sync::Mutex<Option<RuntimeSession>> = std::sync::Mutex::new(None);
@@ -177,6 +178,7 @@ fn supply_runtime_session_inner(mut input: respire_protocol::credentials::Runtim
     let session = RuntimeSession {
         profile: input.profile.canonicalize()?, session: session_digest(&data)?, keys,
         owner: (!user.trim().is_empty()).then(|| user.to_owned()),
+        authority_epoch: uuid::Uuid::new_v4(),
     };
     let mut current = RUNTIME_SESSION.lock().map_err(|_| anyhow!("runtime session lock poisoned"))?;
     match update {
@@ -185,6 +187,25 @@ fn supply_runtime_session_inner(mut input: respire_protocol::credentials::Runtim
     }
     *current = Some(session);
     Ok(())
+}
+
+/// Run a serving-only operation against the already verified, unlocked local
+/// owner, without loading a keyring or exposing unlocked key material. The
+/// caller must hold the Runtime identity fence and must not re-enter session I/O.
+pub fn with_runtime_session_owner<T>(
+    canonical_profile: &std::path::Path,
+    action: impl FnOnce(&str, uuid::Uuid) -> T,
+) -> Result<Option<T>> {
+    let unlocked = RUNTIME_SESSION.lock().map_err(|_| anyhow!("runtime session lock poisoned"))?;
+    let Some(session) = unlocked.as_ref() else { return Ok(None); };
+    let Some(owner) = session.owner.as_deref() else { return Ok(None); };
+    if session.profile != canonical_profile
+        || crate::service::data_dir().canonicalize()? != canonical_profile
+        || session.session != session_digest(&read_session_json()?)?
+    {
+        return Ok(None);
+    }
+    Ok(Some(action(owner, session.authority_epoch)))
 }
 
 pub fn clear_runtime_session() -> Result<()> {

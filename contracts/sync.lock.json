@@ -2,9 +2,9 @@
   "schema_version": 1,
   "source_repo": "risense-ai/respire-resources",
   "ref": "main",
-  "commit": "8da76192b2034f8defbe8cb16b434b1b74a7888f",
+  "commit": "ada68167957672a2d1371596d3ae8c666c58b3a9",
   "openapi_path": "contracts/runtime-api/openapi.yaml",
-  "openapi_sha256": "4d66c4f9257b3bfab44b8face79e7d0e65659dacfc715678f7472cfaa9992348",
+  "openapi_sha256": "c75dd276f2e91f946f73cc7f0732f16964e3f03b11821c5c6ada54556f4d7944",
   "fixtures_sha256": {
     "contracts/runtime-api/fixtures/memory-item.json": "10d8a27995271982747acbf56cb820eb492d544c23b498f915e9199f3b1850e0",
     "contracts/runtime-api/fixtures/model-catalog-response.json": "86741f6e4a5d4b78eb2f6950381ee87354709db32388923924323a4fdb3f7176",
