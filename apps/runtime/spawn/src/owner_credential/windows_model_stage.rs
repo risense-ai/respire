@@ -82,18 +82,13 @@ impl ModelStage {
             }
         };
         let writer = File::from(file);
+        let result = writer.try_clone();
         self.files.push(StagedFile {
             name,
             identity,
             writer: Some(writer),
         });
-        self.files
-            .last()
-            .unwrap()
-            .writer
-            .as_ref()
-            .unwrap()
-            .try_clone()
+        result
     }
 
     pub fn seal(&self) -> io::Result<()> {

@@ -40,7 +40,7 @@ impl Scratch {
                 Err(error) => return Err(error),
             }
         }
-        Err(io::Error::from(io::ErrorKind::AlreadyExists));
+        Err(io::Error::from(io::ErrorKind::AlreadyExists))
     }
     fn instance(&self, id: &str) -> PathBuf {
         let name = directory_name(id).unwrap();
