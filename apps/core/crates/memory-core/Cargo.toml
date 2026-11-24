@@ -1,0 +1,46 @@
+[package]
+name = "respire_core"
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.88"
+description = "Respire algorithms, retrieval and model execution"
+license-file = "../../LICENSE"
+repository = "https://github.com/risense-ai/respire"
+publish = false
+
+[features]
+default = ["cpu-owned-ort-experiment"]
+native-fault-tests = []
+cpu-owned-ort-experiment = []
+mlx = ["dep:mlx-rs", "dep:safetensors"]
+
+[dependencies]
+respire_protocol = { path = "../protocol" }
+anyhow = "1.0"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+# BGE-M3 uses Unigram. Keep esaxx_fast disabled: its /MT CRT conflicts with ORT's /MD CRT.
+# Do not enable load-dynamic: it changes runtime DLL loading. ORT retains download-binaries and copy-dylibs.
+tokenizers = { version = "0.23.1", default-features = false, features = ["onig"] }
+[target.'cfg(not(all(target_os = "macos", target_arch = "x86_64")))'.dependencies]
+ort = { version = "=2.0.0-rc.13", features = ["download-binaries"] }
+ort-sys = { version = "=2.0.0-rc.13" }
+
+# Intel macOS uses the API 20 baseline; newer compatible runtimes remain usable.
+[target.'cfg(all(target_os = "macos", target_arch = "x86_64"))'.dependencies]
+ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std", "ndarray", "tracing", "copy-dylibs", "api-20", "coreml"] }
+ort-sys = { version = "=2.0.0-rc.13", default-features = false, features = ["std", "api-20"] }
+
+[target.'cfg(windows)'.dependencies]
+# DirectML serves every DX12 GPU (Win10 1809+); see the Gpu branch in onnx.rs.
+ort = { version = "=2.0.0-rc.13", features = ["download-binaries", "directml"] }
+
+[target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
+ort = { version = "=2.0.0-rc.13", features = ["download-binaries", "coreml"] }
+mlx-rs = { version = "0.33.0", features = ["safetensors"], optional = true }
+safetensors = { version = "0.8", optional = true }
+
+[lints.rust]
+unsafe_code = "forbid"
