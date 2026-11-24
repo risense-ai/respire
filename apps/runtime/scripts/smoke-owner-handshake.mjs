@@ -80,7 +80,7 @@ function canonicalPath(path, stage = 'fixture path') {
   try {
     // Rust emits verbatim drive paths in Runtime receipts. In Node 22, the
     // JavaScript walker can lstat a drive-relative root; use the OS resolver.
-    return normalizedPath(realpathSync.native(path));
+    return normalizedPath(realpathSync.native(normalizedPath(path)));
   } catch (error) {
     throw new Error('Windows path canonicalization failed at ' + stage + ' (' + error.code + ')');
   }
