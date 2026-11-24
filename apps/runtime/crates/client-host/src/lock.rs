@@ -18,11 +18,18 @@ pub struct LibraryLock {
 impl LibraryLock {
     /// Verify that this live ownership guard belongs to the requested library.
     pub fn protects(&self, dir: &Path) -> Result<bool> {
-        let held = self
-            ._conn
+        Ok(
+            std::fs::canonicalize(self.file_path()?)?
+                == std::fs::canonicalize(dir.join("lock.db"))?,
+        )
+    }
+
+    /// The connection's exact path, without additional filesystem operations.
+    pub fn file_path(&self) -> Result<&Path> {
+        self._conn
             .path()
-            .ok_or_else(|| anyhow::anyhow!("library lock has no persistent path"))?;
-        Ok(std::fs::canonicalize(held)? == std::fs::canonicalize(dir.join("lock.db"))?)
+            .map(Path::new)
+            .ok_or_else(|| anyhow::anyhow!("library lock has no persistent path"))
     }
 
     /// Take the library lock and hold it until this object (this process) ends.

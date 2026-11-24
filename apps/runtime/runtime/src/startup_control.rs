@@ -1,6 +1,7 @@
 //! Hold only the historical installation startup exclusion for a local host.
 //! The same OS user already has access to this installation lock.
 //! This grants no maintenance, launch, credential, or business authority.
+mod hold;
 #[cfg(test)]
 mod tests;
 mod wire;
@@ -58,14 +59,22 @@ pub(crate) fn run() -> Result<i32> {
             },
         )?;
     let (root, profile) = configured_scope()?;
-    let (guard, held) = acquire(&request, &root, &profile, Duration::from_secs(60))?;
+    let (guard, root, profile) =
+        begin_acquisition(&request, &root, &profile, Duration::from_secs(60))?;
+    let exclusion = hold::BoundExclusion::start(guard, STARTUP_HOLD_TIMEOUT)?;
+    let held = describe_acquisition(&root, &profile)?;
+    exclusion.verify_directory(&takeover_directory(&root)?)?;
     validate_controller(&request)?;
     anyhow::ensure!(
         configured_scope()? == (root.clone(), profile.clone()),
         "startup configuration changed while waiting for exclusion"
     );
+    anyhow::ensure!(
+        !exclusion.remaining().is_zero(),
+        "startup exclusion timed out"
+    );
     write_frame(&mut std::io::stdout().lock(), &held)?;
-    let finish = wait_for_finish(&finish_receive, STARTUP_HOLD_TIMEOUT)?;
+    let finish = wait_for_finish(&finish_receive, exclusion.remaining())?;
     anyhow::ensure!(
         finish.guard_id == held.guard_id,
         "startup guard ID mismatch"
@@ -78,8 +87,9 @@ pub(crate) fn run() -> Result<i32> {
         configured_scope()? == (root.clone(), profile.clone()),
         "startup configuration changed while exclusion was held"
     );
-    verify_held(&guard, &root, &profile, &held)?;
-    drop(guard);
+    verify_scope(&root, &profile, &held)?;
+    exclusion.verify_directory(&root.join("runtime/takeover"))?;
+    exclusion.release()?;
     write_frame(
         &mut std::io::stdout().lock(),
         &Released {
@@ -180,12 +190,25 @@ fn takeover_directory(root: &Path) -> Result<PathBuf> {
     Ok(directory)
 }
 
+#[cfg(test)]
 fn acquire(
     request: &Acquire,
     root: &Path,
     profile: &Path,
     wait: Duration,
 ) -> Result<(LibraryLock, Held)> {
+    let (guard, root, profile) = begin_acquisition(request, root, profile, wait)?;
+    let held = describe_acquisition(&root, &profile)?;
+    verify_held(&guard, &root, &profile, &held)?;
+    Ok((guard, held))
+}
+
+fn begin_acquisition(
+    request: &Acquire,
+    root: &Path,
+    profile: &Path,
+    wait: Duration,
+) -> Result<(LibraryLock, PathBuf, PathBuf)> {
     anyhow::ensure!(
         request.schema_version == SCHEMA,
         "unsupported startup schema"
@@ -199,8 +222,12 @@ fn acquire(
     );
     let directory = takeover_directory(&root)?;
     let guard = LibraryLock::acquire(&directory, wait).context("startup exclusion unavailable")?;
+    Ok((guard, root, profile))
+}
+
+fn describe_acquisition(root: &Path, profile: &Path) -> Result<Held> {
     // A cold profile needs only its directory here; the serving child locks it independently.
-    fs::create_dir_all(&profile)?;
+    fs::create_dir_all(profile)?;
     anyhow::ensure!(
         root.canonicalize()? == root && profile.canonicalize()? == profile,
         "startup scope changed during acquisition"
@@ -208,15 +235,15 @@ fn acquire(
     let held = Held {
         schema_version: SCHEMA,
         guard_id: uuid::Uuid::new_v4().to_string(),
-        account_id: account_id(&profile)?,
-        installation_root: root.clone(),
-        profile: profile.clone(),
+        account_id: account_id(profile)?,
+        installation_root: root.to_owned(),
+        profile: profile.to_owned(),
         helper_pid: std::process::id(),
         helper_birth: super::startup_identity::process_birth(std::process::id())?
             .context("startup helper birth unavailable")?,
     };
-    verify_held(&guard, &root, &profile, &held)?;
-    Ok((guard, held))
+    verify_scope(root, profile, &held)?;
+    Ok(held)
 }
 
 fn account_id(profile: &Path) -> Result<String> {
@@ -230,13 +257,22 @@ fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
+#[cfg(test)]
 fn verify_held(guard: &LibraryLock, root: &Path, profile: &Path, held: &Held) -> Result<()> {
+    verify_scope(root, profile, held)?;
+    anyhow::ensure!(
+        guard.protects(&root.join("runtime/takeover"))?,
+        "startup lock ownership changed"
+    );
+    Ok(())
+}
+
+fn verify_scope(root: &Path, profile: &Path, held: &Held) -> Result<()> {
     anyhow::ensure!(
         takeover_directory(root)? == root.join("runtime/takeover")
             && checked_path(profile)? == held.profile
             && root.canonicalize()? == held.installation_root
-            && account_id(profile)? == held.account_id
-            && guard.protects(&root.join("runtime/takeover"))?,
+            && account_id(profile)? == held.account_id,
         "startup scope or lock ownership changed"
     );
     Ok(())

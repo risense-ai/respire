@@ -253,3 +253,22 @@ fn finish_wait_expires_with_a_connected_controller() {
     let error = super::wait_for_finish(&receiver, Duration::ZERO).expect_err("held wait timed out");
     assert!(error.to_string().contains("exclusion timed out"));
 }
+
+#[test]
+fn deadline_releases_without_controller_io() -> Result<()> {
+    let fixture = Fixture::new()?;
+    let root = &fixture.0;
+    let request = fixture.request(root.clone());
+    let (guard, _) = acquire(&request, root, root, Duration::ZERO)?;
+    let exclusion = super::hold::BoundExclusion::start(guard, Duration::from_millis(80))?;
+    // No signal is sent: this is the ownership state during any stalled pipe,
+    // controller or endpoint. A genuine second SQLite connection can get in
+    // after the timed owner releases; a late receipt must still fail.
+    let contender = LibraryLock::acquire(&root.join("runtime/takeover"), Duration::from_secs(2))?;
+    assert!(
+        exclusion.release().is_err(),
+        "accepted a late release receipt"
+    );
+    drop(contender);
+    Ok(())
+}
