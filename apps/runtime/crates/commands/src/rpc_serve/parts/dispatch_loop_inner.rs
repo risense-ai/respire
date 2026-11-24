@@ -216,6 +216,8 @@ fn dispatch_loop_inner(
         }
         stop_process(1);
     }
+    let mut owner_dispatch = startup.as_ref()
+        .and_then(|_| crate::runtime_http::start_owner_dispatch());
     let mut pending = VecDeque::<Job>::new();
     let mut idle_since = Instant::now();
     loop {
@@ -237,6 +239,9 @@ fn dispatch_loop_inner(
                     let _ = respire_app::auth::clear_runtime_session();
                 }
             }
+        }
+        if let Some(dispatch) = owner_dispatch.as_mut() {
+            dispatch.tick(_store.as_ref(), &_lock);
         }
         match receive_dispatch_job(&rx, Duration::from_millis(10)) {
             Ok(job) => {
@@ -458,6 +463,7 @@ fn dispatch_loop_inner(
         let _fence = ADMISSIONS.lock().unwrap_or_else(|error| error.into_inner());
         STOPPING.store(true, Ordering::Release);
     }
+    drop(owner_dispatch);
     SYNC_CV.notify_all();
     INDEX_CV.notify_all();
     if let Ok(mut installed) = WRITE_TX.lock() {

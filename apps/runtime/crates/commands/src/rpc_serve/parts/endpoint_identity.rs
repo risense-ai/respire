@@ -22,6 +22,64 @@ pub fn startup_complete() -> bool {
     STARTUP_COMPLETE.load(Ordering::Acquire)
 }
 
+/// Borrow the authoritative local owner and scope while the serving identity
+/// and unlocked vault are fenced. Callers must not re-enter session I/O.
+pub(crate) fn with_verified_owner_scope<T>(
+    action: impl FnOnce(&str, &std::path::Path, uuid::Uuid, u64, uuid::Uuid) -> T,
+) -> Option<T> {
+    try_verified_owner_scope(action).ok().flatten()
+}
+
+pub(crate) fn try_verified_owner_scope<T>(
+    action: impl FnOnce(&str, &std::path::Path, uuid::Uuid, u64, uuid::Uuid) -> T,
+) -> std::result::Result<Option<T>, ()> {
+    let _identity = match SCOPE_EXECUTION.try_read() {
+        Ok(identity) => identity,
+        Err(std::sync::TryLockError::WouldBlock) => return Err(()),
+        Err(std::sync::TryLockError::Poisoned(_)) => return Ok(None),
+    };
+    Ok(with_locked_owner_scope(action))
+}
+
+pub(crate) fn with_verified_owner_store_scope<T>(
+    action: impl FnOnce(&str, &std::path::Path, uuid::Uuid, u64, uuid::Uuid) -> T,
+) -> Option<T> {
+    let _identity = SCOPE_EXECUTION.try_read().ok()?;
+    let writer = crate::rpc_worker::shared_exclusive();
+    let _foreground = writer.try_owner_foreground()?;
+    with_locked_owner_scope(action)
+}
+
+fn with_locked_owner_scope<T>(
+    action: impl FnOnce(&str, &std::path::Path, uuid::Uuid, u64, uuid::Uuid) -> T,
+) -> Option<T> {
+    if !startup_complete() || !store_ready() || business_paused()
+        || respire_app::service::off_mode()
+    {
+        return None;
+    }
+    validate_business_config().ok()?;
+    crate::host_hooks::check_direct_access().ok()?;
+    let profile = respire_app::service::data_dir().canonicalize().ok()?;
+    respire_app::service::ensure_runtime_profile().ok()?;
+    respire_app::snapshot::ensure_no_incomplete_restore(&profile).ok()?;
+    let instance = uuid::Uuid::parse_str(&process_identity().instance_id).ok()?;
+    let generation = crate::rpc_worker::wire_generation();
+    respire_app::auth::with_runtime_session_owner(&profile, |owner, vault_epoch| {
+        action(owner, &profile, instance, generation, vault_epoch)
+    }).ok().flatten()
+}
+
+pub(crate) fn v1_health_identity() -> Option<(&'static str, String)> {
+    let status = match health_state() {
+        "draining" | "stopping" | "stopped" => return None,
+        _ if !startup_complete() => "starting",
+        "ready" => "ready",
+        _ => "degraded",
+    };
+    Some((status, process_identity().instance_id))
+}
+
 pub fn health_body() -> Value {
     let roots = match respire_app::service::resolved_roots()
         .and_then(|roots| serde_json::to_value(roots).map_err(anyhow::Error::from))

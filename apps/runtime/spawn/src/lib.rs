@@ -9,6 +9,7 @@ use std::process::Command;
 
 mod confinement;
 pub mod durable;
+pub mod owner_credential;
 pub use confinement::is_restricted;
 mod probe;
 pub use probe::{

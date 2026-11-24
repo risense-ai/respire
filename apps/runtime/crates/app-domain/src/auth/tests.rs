@@ -169,6 +169,12 @@
                 assert_eq!(supplied.keys.urk, expected);
                 assert_eq!(supplied.owner.as_deref(), Some("provider-fixture"));
             }
+            let profile = crate::service::data_dir().canonicalize()?;
+            let initial_epoch = with_runtime_session_owner(&profile, |owner, epoch| {
+                assert_eq!(owner, "provider-fixture");
+                epoch
+            })?.context("verified local owner expected")?;
+            assert!(with_runtime_session_owner(&profile.join("other"), |_, _| ())?.is_none());
             assert_eq!(crate::credential_io::provider_status()?,
                 ProviderCredentialStatus::Unavailable { code:ProviderUnavailableCode::AccessDenied });
             assert!(crate::credential_io::ensure_provider_credentials_available().is_err());
@@ -180,8 +186,14 @@
                 assert_eq!(crate::credential_io::provider_status()?,
                     ProviderCredentialStatus::Unavailable { code:ProviderUnavailableCode::AccessDenied });
             }
+            assert_eq!(with_runtime_session_owner(&profile, |_, epoch| epoch)?, Some(initial_epoch));
+            clear_runtime_session()?;
+            assert!(with_runtime_session_owner(&profile, |_, _| ())?.is_none());
             supply_runtime_session_v2(input("synthetic-super", &digest,
                 ProviderCredentialUpdate::Replace { credentials:Vec::new() })?)?;
+            let reactivated = with_runtime_session_owner(&profile, |_, epoch| epoch)?
+                .context("reauthenticated local owner expected")?;
+            assert_ne!(initial_epoch, reactivated);
             assert_eq!(crate::credential_io::provider_status()?, ProviderCredentialStatus::Ready);
             Ok(())
         })();
