@@ -8,9 +8,10 @@ import {constants, createReadStream, existsSync, fstatSync, lstatSync, mkdirSync
   writeFileSync} from 'node:fs';
 import {createServer} from 'node:net';
 import {tmpdir} from 'node:os';
-import {basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep} from 'node:path';
+import {basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep, win32} from 'node:path';
 import {setTimeout as delay} from 'node:timers/promises';
-import {assertDrained, assertProtocol, assertSamePath, digest, syntheticSession}
+import {fileURLToPath} from 'node:url';
+import {assertDrained, assertProtocol, assertSamePath, digest, normalizedPath, syntheticSession}
   from './runtime-release-smoke-helpers.mjs';
 import {runRuntimeMcpProbe} from './runtime-mcp-probe.mjs';
 
@@ -57,6 +58,12 @@ function selfTest() {
     + '75e3e3b613134f646cbee0cbaa25e4a676977f045a9f24697c24e052c5849497';
   assert.ok(proof(record, [all[0], all[5]], 1234567890, Buffer.alloc(16, 0xa5)) === expected,
     'Node HMAC fixture differs from canonical Rust vector');
+  if (process.platform === 'win32') {
+    const script = fileURLToPath(import.meta.url);
+    const verbatim = win32.toNamespacedPath(script);
+    assert.ok(verbatim !== script, 'Windows path fixture must cover a verbatim drive path');
+    assertSamePath(canonicalPath(verbatim, 'verbatim self-test'), canonicalPath(script, 'self-test'));
+  }
   assert.equal(mask(all), 63);
   assert.throws(() => mask([all[0], all[0]]));
   record.fill(0);
@@ -68,6 +75,16 @@ async function binaryDigest(file) {
   return hash.digest('hex');
 }
 
+function canonicalPath(path, stage = 'fixture path') {
+  if (process.platform !== 'win32') return realpathSync(path);
+  try {
+    // Rust emits verbatim drive paths in Runtime receipts. In Node 22, the
+    // JavaScript walker can lstat a drive-relative root; use the OS resolver.
+    return normalizedPath(realpathSync.native(path));
+  } catch (error) {
+    throw new Error('Windows path canonicalization failed at ' + stage + ' (' + error.code + ')');
+  }
+}
 function below(parent, child) {
   const part = relative(parent, child);
   return !!part && !isAbsolute(part) && !part.split(sep).includes('..');
@@ -86,8 +103,8 @@ function ownerRecord(base, instance) {
   const path = join(dir, 'secret');
   const entry = lstatSync(dir);
   assert.ok(entry.isDirectory() && !entry.isSymbolicLink(), 'unsafe synthetic credential directory');
-  assertSamePath(realpathSync(dir), dir);
-  assertSamePath(realpathSync(path), path);
+  assertSamePath(canonicalPath(dir), dir);
+  assertSamePath(canonicalPath(path), path);
   if (process.platform !== 'win32') {
     assert.equal(entry.mode & 0o777, 0o700, 'credential directory is not owner-only');
     assert.equal(entry.uid, process.getuid());
@@ -209,8 +226,8 @@ async function expectProblem(response, status, code, label) {
 function receiptBound(info, child, endpoint, binary, sha, data) {
   const {pid, url, image_path: image, image_sha256: actual, installation_root: root} = info;
   assert.ok(pid === child.pid && url === endpoint && actual === sha, 'fixture Runtime identity mismatch');
-  assertSamePath(realpathSync(image), binary);
-  assertSamePath(realpathSync(root), data);
+  assertSamePath(canonicalPath(image, 'Runtime image receipt'), binary);
+  assertSamePath(canonicalPath(root, 'installation root receipt'), data);
   assert.match(info.instance_id, uuid);
   assert.ok(typeof info.process_start_id === 'string' && info.process_start_id.length > 0);
 }
@@ -273,8 +290,8 @@ async function ownerChecks(call, record) {
 }
 
 async function smoke(binary, sha) {
-  const tempBase = realpathSync(resolve(process.env.RUNNER_TEMP || tmpdir()));
-  const root = realpathSync(mkdtempSync(join(tempBase, 'respire-owner-smoke-')));
+  const tempBase = canonicalPath(resolve(process.env.RUNNER_TEMP || tmpdir()));
+  const root = canonicalPath(mkdtempSync(join(tempBase, 'respire-owner-smoke-')));
   assert.ok(below(tempBase, root) && basename(root).startsWith('respire-owner-smoke-'), 'invalid temp root');
   let child, ended, childFailure, closed, record, sessionBytes;
   try {
@@ -313,7 +330,7 @@ async function smoke(binary, sha) {
       return info.startup_complete && info.credential_state === 'required' ? info : null;
     }, childState);
     assert.equal(locked.state, 'locked');
-    assertSamePath(realpathSync(locked.data_dir), data);
+    assertSamePath(canonicalPath(locked.data_dir, 'locked profile receipt'), data);
     const lockedV1 = await requireStatus(await call('/v1/health'), 200, 'locked v1 health');
     assert.ok(!lockedV1.capabilities?.includes(capability), 'locked Runtime advertised owner handshake');
     await expectProblem(await call(handshakePath, {method: 'POST', body: {scopes: all}}),
@@ -379,7 +396,7 @@ async function smoke(binary, sha) {
       }
     }
     if (!child || ended || childFailure) {
-      const onDisk = realpathSync(root);
+      const onDisk = canonicalPath(root);
       assert.ok(below(tempBase, onDisk) && basename(onDisk).startsWith('respire-owner-smoke-'),
         'synthetic cleanup target changed');
       rmSync(onDisk, {recursive: true, force: true, maxRetries: 3, retryDelay: 100});
@@ -398,7 +415,7 @@ async function main(args) {
   }
   const supplied = resolve(args[1]);
   assert.ok(lstatSync(supplied).isFile() && !lstatSync(supplied).isSymbolicLink(), 'candidate must be a regular file');
-  const binary = realpathSync(supplied);
+  const binary = canonicalPath(supplied);
   assert.equal(await binaryDigest(binary), args[3], 'candidate Runtime digest mismatch');
   await smoke(binary, args[3]);
 }
