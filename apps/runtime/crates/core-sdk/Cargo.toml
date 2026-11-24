@@ -1,0 +1,49 @@
+[package]
+name = "respire_core_sdk"
+version = "2.0.0-dev.4"
+edition = "2021"
+rust-version = "1.95"
+license-file = "LICENSE"
+description = "Safe Runtime binding to the in-repository Respire Core ABI"
+repository.workspace = true
+readme = "README.md"
+include = ["Cargo.toml", "src/**", "notices/**", "build.rs", "host-winml-build.rs", "native-runtime-build.rs", "README.md", "LICENSE"]
+links = "respire_core_ffi"
+publish = false
+
+[features]
+default = ["cpu-owned-ort-experiment", "model-input-stream-experiment"]
+native-fault-tests = ["respire_core_ffi/native-fault-tests"]
+model-input-stream-experiment = []
+cpu-owned-ort-experiment = ["respire_core_ffi/cpu-owned-ort-experiment"]
+mlx = ["respire_core_ffi/mlx"]
+
+[dependencies]
+anyhow = "1.0"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+respire_protocol = { path = "../protocol", version = "=2.0.0-dev.17" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+base64 = "0.22"
+dirs = "6.0"
+respire_core_ffi = { path = "../../../core/crates/core-ffi", default-features = false }
+sha2 = "0.10"
+tempfile = "3"
+[target.'cfg(not(all(target_os = "macos", target_arch = "x86_64")))'.dependencies]
+ort-sys = { version = "=2.0.0-rc.13", default-features = false, features = ["api-24"] }
+
+[target.'cfg(all(target_os = "macos", target_arch = "x86_64"))'.dependencies]
+ort-sys = { version = "=2.0.0-rc.13", default-features = false, features = ["api-20"] }
+
+[target.'cfg(windows)'.dependencies]
+libloading = "0.8"
+
+[build-dependencies]
+dirs = "6.0"
+serde_json = "1.0"
+sha2 = "0.10"
+ureq = { version = "2.12", features = ["socks-proxy"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[lints.rust]
+unsafe_code = "deny"

@@ -1,0 +1,6 @@
+# Frozen historical bytes are verified against checked-in digests.
+crates/app/src/fixtures/legacy-memory-v1/legacy_payload_v2.json -text
+crates/app/src/fixtures/legacy-memory-v1/legacy_stored_memory.json -text
+crates/app/src/fixtures/legacy-memory-v1/legacy_embedding.f32le -text
+# Preserve exact license bytes from the checksum-pinned Windows ML package.
+crates/core-sdk/notices/WinML-2.4.89-license.txt -text !eol

@@ -186,7 +186,7 @@ impl Core {
             Some(AbiOperation::QueryBusiness) => selection::recall_with_transport(&mut self.business, payload, transport).map_err(Failure::engine),
             Some(AbiOperation::Business(operation)) => business::dispatch_with_transport(&mut self.business, operation, payload, Some(transport)).map_err(Failure::engine),
             Some(AbiOperation::Capabilities) => Ok(json!({
-                "core_version": env!("CARGO_PKG_VERSION"),
+                "core_version": CORE_VERSION,
                 "abi_version": ABI_VERSION,
                 "schema_version": 1,
                 "stage": "internal-business-sdk",
@@ -206,7 +206,7 @@ impl Core {
                 "embedding_profile_contract": 1,
                 "embedding_transport_contract": 1,
                 "backend_load_probe_contract": 1,
-                "feedback_contract": 1,
+                "feedback_contract": FEEDBACK_CONTRACT,
                 "render_budget_contract": 1,
                 "brief_render_contract": 1,
                 "render_min_score_contract": 1,
@@ -245,6 +245,11 @@ fn response(request_id: &str, result: Result<Value, Failure>) -> (i32, Vec<u8>) 
 
 #[allow(unsafe_code)]
 mod exports;
+pub use exports::rs_core_abi_version;
+
+// Keep the native and Rust consumers on the capability reported by dispatch.
+pub const FEEDBACK_CONTRACT: u64 = 1;
+pub const CORE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[cfg(test)]
 #[path = "i18n/test_data.rs"]

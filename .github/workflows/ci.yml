@@ -222,27 +222,47 @@ jobs:
     name: runtime-ci
     needs: detect-changes
     if: needs.detect-changes.outputs.runtime == 'true' || needs.detect-changes.outputs.core == 'true' || needs.detect-changes.outputs.contracts == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    env:
+      RUST_TEST_THREADS: "1"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           persist-credentials: false
 
-      - name: Check Runtime manifest presence
-        id: manifest
-        run: |
-          if [ -f "apps/runtime/Cargo.toml" ]; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-            echo "apps/runtime/Cargo.toml not imported yet (pending OpenSpec 003); skipping Rust build."
-          fi
+      - name: Install Rust
+        run: rustup toolchain install 1.95.0 --profile minimal
 
-      - name: Check Runtime workspace
-        if: steps.manifest.outputs.exists == 'true'
-        run: cargo check --manifest-path apps/runtime/Cargo.toml --locked
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Build and link Runtime with Core from this checkout
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          RUSTUP_TOOLCHAIN: "1.95.0"
+        run: |
+          set -euo pipefail
+          test "$(uname -m)-unknown-linux-gnu" = "$TARGET"
+          export ORT_LIB_PATH="$RUNNER_TEMP/gnu-ort"
+          bash apps/runtime/scripts/prepare-gnu-ort.sh "$TARGET" "$ORT_LIB_PATH"
+          export ORT_SKIP_DOWNLOAD=1 ORT_PREFER_DYNAMIC_LINK=1
+          export RUSTFLAGS='-C target-feature=-crt-static -C embed-bitcode=no'
+          export RSRS_DATA_DIR="$RUNNER_TEMP/respire-runtime-data"
+          mkdir -- "$RSRS_DATA_DIR"
+          # Existing storage and migration tests opt into synthetic Core inference.
+          RSRS_CORE_TEST_MODE=1 cargo test --manifest-path apps/runtime/Cargo.toml --locked --workspace --lib --tests --bins
 
   cli-ci:
     name: cli-ci

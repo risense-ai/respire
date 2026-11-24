@@ -15,7 +15,7 @@ cpu-owned-ort-experiment = ["respire_core/cpu-owned-ort-experiment"]
 mlx = ["respire_core/mlx"]
 
 [lib]
-crate-type = ["staticlib"]
+crate-type = ["rlib", "staticlib"]
 
 [dependencies]
 respire_core = { path = "../memory-core", default-features = false }
