@@ -1,0 +1,258 @@
+import hashlib
+import importlib.util
+import json
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+from types import SimpleNamespace
+import unittest
+from unittest.mock import Mock, patch
+
+import dev_model_fixture as model
+from dev_migration_diagnostics import migration_failure_diagnostics
+# This existing CI entry covers both native public input caches.
+from test_native_psutil_wheel_cache import NativePsutilWheelCacheTest
+
+cache_spec = importlib.util.spec_from_file_location("native_model_cache", Path(__file__).with_name("native-model-cache.py"))
+model_cache = importlib.util.module_from_spec(cache_spec)
+cache_spec.loader.exec_module(model_cache)
+
+
+class MigrationDiagnosticsTests(unittest.TestCase):
+    def test_only_fixed_outcome_and_phase_are_reported(self):
+        for outcome in ("unknown", "completed", "already_migrated"):
+            for phase in ("initial_request", "result_query"):
+                value = {"command": "migrate", "summary": {"outcome": outcome,
+                    "request_phase": phase, "operation_id": "synthetic-private-id",
+                    "account": "synthetic-private-account", "root": "synthetic-private-root"},
+                    "details": {"token": "synthetic-secret"},
+                    "actions": ["synthetic-secret"], "errors": ["synthetic-secret"]}
+                self.assertEqual(migration_failure_diagnostics(value), {
+                    "migration_outcome": outcome, "migration_request_phase": phase})
+                self.assertNotIn("synthetic", json.dumps(migration_failure_diagnostics(value)))
+
+    def test_untrusted_or_absent_values_cannot_enter_report(self):
+        empty = {"migration_outcome": None, "migration_request_phase": None}
+        for value in (None, [], {}, {"command": "other", "summary": {"outcome": "unknown"}},
+                      {"command": "migrate", "summary": "synthetic-secret"}):
+            self.assertEqual(migration_failure_diagnostics(value), empty)
+        for value in ("unknown synthetic-secret", "synthetic-secret", [], {}, True, 1, None):
+            self.assertEqual(migration_failure_diagnostics({"command": "migrate",
+                "summary": {"outcome": value, "request_phase": value}}), empty)
+
+
+class NativeModelCacheTests(unittest.TestCase):
+    def test_public_pins_match_existing_consumers_and_key_covers_every_input(self):
+        root = Path(__file__).parents[1]
+        installer = (root / "crates/commands/src/model_install.rs").read_text(encoding="utf-8")
+        assets = (root / "crates/commands/src/model_asset_files.rs").read_text(encoding="utf-8")
+        cpu = (root / "crates/core-sdk/src/cpu_model.rs").read_text(encoding="utf-8")
+        fixture = (root / "scripts/test-real-m3-account-switch.py").read_text(encoding="utf-8")
+        self.assertIn(f'pub const MODEL_REVISION: &str = "{model_cache.REVISION}";', assets)
+        self.assertIn('pub const MODEL_REPO: &str = "Xenova/bge-m3";', assets)
+        self.assertIn('pub use crate::model_asset_files::{MODEL_REPO, MODEL_REVISION};', installer)
+        self.assertIn('use crate::model_asset_files::{file_url, replace_file};', installer)
+        self.assertNotIn('const MODEL_REVISION:', installer)
+        self.assertNotIn('const MODEL_REPO:', installer)
+        self.assertIn('install_variant_into(variant, &dest, &origins)', installer)
+        self.assertRegex(installer, (
+            r"crate::model_asset_files::install_variant_into\(\s*"
+            r"variant.name,\s*&file,\s*variant.sha256,\s*variant.size,\s*"
+            r"pinned_size\(variant.sha256\),\s*dest,\s*origins,?\s*\)"
+        ))
+        for name, digest in model_cache.FILES.items():
+            self.assertIn(digest, cpu if name.endswith(".ort") else fixture)
+            if name in ("tokenizer.json", "onnx/model_quantized.onnx"):
+                self.assertIn(digest, installer)
+        self.assertEqual(len(model_cache.FILES), 4)
+        key = model_cache.cache_key()
+        self.assertRegex(key, r"^native-model-v1-[a-f0-9]{64}$")
+        with patch.object(model_cache, "REVISION", "changed"):
+            self.assertNotEqual(key, model_cache.cache_key())
+        for name in model_cache.FILES:
+            with patch.dict(model_cache.FILES, {name: "f" * 64}):
+                self.assertNotEqual(key, model_cache.cache_key())
+
+    def test_roundtrip_excludes_fixture_state_and_bad_cache_writes_nothing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            active, legacy, cache = root / "active models", root / "legacy models", root / "cache"
+            contents = {name: name.encode() for name in model_cache.FILES}
+            pins = {name: hashlib.sha256(body).hexdigest() for name, body in contents.items()}
+            for name, source in model_cache.sources(active, legacy).items():
+                source.parent.mkdir(parents=True, exist_ok=True)
+                source.write_bytes(contents[name])
+            (active / "session.json").write_text("never-cache-fixture-state")
+            with patch.dict(model_cache.FILES, pins):
+                model_cache.stage(cache, active, legacy)
+                self.assertEqual({p.relative_to(cache).as_posix() for p in cache.rglob("*") if p.is_file()}, set(pins))
+                restored, old = root / "restored", root / "restored legacy"
+                model_cache.restore(cache, restored, old)
+                model_cache.verify_sources(restored, old)
+                (cache / "session.json").write_text("forbidden")
+                with self.assertRaisesRegex(RuntimeError, "Unexpected"):
+                    model_cache.restore(cache, root / "untouched", root / "untouched legacy")
+                self.assertFalse((root / "untouched").exists())
+                (cache / "session.json").unlink()
+                (cache / "onnx/model_fp16.onnx").write_bytes(b"corrupt")
+                with self.assertRaisesRegex(RuntimeError, "checksum"):
+                    model_cache.restore(cache, root / "untouched", root / "untouched legacy")
+                self.assertFalse((root / "untouched").exists())
+                (cache / "onnx/model_fp16.onnx").unlink()
+                with self.assertRaisesRegex(RuntimeError, "missing"):
+                    model_cache.restore(cache, root / "untouched", root / "untouched legacy")
+                self.assertFalse((root / "untouched").exists())
+                with patch.object(Path, "is_symlink", return_value=True):
+                    with self.assertRaisesRegex(RuntimeError, "linked"):
+                        model_cache.verify_cache(cache)
+
+    def test_workflow_keeps_real_validation_and_only_trusted_main_saves_inputs(self):
+        workflow = (Path(__file__).parents[1] / ".github/workflows/release-native-validation.yml").read_text(encoding="utf-8")
+        self.assertNotIn("actions/cache@v4", workflow)
+        self.assertIn("enableCrossOsArchive: true", workflow)
+        self.assertIn("enableCrossOsArchive: false", workflow)
+        self.assertIn('test "$MATCHED_KEY" = "$EXPECTED_KEY"', workflow)
+        self.assertIn('"$exe" --direct model install-m3 --json', workflow)
+        self.assertIn('const proof = result.details.backend_load.evidence;', workflow)
+        for name, filename in [('release-native-validation.yml', 'native-model-inference.json'),
+                               ('release-validation.yml', 'macos-model-inference.json')]:
+            source = (Path(__file__).parents[1] / '.github/workflows' / name).read_text(encoding='utf-8')
+            start = source.index("          node --input-type=module <<'NODE'", source.index(filename))
+            program = source[start:].split('\n', 1)[1].split('          NODE', 1)[0]
+            with tempfile.TemporaryDirectory() as td:
+                proof = dict(ready=True, inference_completed=True, fresh_session=True, dimensions=1024, selected='CPU')
+                for change in ({}, {'ready': False}, {'inference_completed': False},
+                               {'fresh_session': False}, {'dimensions': 0}, {'selected': 'GPU'}):
+                    (Path(td) / filename).write_text(json.dumps(dict(status='ok',
+                        details=dict(backend_load=dict(evidence=dict(proof, **change))))))
+                    checked = subprocess.run(['node', '--input-type=module', '-e', program],
+                        env=dict(os.environ, RUNNER_TEMP=td), capture_output=True)
+                    self.assertEqual(checked.returncode == 0, not change, checked.stderr.decode())
+        self.assertIn('"$py" scripts/test-published-upgrades.py', workflow)
+        self.assertIn('UPGRADE_PROFILE: ${{ inputs.validation_profile }}', workflow)
+        self.assertIn('--output-dir "$RUNNER_TEMP/published-upgrades" --profile "$UPGRADE_PROFILE"', workflow)
+        self.assertNotIn('--profile critical', workflow)
+        self.assertIn('scripts/native-model-cache.py verify', workflow)
+        self.assertIn("pip==26.2.2 setuptools==84.2.1 wheel==0.48.0", workflow)
+        self.assertIn('scripts/native-psutil-wheel-cache.py validate --directory .native-psutil-wheels', workflow)
+        self.assertIn('scripts/native-psutil-wheel-cache.py install --directory .native-psutil-wheels', workflow)
+        self.assertNotIn('${ACTIONS_CACHE_MODE', workflow)
+        self.assertIn('if [ "$TRUSTED_SOURCE" = true ]; then', workflow)
+        for block in workflow.split("      - uses: actions/cache/save@v4\n")[1:]:
+            block = block.split("\n      - ")[0]
+            self.assertIn("continue-on-error: true", block)
+            self.assertIn("steps.cache-write.outputs.may_save == 'true'", block)
+            self.assertIn("github.ref == 'refs/heads/main'", block)
+            self.assertIn("inputs.ref == github.sha", block)
+            self.assertIn("github.event_name == 'push' || github.event_name == 'workflow_dispatch'", block)
+            self.assertRegex(block, r"path: \.native-(?:model-cache|psutil-wheels)\n")
+
+
+class ModelFixtureTests(unittest.TestCase):
+    def test_pins_match_host_and_fixture_bytes_are_shared_and_verified(self):
+        host = (Path(__file__).parents[1] / "crates/core-sdk/src/cpu_model.rs").read_text()
+        for value in (model.CPU_NAME, model.CPU_SHA256, str(model.CPU_SIZE)):
+            self.assertIn(value, host)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "profile/models/bge-m3/onnx" / model.CPU_NAME
+            source.parent.mkdir(parents=True)
+            source.write_bytes(b"verified fixture container")
+            shared = root / "models"
+            env = {"RSRS_DATA_DIR": str(root / "profile")}
+            with patch.object(model, "CPU_SIZE", source.stat().st_size), patch.object(
+                    model, "CPU_SHA256", hashlib.sha256(source.read_bytes()).hexdigest()):
+                model.share_cpu_container(root, env, shared)
+                self.assertEqual(source.read_bytes(), (shared / "onnx" / model.CPU_NAME).read_bytes())
+                model.share_cpu_container(root, env, shared)
+                with self.assertRaisesRegex(RuntimeError, "owned_fixture_child"):
+                    model.share_cpu_container(root, env, root.parent)
+                (shared / "onnx" / model.CPU_NAME).write_bytes(b"corrupt")
+                with self.assertRaisesRegex(RuntimeError, "not_fresh"):
+                    model.share_cpu_container(root, env, shared)
+
+    def test_failed_install_does_not_create_shared_container(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with self.assertRaisesRegex(RuntimeError, "missing_or_corrupt"):
+                model.share_cpu_container(root, {"RSRS_DATA_DIR": str(root / "profile")}, root / "models")
+            self.assertFalse((root / "models").exists())
+
+    def test_diagnostics_keep_errno_and_redact_fixture_and_session_credentials(self):
+        spec = importlib.util.spec_from_file_location("legacy", Path(__file__).with_name("dev-legacy-vault-smoke.py"))
+        legacy = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(legacy)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "session.json").write_text(json.dumps({"token": "private-session-token"}))
+            smoke = object.__new__(legacy.Smoke)
+            smoke.diagnostic_secrets = {"private-fixture-password"}
+            result = subprocess.CompletedProcess([], 1, json.dumps({"errors": [
+                "No such file (os error 2) private-fixture-password private-session-token Bearer private-bearer"
+            ]}).encode(), b"")
+            diagnostic = smoke.redacted_cli_error({"RSRS_DATA_DIR": str(root)}, result)
+            self.assertIn("No such file (os error 2)", diagnostic)
+            self.assertNotIn("private-", diagnostic)
+            self.assertLessEqual(len(diagnostic), 1500)
+
+    def test_diagnostics_without_data_dir_preserve_original_error(self):
+        spec = importlib.util.spec_from_file_location("legacy", Path(__file__).with_name("dev-legacy-vault-smoke.py"))
+        legacy = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(legacy)
+        smoke = object.__new__(legacy.Smoke)
+        smoke.diagnostic_secrets = {"private-fixture-password"}
+        result = subprocess.CompletedProcess([], 1, json.dumps({"errors": [
+            "No such file (os error 2) private-fixture-password"
+        ]}).encode(), b"")
+        diagnostic = smoke.redacted_cli_error({}, result)
+        self.assertIn("No such file (os error 2)", diagnostic)
+        self.assertNotIn("private-fixture-password", diagnostic)
+
+    def check_reporter_failure(self, filename):
+        spec = importlib.util.spec_from_file_location("fixture_reporter", Path(__file__).with_name(filename))
+        reporter = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(reporter)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "session.json").write_text(json.dumps({"token": "private-session-token"}))
+            smoke = object.__new__(reporter.Smoke)
+            smoke.root = root
+            smoke.args = SimpleNamespace(binary=root / "unused-fixture-cli")
+            smoke.report = {}
+            smoke.save = Mock()
+            smoke.diagnostic_secrets = {"private-fixture-password"}
+            failed = subprocess.CompletedProcess([], 1, json.dumps({"errors": [
+                "No such file (os error 2) private-fixture-password private-session-token Bearer private-bearer " + "x" * 2000
+            ]}).encode(), b"")
+            stopped = subprocess.CompletedProcess([], 0, b"", b"")
+            with patch.object(subprocess, "run", side_effect=[failed, stopped]) as run:
+                with self.assertRaisesRegex(RuntimeError, "cli_failed_remember"):
+                    smoke.cli({"RSRS_DATA_DIR": str(root)}, "remember", "synthetic content")
+            self.assertEqual(run.call_count, 2)
+            self.assertEqual(run.call_args_list[1].args[0],
+                [str(smoke.args.binary), "--runtime-internal", "--stop"])
+            smoke.save.assert_called()
+            if filename == "dev-legacy-vault-smoke.py":
+                self.assertEqual(smoke.report["cli_failure"],
+                    {"exit_code": 1, "reason": "process_exit"})
+                self.assertFalse(smoke.report["runtime_failure_evidence"]["request_bound"])
+                self.assertEqual(smoke.report["runtime_failure_evidence"]["liveness"], "unknown")
+                self.assertNotIn("No such file", json.dumps(smoke.report))
+                self.assertNotIn("x" * 100, json.dumps(smoke.report))
+            else:
+                diagnostic = smoke.report["cli_failure"]["error"]
+                self.assertIn("No such file (os error 2)", diagnostic)
+                self.assertIn("[redacted]", diagnostic)
+                self.assertLessEqual(len(diagnostic), 1500)
+            self.assertNotIn("private-", json.dumps(smoke.report))
+
+    def test_legacy_reporter_saves_bounded_redacted_failure(self):
+        self.check_reporter_failure("dev-legacy-vault-smoke.py")
+
+    def test_profile_reporter_saves_bounded_redacted_failure(self):
+        self.check_reporter_failure("dev-profile-migration-smoke.py")
+
+
+if __name__ == "__main__":
+    unittest.main()

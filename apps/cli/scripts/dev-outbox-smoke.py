@@ -1,0 +1,561 @@
+#!/usr/bin/env python3
+"""CI-only fault smoke using real development sync responses and disposable users."""
+import argparse
+import hashlib
+import json
+import os
+import re
+from pathlib import Path
+import secrets
+import socket
+import sqlite3
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import urllib.error
+import urllib.request
+from dev_model_fixture import share_cpu_container
+from native_fixture_process import (install_published_runtime, add_runtime_arguments, runtime_inputs, runtime_report,
+                                    verify_runtime_health, scoped_rpc_request, verify_rpc_receipt, RuntimeHealthFailure)
+
+from outbox_sync_gate import Gate, UPSTREAM, require
+
+
+def wait_for(action, seconds, code):
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        value = action()
+        if value:
+            return value
+        time.sleep(0.25)
+    raise RuntimeError(code)
+
+
+def objects(value):
+    if isinstance(value, dict):
+        yield value
+        for child in value.values():
+            yield from objects(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from objects(child)
+
+
+class Fixture:
+    def __init__(self, args, root, cleanup):
+        self.args = args
+        self.root = root
+        self.child = None
+        self.runtime_stdout = None
+        self.runtime_stderr = None
+        self.token_present_before_start = None
+        self.gate = Gate()
+        self.user = "ci-outbox-" + secrets.token_hex(12)
+        # Exercise leading-option characters without reducing the random password entropy.
+        self.password = "-" + secrets.token_urlsafe(32)
+        self.cleanup_report = cleanup
+        self.registration_attempted = False
+        self.created = False
+        self.account_token = None
+        self.direct_failures = []
+        self.a = self.environment("a")
+        self.b = self.environment("b")
+
+    def environment(self, name):
+        profile = self.root / name
+        (profile / "home").mkdir(parents=True, mode=0o700)
+        env = {key: value for key, value in os.environ.items()
+               if not key.startswith(("RSRS_", "ONEMEMORY_", "RESPIRE_", "XDG_"))
+               and not key.endswith(("_TOKEN", "_API_KEY"))
+               and key not in ("HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "DBUS_SESSION_BUS_ADDRESS")}
+        bus = os.environ.get("DBUS_SESSION_BUS_ADDRESS", "")
+        if sys.platform.startswith("linux") and os.environ.get("RSRS_SS_FIXTURE_BUS") == "private" and bus.startswith("unix:"):
+            env.update(DBUS_SESSION_BUS_ADDRESS=bus, RSRS_SS_FIXTURE_BUS="private")
+        env.update(HOME=str(profile / "home"), USERPROFILE=str(profile / "home"),
+                   XDG_CONFIG_HOME=str(profile / "config"), XDG_DATA_HOME=str(profile / "data"),
+                   XDG_CACHE_HOME=str(profile / "cache"), TMPDIR=str(profile / "tmp"),
+                   RSRS_DATA_DIR=str(profile / "library"), RSRS_BIN_DIR=str(profile / "bin"),
+                   RSRS_M3_DIR=str(self.args.model_dir), RSRS_ENGINE="cpu",
+                   RSRS_NO_AUTOSYNC="1", RSRS_RPC_TOKEN=secrets.token_hex(32))
+        env['RSRS_RUNTIME_BIN'] = str(self.args.runtime_binary or self.args.binary)
+        if self.args.runtime_binary:
+            env['LC_ALL'] = 'C'
+        for key in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "TMPDIR", "RSRS_DATA_DIR", "RSRS_BIN_DIR"):
+            Path(env[key]).mkdir(parents=True, exist_ok=True, mode=0o700)
+        with socket.socket() as listener:
+            listener.bind(('127.0.0.1', 0))
+            env['RSRS_RPC_PORT'] = str(listener.getsockname()[1])
+        installed = install_published_runtime(self.args.binary, env)
+        if installed is not None and os.environ.get('RSRS_ARTIFACT_SOURCE') != 'published-assets':
+            receipt = json.loads((Path(env['RSRS_DATA_DIR']) / 'bin/runtime.json').read_text(encoding='utf-8'))
+            self.args.runtime_binary = installed
+            self.args.runtime_version, self.args.runtime_sha256 = receipt['version'], receipt['sha256']
+            runtime_inputs(self.args, [self.args.binary])
+        return env
+
+    def direct(self, env, command, allow_pending=False, timeout=150, expected_profile=None):
+        try:
+            result = subprocess.run([str(self.args.binary), "--direct", "--json", *command],
+                                    env=env, capture_output=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            self.direct_failures.append({"phase": command[0], "exit_code": None, "timeout": True})
+            raise RuntimeError("direct_" + command[0] + "_timeout") from None
+        if result.returncode not in ((0, 2) if allow_pending else (0,)):
+            text = (result.stdout + result.stderr).decode("utf-8", errors="replace")
+            patterns = {"argument_parse": r"unexpected argument|unrecognized (?:argument|option)|invalid value|required arguments",
+                        "timeout": r"timed? out|timeout", "profile": r"runtime owns its boot profile|profile change",
+                        "keyring": r"keyring|secret service", "invalid": r"invalid", "rate_limit": r"too many requests|rate.limit"}
+            statuses = [int(value) for value in re.findall(r"(?:HTTP(?:/\S+)?\s+|status(?:\s+code)?[\s:=]+)([45]\d\d)\b", text, re.I)]
+            self.direct_failures.append({"phase": command[0], "exit_code": result.returncode,
+                "http_statuses": sorted({value for value in statuses if value in (400, 401, 403, 404, 409, 429, 500, 502, 503, 504)}),
+                "recognized": {key: bool(re.search(pattern, text, re.I)) for key, pattern in patterns.items()}})
+            raise RuntimeError("direct_" + command[0] + "_failed")
+        try:
+            data = json.loads(result.stdout)
+        except ValueError:
+            raise RuntimeError("direct_" + command[0] + "_invalid_json") from None
+        require(not data.get("errors"), "direct_" + command[0] + "_errors")
+        if self.args.runtime_binary and command[0] in ('remember', 'show', 'sync'):
+            with urllib.request.urlopen(urllib.request.Request(
+                    'http://127.0.0.1:' + env['RSRS_RPC_PORT'] + '/api/health', headers={'X-Respire-Health': 'runtime-v1'}), timeout=5) as response:
+                health = json.load(response)
+            root = Path(env['RSRS_DATA_DIR'])
+            verify_runtime_health(self.args, health, root, expected_profile if expected_profile is not None else root)
+        return data
+
+    def prepare(self):
+        self.registration_attempted = True
+        self.cleanup_report["unconfirmed_users"].append(self.user)
+        registration = self.direct(self.a, ["register", "--addr", UPSTREAM, "--user", self.user, "--pass=" + self.password])
+        require(registration.get("summary", {}).get("user") == self.user
+                and registration.get("summary", {}).get("ok") is True, "registered_user_identity_mismatch")
+        self.created = True
+        self.cleanup_report["unconfirmed_users"].remove(self.user)
+        self.cleanup_report["remaining_users"].append(self.user)
+        session_path = Path(self.a["RSRS_DATA_DIR"]) / "session.json"
+        session = json.loads(session_path.read_text(encoding="utf-8"))
+        require(session.get("user") == self.user and session.get("addr") == UPSTREAM
+                and isinstance(session.get("token"), str) and bool(session["token"]), "created_user_session_mismatch")
+        self.account_token = session["token"]
+        super_key = registration.get("summary", {}).get("super")
+        require(isinstance(super_key, str) and bool(super_key), "generated_super_missing")
+        self.direct(self.a, ["sync"], allow_pending=True)
+        login = self.direct(self.b, ["login", "--interactive", "--addr", UPSTREAM, "--user", self.user, "--pass=" + self.password, "--super=" + super_key])
+        summary = login.get("summary", {})
+        require(summary.get("ok") is True and summary.get("user") == self.user
+                and summary.get("addr") == UPSTREAM, "independent_login_identity_mismatch")
+        require(isinstance(summary.get("dir"), str) and bool(summary["dir"]), "independent_login_profile_missing")
+        self.b_profile = Path(summary["dir"]).resolve(strict=True)
+        require(self.b_profile.is_relative_to(Path(self.b["RSRS_DATA_DIR"]).resolve(strict=True)),
+                "independent_login_profile_escape")
+        stopped = subprocess.run([str(self.args.binary), '--runtime-internal', '--stop'],
+            env=self.b, capture_output=True, timeout=60)
+        require(stopped.returncode == 0, 'independent_login_runtime_stop_failed')
+        # Drain A before changing the session bound to its resident Runtime.
+        stopped = subprocess.run([str(self.args.binary), '--runtime-internal', '--stop'],
+            env=self.a, capture_output=True, timeout=90)
+        require(stopped.returncode == 0, 'registered_runtime_stop_failed')
+        session = json.loads(session_path.read_text(encoding="utf-8"))
+        require(session.get("addr") == UPSTREAM, "unexpected_registered_upstream")
+        session["addr"] = self.gate.address
+        session_path.write_text(json.dumps(session), encoding="utf-8")
+        session_path.chmod(0o600)
+
+    def start(self, automatic=True):
+        if self.args.runtime_binary:
+            stopped = subprocess.run([str(self.args.binary), '--runtime-internal', '--stop'],
+                                     env=self.a, capture_output=True, timeout=90)
+            require(stopped.returncode == 0, 'preparation_runtime_stop_failed')
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            self.port = sock.getsockname()[1]
+        self.a['RSRS_RPC_PORT'] = str(self.port)
+        env = self.a.copy()
+        if automatic:
+            env.pop("RSRS_NO_AUTOSYNC", None)
+        env["RSRS_RPC_PORT"] = str(self.port)
+        launch = ([env['RSRS_RUNTIME_BIN'], 'serve'] if self.args.runtime_binary else
+                  [str(self.args.binary), '--runtime-internal', '--no-open'])
+        self.runtime_env = env
+        data_dir = Path(env["RSRS_DATA_DIR"])
+        token_path = data_dir / "runtime" / "token"
+        endpoint_path = data_dir / "runtime" / "endpoint.json"
+        self.token_present_before_start = token_path.exists()
+        self.runtime_stdout = tempfile.TemporaryFile()
+        self.runtime_stderr = tempfile.TemporaryFile()
+        self.child = subprocess.Popen([*launch, '--port', str(self.port)],
+                                      env=env, stdout=self.runtime_stdout, stderr=self.runtime_stderr)
+
+        def ready():
+            require(self.child.poll() is None, "owned_runtime_exited_before_ready")
+            require(not token_path.exists(), "loopback_runtime_created_token")
+            if not endpoint_path.is_file():
+                return False
+            try:
+                with urllib.request.urlopen(urllib.request.Request(
+                        "http://127.0.0.1:" + str(self.port) + "/api/health", headers={'X-Respire-Health': 'runtime-v1'}), timeout=5) as response:
+                    require(response.status == 200, "runtime_health_status_failed")
+                    health = json.load(response)
+            except urllib.error.HTTPError:
+                raise RuntimeError("runtime_health_status_failed") from None
+            except (OSError, urllib.error.URLError):
+                return False
+            if self.args.runtime_binary:
+                verify_runtime_health(self.args, health, data_dir, data_dir, self.child.pid)
+                if health.get("startup_complete") is not True:
+                    return False
+            else:
+                require(health.get("v") == 1 and health.get("bin") == self.args.version
+                    and health.get("pid") == self.child.pid
+                    and Path(health.get("exe", "")).resolve() == self.args.binary
+                    and Path(health.get("data_dir", "")).resolve() == data_dir.resolve(),
+                    "owned_runtime_identity_mismatch")
+            return True
+
+        wait_for(ready, 30, "runtime_start_timeout")
+        if self.args.runtime_binary:
+            unlocked = self.direct(self.a, ["runtime", "unlock"])
+            require(unlocked.get("summary", {}).get("store_ready") is True, "runtime_host_unlock_failed")
+        wait_for(lambda: self.rpc(["status"]).get("ok"), 30, "runtime_ready_timeout")
+
+    def rpc(self, command):
+        body = {"v": 1, "id": secrets.token_hex(16), "method": "cli.exec", "args": ["--json", *command]}
+        if self.args.runtime_binary:
+            with urllib.request.urlopen(urllib.request.Request(
+                    'http://127.0.0.1:' + str(self.port) + '/api/health', headers={'X-Respire-Health': 'runtime-v1'}), timeout=5) as response:
+                health = json.load(response)
+            data_dir = Path(self.a['RSRS_DATA_DIR'])
+            verify_runtime_health(self.args, health, data_dir, data_dir, self.child.pid)
+            body = scoped_rpc_request(health, ['--json', *command])
+        request = urllib.request.Request("http://127.0.0.1:" + str(self.port) + "/api/rpc",
+            json.dumps(body).encode(),
+            {"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(request, timeout=45) as response:
+                reply = json.load(response)
+            if self.args.runtime_binary:
+                verify_rpc_receipt(body, reply)
+            return reply
+        except Exception:
+            raise RuntimeError("local_rpc_failed") from None
+
+    def remember(self, title, content, direct=False):
+        command = ["remember", content, "--title", title, "--importance", "important", "--force"]
+        if direct:
+            self.direct(self.a, command)
+        else:
+            result = self.rpc(command)
+            require(result.get("ok") and result.get("exit") == 0, "foreground_save_failed")
+        with sqlite3.connect(Path(self.a["RSRS_DATA_DIR"]) / "rsrs.db") as db:
+            row = db.execute("SELECT id FROM memories WHERE title=? AND deleted=0", (title,)).fetchone()
+        require(row is not None, "saved_memory_missing")
+        return row[0]
+
+    def diagnose(self, report, phase):
+        # Only finite state and counts, never session fields or provider error strings.
+        result = {"phase": phase, "runtime_alive": self.child is not None and self.child.poll() is None,
+                  "direct_failures": list(self.direct_failures),
+                  "token_present_before_start": self.token_present_before_start}
+        if sys.exc_info()[0] is not None and self.child is not None:
+            result["runtime_exit_code"] = self.child.poll()
+            for name, stream in (("stdout", self.runtime_stdout), ("stderr", self.runtime_stderr)):
+                stream.seek(0)
+                output = stream.read()
+                # Publish only known error markers and output metadata, never raw credentials.
+                result[name] = {"bytes": len(output), "sha256": hashlib.sha256(output).hexdigest(),
+                    "errors": [message for message in (
+                        "Runtime session credentials are unavailable", "library remains locked",
+                        "incomplete Runtime readiness frame", "compatibility host exited before readiness",
+                        "runtime launch grant is missing or consumed",
+                        "interrupted auth control must be recovered before serving",
+                    ) if message.encode() in output]}
+        with self.gate.lock:
+            result.update(request_counts=dict(self.gate.request_counts), sync_read_requests=self.gate.sync_read_requests,
+                          injected_disconnects=self.gate.fault_requests, real_acknowledgments=len(self.gate.acknowledged),
+                          proxy_response_parse_failures=self.gate.proxy_response_parse_failures)
+        try:
+            result["pending"] = self.pending()
+            if result["runtime_alive"]:
+                summary = self.rpc(["status"]).get("envelope", {}).get("summary", {})
+                scheduler = summary.get("sync_scheduler", {})
+                result["scheduler"] = {key: scheduler.get(key) for key in ("state", "next_run_ms", "manual_waiters")}
+                result["autosync"] = summary.get("autosync")
+                result["remote_configured"] = summary.get("remote_configured")
+                result["sync_phase"] = summary.get("sync_live", {}).get("phase")
+        except Exception:
+            result["diagnostic_code"] = "local_diagnostics_unavailable"
+        report.setdefault("diagnostics", []).append(result)
+
+    def pending(self):
+        with sqlite3.connect(Path(self.a["RSRS_DATA_DIR"]) / "rsrs.db") as db:
+            return db.execute("SELECT COUNT(*) FROM sync_outbox WHERE state='pending'").fetchone()[0]
+
+    def snapshot(self):
+        with sqlite3.connect(Path(self.a["RSRS_DATA_DIR"]) / "rsrs.db") as db:
+            return {
+                "pending": db.execute("SELECT seq,id FROM sync_outbox WHERE state='pending' ORDER BY seq").fetchall(),
+                "envelopes": db.execute("SELECT id,user,ciphertext,nonce,embedding_enc,updated_at,deleted FROM sync_outbox WHERE state='pending' ORDER BY seq").fetchall(),
+                "dirty": {row[0] for row in db.execute("SELECT id FROM memories WHERE dirty=1")},
+                "epoch": db.execute("SELECT value FROM meta WHERE key='sync_v2_epoch'").fetchone(),
+            }
+
+    def prove(self, memories):
+        def acknowledged():
+            with self.gate.lock:
+                require(self.gate.proxy_response_parse_failures == 0, "proxy_response_parse_failure")
+                real_acknowledged = set(memories).issubset(self.gate.acknowledged)
+            return self.pending() == 0 and real_acknowledged
+        wait_for(acknowledged, 150, "real_ack_timeout")
+        self.direct(self.b, ["sync"], allow_pending=True, expected_profile=self.b_profile)
+        for memory_id, content in memories.items():
+            shown = self.direct(self.b, ["show", memory_id], expected_profile=self.b_profile)
+            require(any(node.get("id") == memory_id and node.get("content") == content for node in objects(shown)), "independent_pull_decrypt_mismatch")
+
+    def close(self):
+        stopped = False
+        try:
+            self.gate.release.set()
+            if self.child is not None:
+                if self.args.runtime_binary and self.child.poll() is None:
+                    acknowledgement = subprocess.run([str(self.args.binary), '--runtime-internal', '--stop'],
+                                             env=self.runtime_env, capture_output=True, timeout=90)
+                    require(acknowledgement.returncode == 0, 'owned_runtime_drain_failed')
+                elif self.child.poll() is None:
+                    self.child.terminate()
+                try:
+                    self.child.wait(10)
+                except subprocess.TimeoutExpired:
+                    self.child.kill()
+                    self.child.wait(10)
+            if self.args.runtime_binary:
+                for env in (self.a, self.b):
+                    acknowledgement = subprocess.run([str(self.args.binary), '--runtime-internal', '--stop'],
+                                                     env=env, capture_output=True, timeout=90)
+                    require(acknowledgement.returncode == 0, 'owned_profile_runtime_drain_failed')
+            self.gate.close()
+            stopped = True
+        except Exception:
+            self.cleanup_report["events"].append({"user": self.user, "passed": False, "code": "cleanup_runtime_shutdown_failed"})
+        for stream in (self.runtime_stdout, self.runtime_stderr):
+            if stream is not None:
+                stream.close()
+        if stopped:
+            self.cleanup_account()
+
+    def cleanup_account(self):
+        if not self.created:
+            self.cleanup_report["events"].append({"user": self.user, "passed": not self.registration_attempted,
+                "code": "registration_outcome_unconfirmed" if self.registration_attempted else "no_account_created"})
+            return
+        if not self.account_token:
+            self.cleanup_report["events"].append({"user": self.user, "passed": False, "code": "cleanup_account_token_missing"})
+            return
+        def request(method, path, body=None):
+            encoded = json.dumps(body).encode() if body is not None else None
+            req = urllib.request.Request(UPSTREAM + path, encoded,
+                {"Authorization": "Bearer " + self.account_token, "Content-Type": "application/json"}, method=method)
+            try:
+                response = self.gate.opener.open(req, timeout=45)
+            except urllib.error.HTTPError as error:
+                response = error
+            with response:
+                status = response.code
+                raw = response.read(1024 * 1024 + 1)
+                require(len(raw) <= 1024 * 1024, "cleanup_response_too_large")
+                return status, json.loads(raw)
+        try:
+            # The authenticated server binds purge to this confirmed-created user, never an admin target.
+            status, result = request("POST", "/api/self/purge", {"confirm": self.user})
+            require(status == 200 and result.get("purged") is True and result.get("user") == self.user, "cleanup_self_purge_failed")
+            status, _ = request("GET", "/api/self")
+            require(status == 401, "cleanup_token_still_accepted")
+            self.cleanup_report["remaining_users"].remove(self.user)
+            self.cleanup_report["events"].append({"user": self.user, "passed": True, "self_purge_confirmed": True, "old_token_rejected": True})
+        except Exception:
+            self.cleanup_report["events"].append({"user": self.user, "passed": False, "code": "cleanup_self_purge_or_verification_failed"})
+
+
+def run(args, report):
+    require(os.environ.get("GITHUB_ACTIONS") == "true", "github_actions_required")
+    args.binary = args.binary.resolve(strict=True)
+    runtime_inputs(args, [args.binary])
+    require(args.binary.is_file(), "invalid_artifact_inputs")
+    require(hashlib.sha256(args.binary.read_bytes()).hexdigest() == args.binary_sha256.lower(), "binary_hash_mismatch")
+    runner_temp = Path(os.environ["RUNNER_TEMP"]).resolve(strict=True)
+    args.root = args.root.resolve()
+    require(args.root != runner_temp and args.root.is_relative_to(runner_temp), "root_must_be_runner_temp_child")
+    args.model_dir = args.model_dir.resolve()
+    require(args.model_dir == args.root / "models", "model_dir_must_be_owned_root_models")
+    args.root.mkdir(parents=True, exist_ok=False, mode=0o700)
+    report.update(source_sha=args.source_sha, version=args.version, binary_sha256=args.binary_sha256.lower(), upstream=UPSTREAM)
+    fixture = Fixture(args, args.root / "foreground", report["cleanup"])
+    try:
+        version = fixture.direct(fixture.a, ["v"])
+        require(any(value == args.version for node in objects(version) for value in node.values() if isinstance(value, str)), "binary_version_mismatch")
+        args.model_dir.mkdir(mode=0o700)
+        # The CLI sweep can uninstall its models; install independently through the pinned CLI flow.
+        fixture.direct(fixture.a, ["model", "install-m3"], timeout=600)
+        share_cpu_container(args.root, fixture.a, args.model_dir)
+        require(all(path.is_file() and path.stat().st_size > 0 for path in
+                    (args.model_dir / "tokenizer.json", args.model_dir / "onnx" / "model_quantized.onnx")),
+                "installed_model_files_missing")
+        fixture.prepare()
+        seed_content = "Development queued foreground seed " + secrets.token_hex(16)
+        seed_id = fixture.remember("CI foreground seed", seed_content, direct=True)
+        require(fixture.pending() > 0, "foreground_seed_not_pending")
+        fixture.gate.hold = True
+        fixture.start()
+        require(fixture.gate.entered.wait(30), "real_sync_read_hold_not_entered")
+        content = "Development outbox foreground marker " + secrets.token_hex(16)
+        started = time.monotonic()
+        memory_id = fixture.remember("CI outbox foreground", content)
+        elapsed = round((time.monotonic() - started) * 1000, 2)
+        require(not fixture.gate.release.is_set() and fixture.pending() > 0, "foreground_did_not_precede_network_release")
+        require(fixture.rpc(["status"]).get("ok"), "status_during_network_wait_failed")
+        fixture.gate.hold = False
+        fixture.gate.release.set()
+        fixture.prove({seed_id: seed_content, memory_id: content})
+        report["cases"]["foreground_save_during_network_wait"] = {"passed": True, "completed_before_release": True, "elapsed_ms": elapsed}
+        report["cases"]["independent_pull_decrypt"] = {"passed": True, "real_acknowledgments": 2, "content_equal": True}
+    finally:
+        fixture.diagnose(report, "foreground")
+        fixture.close()
+
+    fixture = Fixture(args, args.root / "finite-manual", report["cleanup"])
+    manual_thread = None
+    try:
+        fixture.prepare()
+        entered, release = fixture.gate.hold_call(1)
+        fixture.start(automatic=False)
+        first_content = "Development finite boundary first marker " + secrets.token_hex(16)
+        first_id = fixture.remember("CI finite first", first_content)
+        captured_boundary = max(seq for seq, _ in fixture.snapshot()["pending"])
+        manual = {}
+        def synchronize():
+            try:
+                manual["response"] = fixture.rpc(["sync"])
+            except Exception:
+                manual["failed"] = True
+        manual_thread = threading.Thread(target=synchronize, daemon=True)
+        manual_thread.start()
+        require(entered.wait(30), "manual_sync_read_gate_not_entered")
+        later_content = "Development finite boundary later marker " + secrets.token_hex(16)
+        later_id = fixture.remember("CI finite later", later_content)
+        require(any(seq > captured_boundary and identity == later_id for seq, identity in fixture.snapshot()["pending"]), "later_operation_not_beyond_boundary")
+        release.set()
+        manual_thread.join(60)
+        require(not manual_thread.is_alive() and not manual.get("failed"), "manual_pass_timeout")
+        response = manual["response"]
+        require(response.get("exit") == 2 and not response.get("envelope", {}).get("errors"), "finite_manual_missing_pending_warning")
+        after = fixture.snapshot()
+        require({identity for _, identity in after["pending"]} == {later_id} and later_id in after["dirty"], "manual_pass_acknowledged_later_write")
+        require(first_id in fixture.gate.acknowledged and later_id not in fixture.gate.acknowledged, "manual_push_exceeded_captured_boundary")
+        second = fixture.rpc(["sync"])
+        require(second.get("exit") in (0, 2) and not second.get("envelope", {}).get("errors"), "second_manual_sync_failed")
+        fixture.prove({first_id: first_content, later_id: later_content})
+        report["cases"]["finite_manual_boundary"] = {"passed": True, "later_write_retained": True, "first_pass_real_ack_only": True, "second_pass_and_independent_pull": True}
+    finally:
+        fixture.diagnose(report, "finite_manual")
+        fixture.close()
+        if manual_thread is not None:
+            manual_thread.join(5)
+
+    fixture = Fixture(args, args.root / "reset", report["cleanup"])
+    try:
+        fixture.prepare()
+        content = "Development reset pending marker " + secrets.token_hex(16)
+        memory_id = fixture.remember("CI reset pending", content, direct=True)
+        require(fixture.pending() > 0, "reset_seed_not_pending")
+        old_entered, old_release = fixture.gate.hold_call(1)
+        new_entered, new_release = fixture.gate.hold_call(2)
+        fixture.start()
+        require(old_entered.wait(30), "reset_old_sync_read_gate_not_entered")
+        before = fixture.snapshot()
+        require(before["epoch"] is not None and memory_id in before["dirty"], "reset_initial_epoch_or_pending_missing")
+        reset = fixture.rpc(["sync-reset"])
+        require(reset.get("ok") and reset.get("exit") == 0, "local_snapshot_reset_failed")
+        reset_snapshot = fixture.snapshot()
+        # Reset deliberately requeues fresh identities; compare preserved envelopes, not old seq values.
+        require(reset_snapshot["epoch"] is None and reset_snapshot["envelopes"] == before["envelopes"]
+                and memory_id in reset_snapshot["dirty"], "reset_did_not_preserve_pending_envelopes")
+        old_release.set()
+        # A subsequent held pass proves the old pass completed, without allowing new epoch application.
+        require(new_entered.wait(45), "reset_new_generation_pass_not_entered")
+        after = fixture.snapshot()
+        require(after == reset_snapshot, "old_response_mutated_reset_snapshot")
+        require(memory_id not in fixture.gate.acknowledged, "old_generation_uploaded_pending_marker")
+        new_release.set()
+        fixture.prove({memory_id: content})
+        report["cases"]["reset_old_response_rejection"] = {"passed": True, "old_response_released": True,
+            "subsequent_pass_observed": True, "old_response_could_not_restore_epoch": True,
+            "pending_envelopes_preserved": True, "new_pass_real_ack_and_independent_pull": True}
+    finally:
+        fixture.diagnose(report, "reset")
+        fixture.close()
+    fixture = Fixture(args, args.root / "backoff", report["cleanup"])
+    try:
+        fixture.prepare()
+        fixture.gate.fail = True
+        fixture.start()
+        content = "Development outbox scheduled retry marker " + secrets.token_hex(16)
+        memory_id = fixture.remember("CI outbox backoff", content)
+        def backoff():
+            state = fixture.rpc(["status"]).get("envelope", {}).get("summary", {}).get("sync_scheduler", {})
+            return state if state.get("state") == "backoff" else None
+        state = wait_for(backoff, 100, "scheduler_backoff_not_observed")
+        require(0 < state.get("next_run_ms", 0) <= 31000 and fixture.pending() > 0, "backoff_did_not_preserve_pending")
+        with fixture.gate.lock:
+            failed_requests = fixture.gate.fault_requests
+        require(failed_requests > 0, "transport_fault_not_injected")
+        fixture.gate.fail = False
+        # No sync command or mutation after this point: only the scheduled pass can upload.
+        fixture.prove({memory_id: content})
+        report["cases"]["scheduled_transport_retry"] = {"passed": True, "injected_disconnects": failed_requests, "backoff_observed": True, "scheduled_real_ack": True, "independent_content_equal": True}
+    finally:
+        fixture.diagnose(report, "backoff")
+        fixture.close()
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--binary", type=Path, required=True)
+    parser.add_argument("--binary-sha256", required=True)
+    parser.add_argument("--version", required=True)
+    parser.add_argument("--source-sha", required=True)
+    parser.add_argument("--root", type=Path, required=True)
+    parser.add_argument("--model-dir", type=Path, required=True)
+    add_runtime_arguments(parser)
+    args = parser.parse_args()
+    required = ["foreground_save_during_network_wait", "independent_pull_decrypt", "scheduled_transport_retry", "finite_manual_boundary", "reset_old_response_rejection"]
+    report = {"passed": False, "cases": {}, "required": required,
+              "cleanup": {"passed": False, "remaining_users": [], "unconfirmed_users": [], "events": []}}
+    try:
+        run(args, report)
+        require(all(report["cases"].get(name, {}).get("passed") is True for name in required), "required_case_missing")
+        require(not report["cleanup"]["remaining_users"] and not report["cleanup"]["unconfirmed_users"]
+                and all(event["passed"] for event in report["cleanup"]["events"]), "fixture_cleanup_failed")
+        report["passed"] = True
+    except RuntimeHealthFailure as error:
+        report["failure_code"] = error.code
+        report["failure_diagnostic"] = error.diagnostic()
+    except Exception as error:
+        # Only harness-owned error codes are safe for public diagnostics.
+        report["failure_code"] = str(error) if isinstance(error, RuntimeError) else type(error).__name__
+    report["remaining"] = [name for name in required if report["cases"].get(name, {}).get("passed") is not True]
+    cleanup = report["cleanup"]
+    cleanup["passed"] = not cleanup["remaining_users"] and not cleanup["unconfirmed_users"] and all(event["passed"] for event in cleanup["events"])
+    report.update(runtime_report(args, report['passed']))
+    if args.runtime_binary and not report['standalone_runtime_evidence']:
+        report['passed'] = False
+    runner_temp = os.environ.get("RUNNER_TEMP")
+    safe_root = runner_temp and args.root.resolve() != Path(runner_temp).resolve() and args.root.resolve().is_relative_to(Path(runner_temp).resolve())
+    if os.environ.get("GITHUB_ACTIONS") == "true" and safe_root and args.root.is_dir():
+        (args.root / "outbox-coverage.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    print(json.dumps({"passed": report["passed"], "cases": report["cases"], "failure_code": report.get("failure_code"), "failure_diagnostic": report.get("failure_diagnostic"), "remaining": report["remaining"], "cleanup": cleanup}))
+    return 0 if report["passed"] else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

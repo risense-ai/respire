@@ -1,0 +1,197 @@
+use super::*;
+
+#[test]
+fn client_sends_existing_token_on_initial_health_and_rpc_requests(
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+    let dir = tempfile::tempdir()?;
+    fs::create_dir(dir.path().join("runtime"))?;
+    fs::write(dir.path().join("runtime/token"), "synthetic-upgrade-token")?;
+    let server = loopback_http::Server::bind()?;
+    let port = server.addr().port();
+    let done = Arc::new(AtomicBool::new(false));
+    let finished = Arc::clone(&done);
+    let health_body = fixture_health(dir.path());
+    let worker = thread::spawn(move || -> Result<Vec<String>, String> {
+        let mut paths = Vec::new();
+        while !finished.load(Ordering::Acquire) {
+            let Some(request) = server
+                .recv_timeout(Duration::from_millis(100))
+                .map_err(|error| error.to_string())?
+            else {
+                continue;
+            };
+            if request.header("Authorization") != Some("Bearer synthetic-upgrade-token") {
+                return Err("initial request omitted the existing runtime token".into());
+            }
+            paths.push(request.url().to_owned());
+            let response = if request.url() == "/api/health" {
+                health_body.clone()
+            } else {
+                let body: serde_json::Value = serde_json::from_slice(request.body())
+                    .map_err(|error| error.to_string())?;
+                if body["method"] == "cli.exec" {
+                    check_fixture_operation(&body)?;
+                }
+                serde_json::json!({"v":1,"id":body["id"],"ok":true,"exit":0,"bin":"http-fixture",
+                    "operation_id":body["operation_id"],"idempotency_key":body["idempotency_key"],"scope":body["scope"],
+                    "envelope":{"command":"status","status":"ok","summary":{},"items":[],"actions":[],"errors":[],"details":null,"related":[]}})
+            };
+            request
+                .reply(response.to_string())
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(paths)
+    });
+    let output = Command::new(bin())
+        .args(["--client-only", "status", "--json"])
+        .env("RSRS_DATA_DIR", dir.path())
+        .env("RSRS_RPC_PORT", port.to_string())
+        .env_remove("RSRS_RPC_TOKEN")
+        .output()?;
+    let health = Command::new(bin())
+        .args(["--client-only", "--runtime-internal", "--status", "--json"])
+        .env("RSRS_DATA_DIR", dir.path())
+        .env("RSRS_RPC_PORT", port.to_string())
+        .env_remove("RSRS_RPC_TOKEN")
+        .output()?;
+    done.store(true, Ordering::Release);
+    let paths = worker.join().map_err(|_| "HTTP fixture panicked")??;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
+        health.status.success(),
+        "{}",
+        String::from_utf8_lossy(&health.stdout)
+    );
+    assert!(paths.iter().any(|path| path == "/api/health"));
+    assert!(paths.iter().any(|path| path == "/api/rpc"));
+    Ok(())
+}
+
+/// Legacy display envelopes still normalize under the current scoped transport.
+#[test]
+fn client_normalizes_legacy_failure_envelopes_and_preserves_remote_semantics(
+) -> Result<(), Box<dyn std::error::Error>> {
+    for (status, exit, reason, errors) in [
+        ("fail", 1, "legacy_missing", serde_json::json!([])),
+        (
+            "fail",
+            2,
+            "invalid_input",
+            serde_json::json!(["original remote diagnostic"]),
+        ),
+        ("pending", 2, "decision_required", serde_json::json!([])),
+    ] {
+        let dir = tempfile::tempdir()?;
+        let server = loopback_http::Server::bind()?;
+        let port = server
+            .addr()
+            .port();
+        let original_errors = errors.clone();
+        let health_body = fixture_health(dir.path());
+        let worker = thread::spawn(move || -> Result<(), String> {
+            let request = loop {
+                let request = server
+                    .recv_timeout(Duration::from_secs(10))
+                    .map_err(|error| error.to_string())?
+                    .ok_or("legacy fixture received no request")?;
+                if request.url() != "/api/health" {
+                    break request;
+                }
+                request.reply(health_body.to_string())
+                    .map_err(|error| error.to_string())?;
+            };
+            if request.url() != "/api/rpc" {
+                return Err("unexpected legacy fixture request".into());
+            }
+            let body: serde_json::Value =
+                serde_json::from_slice(request.body()).map_err(|error| error.to_string())?;
+            if body["method"] != "cli.exec" {
+                return Err("unexpected legacy fixture method".into());
+            }
+            check_fixture_operation(&body)?;
+            let response = serde_json::json!({"v":1,"id":body["id"],"ok":exit==0,"exit":exit,"bin":"http-fixture",
+                "operation_id":body["operation_id"],"idempotency_key":body["idempotency_key"],"scope":body["scope"],
+                "envelope":{"command":"show","status":status,"summary":{"reason":reason},
+                    "items":[{"name":"entry","status":"fail","value":"not found"}],
+                    "actions":[],"errors":errors,"details":{"error_type":"legacy_fixture"},"related":[]}});
+            request
+                .reply(response.to_string())
+                .map_err(|error| error.to_string())
+        });
+        let output = Command::new(bin())
+            .args(["--client-only", "show", "synthetic-missing", "--json"])
+            .env("RSRS_DATA_DIR", dir.path())
+            .env("RSRS_RPC_PORT", port.to_string())
+            .env_remove("RSRS_RPC_TOKEN")
+            .output()?;
+        worker.join().map_err(|_| "legacy fixture panicked")??;
+        assert_eq!(output.status.code(), Some(exit));
+        let envelope: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+        assert_eq!(envelope["status"], status);
+        assert_eq!(envelope["summary"]["reason"], reason);
+        assert_eq!(envelope["details"]["error_type"], "legacy_fixture");
+        if status == "fail" && original_errors == serde_json::json!([]) {
+            assert_eq!(envelope["errors"], serde_json::json!(["entry: not found"]));
+        } else {
+            assert_eq!(envelope["errors"], original_errors);
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn client_only_rejects_stalled_inference_before_submitting_a_write(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let server = loopback_http::Server::bind()?;
+    let port = server.addr().port();
+    let worker = thread::spawn(move || -> Result<String, String> {
+        let request = server
+            .recv_timeout(Duration::from_secs(10))
+            .map_err(|error| error.to_string())?
+            .ok_or("client did not inspect health")?;
+        let path = request.url().to_owned();
+        let body = serde_json::json!({"server":"respire","bin":env!("CARGO_PKG_VERSION"),"pid":1,"v":1,
+            "inference":{"host_recovery_required":true}});
+        request
+            .reply(body.to_string())
+            .map_err(|error| error.to_string())?;
+        Ok(path)
+    });
+    let output = Command::new(bin())
+        .args([
+            "--client-only",
+            "remember",
+            "synthetic pending write",
+            "--force",
+            "--json",
+        ])
+        .env("RSRS_DATA_DIR", dir.path())
+        .env("RSRS_RPC_PORT", port.to_string())
+        .env_remove("RSRS_RPC_TOKEN")
+        .output()?;
+    assert_eq!(
+        worker.join().map_err(|_| "HTTP fixture panicked")??,
+        "/api/health"
+    );
+    assert!(!output.status.success());
+    let message = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(message.contains("request was not submitted"), "{message}");
+    assert!(
+        !dir.path().join("onememory.db").exists(),
+        "rejected client created a local store"
+    );
+    Ok(())
+}

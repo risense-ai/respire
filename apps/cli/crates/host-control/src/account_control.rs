@@ -1,0 +1,580 @@
+//! Account requests and receipt checks extracted from CLI control.rs.
+use anyhow::{Context, Result};
+use respire_commands::output::{ResultEnvelope, Status};
+use respire_protocol::host_control::*;
+use respire_protocol::{ControlBinding, HostAuthIdentity, RpcRequest, RpcResponse};
+use std::path::Path;
+
+/// Parameters only: the Runtime account response wrapper and completion grant are separate gates.
+/// Never derive Debug or put these credentials in process arguments or environment variables.
+pub(crate) enum AccountControl {
+    Register {
+        addr: String,
+        user: String,
+        password: String,
+        super_password: Option<String>,
+        material: Option<respire_protocol::HostAuthKeygenMaterial>,
+    },
+    Login {
+        addr: String,
+        user: String,
+        authorization: HostAuthAuthorization,
+        super_password: String,
+    },
+    LoginStep {
+        addr: String,
+        user: String,
+        authorization: HostAuthAuthorization,
+        super_password: Option<String>,
+        input: HostAuthLoginContinuation,
+    },
+    Result,
+    Complete,
+    Rollback,
+}
+
+pub(crate) fn account_request(
+    binding: ControlBinding,
+    identity: HostAuthIdentity,
+    operation_id: &str,
+    operation: AccountControl,
+) -> Result<RpcRequest> {
+    let id = uuid::Uuid::parse_str(operation_id).context("invalid account operation ID")?;
+    anyhow::ensure!(
+        id.get_version_num() == 4 && id.to_string() == operation_id,
+        "account operation ID must be a canonical random UUID"
+    );
+    let (method, argument) = match operation {
+        AccountControl::Register {
+            addr,
+            user,
+            password,
+            super_password,
+            material,
+        } => (
+            HOST_AUTH_REGISTER_METHOD,
+            serde_json::to_string(&HostAuthRegisterParams {
+                schema_version: HOST_AUTH_SCHEMA_V,
+                binding,
+                identity,
+                addr,
+                user,
+                password,
+                super_password,
+                material: Some(material.context("host registration material is missing")?),
+            })?,
+        ),
+        AccountControl::Login {
+            addr,
+            user,
+            authorization,
+            super_password,
+        } => (
+            HOST_AUTH_LOGIN_METHOD,
+            serde_json::to_string(&HostAuthLoginParams {
+                schema_version: HOST_AUTH_SCHEMA_V,
+                binding,
+                identity,
+                addr,
+                user,
+                authorization,
+                super_password: Some(super_password),
+                continuation: None, material: None, challenge: None, custody_ack: None,
+            })?,
+        ),
+        AccountControl::LoginStep {
+            addr,
+            user,
+            authorization,
+            super_password,
+            input,
+        } => (
+            HOST_AUTH_LOGIN_METHOD,
+            serde_json::to_string(&HostAuthLoginParams {
+                schema_version: HOST_AUTH_SCHEMA_V,
+                binding,
+                identity,
+                addr,
+                user,
+                authorization,
+                super_password,
+                continuation: Some(input), material: None, challenge: None, custody_ack: None,
+            })?,
+        ),
+        receipt => {
+            let method = match receipt {
+                AccountControl::Result => HOST_AUTH_ACCOUNT_RESULT_METHOD,
+                AccountControl::Complete => HOST_AUTH_ACCOUNT_COMPLETE_METHOD,
+                AccountControl::Rollback => HOST_AUTH_ACCOUNT_ROLLBACK_METHOD,
+                _ => anyhow::bail!("invalid account receipt operation"),
+            };
+            (
+                method,
+                serde_json::to_string(&HostAuthAccountParams {
+                    schema_version: HOST_AUTH_SCHEMA_V,
+                    binding,
+                    identity, candidate: None, migration_password: None,
+                })?,
+            )
+        }
+    };
+    Ok(RpcRequest {
+        v: crate::PROTOCOL_V,
+        id: uuid::Uuid::new_v4().to_string(),
+        method: method.to_owned(),
+        args: vec![argument],
+        scope: None,
+        operation_id: Some(operation_id.to_owned()),
+        idempotency_key: Some(operation_id.to_owned()),
+        parent_operation_id: None,
+        queue_wait_ms: None,
+        lifecycle: None,
+    })
+}
+
+/// Validate receipt fields, not transport success or permission to leave maintenance.
+pub(crate) fn validate_account_receipt(
+    receipt: &HostAuthAccountResult,
+    operation_id: &str,
+    source_profile: &Path,
+    register: bool,
+) -> Result<()> {
+    let strict_path = |path: &Path| {
+        path.is_absolute()
+            && !path
+                .components()
+                .any(|part| part == std::path::Component::ParentDir)
+    };
+    anyhow::ensure!(
+        receipt.operation_id == operation_id
+            && strict_path(&receipt.source_profile)
+            && receipt.source_profile == source_profile
+            && receipt.target_profile.as_deref().is_none_or(strict_path),
+        "account receipt operation or profile mismatch"
+    );
+    anyhow::ensure!(
+        !register || (receipt.login.is_none() && receipt.super_password.is_none()),
+        "Runtime register receipt contains host-owned recovery material or login continuation state"
+    );
+    if matches!(
+        receipt.outcome,
+        HostAuthAccountOutcome::AwaitingInput | HostAuthAccountOutcome::RolledBack
+    ) {
+        anyhow::ensure!(
+            receipt.super_password.is_none()
+                && receipt
+                    .login
+                    .as_ref()
+                    .is_none_or(|login| login.super_issued.is_none()),
+            "noncommitted outward account receipt contains issued recovery material"
+        );
+    }
+    match receipt.outcome {
+        HostAuthAccountOutcome::AwaitingInput => {
+            let login = receipt
+                .login
+                .as_ref()
+                .context("awaiting-input login status is missing")?;
+            let mut inputs = std::collections::BTreeSet::new();
+            anyhow::ensure!(
+                !register
+                    && receipt.account_id.is_none()
+                    && receipt.session_sha256.is_none()
+                    && receipt.super_password.is_none()
+                    && login.super_issued.is_none()
+                    && !login.user.is_empty()
+                    && !login.addr.is_empty()
+                    && !login.required_inputs.is_empty()
+                    && login.required_inputs.iter().all(|input| matches!(
+                        input.as_str(),
+                        "totp"
+                            | "host_credentials"
+                            | "super_password"
+                            | "legacy_password"
+                            | "account_secret"
+                            | "source_secret"
+                            | "secret_key"
+                            | "new_super"
+                            | "merge_local"
+                    ) && inputs.insert(input.as_str()))
+                    && login.dir.as_deref().is_none_or(strict_path),
+                "invalid awaiting-input account receipt"
+            );
+        }
+        HostAuthAccountOutcome::RolledBack => {
+            anyhow::ensure!(
+                receipt.account_id.is_none()
+                    && receipt.session_sha256.is_none()
+                    && receipt.super_password.is_none(),
+                "invalid rolled-back account receipt"
+            );
+        }
+        HostAuthAccountOutcome::AwaitingVerification | HostAuthAccountOutcome::Committed => {
+            let target = receipt
+                .target_profile
+                .as_ref()
+                .context("account receipt target is missing")?;
+            let (_, selected) = respire_client_host::config::control_roots()?;
+            let target =
+                respire_client_host::config::normalize_control_path(target)?.canonicalize()?;
+            anyhow::ensure!(
+                selected.canonicalize()? == target,
+                "account receipt target is not selected"
+            );
+            let actual = crate::identity(&target)?;
+            anyhow::ensure!(
+                matches!(actual, HostAuthIdentity::Bound { account_id, session_sha256 }
+                if Some(&account_id) == receipt.account_id.as_ref()
+                    && Some(&session_sha256) == receipt.session_sha256.as_ref()),
+                "account receipt target identity mismatch"
+            );
+            anyhow::ensure!(
+                receipt.super_password.is_none(),
+                "invalid account recovery-code presence"
+            );
+        }
+        HostAuthAccountOutcome::Unknown => {
+            // Even a complete-looking vault-pending receipt is not a terminal result.
+            anyhow::ensure!(
+                receipt.account_id.is_some() == receipt.session_sha256.is_some()
+                    && (receipt.account_id.is_none() || receipt.target_profile.is_some())
+                    && (receipt.super_password.is_none()
+                        || (register && receipt.account_id.is_some()))
+                    && receipt
+                        .super_password
+                        .as_deref()
+                        .is_none_or(|value| !value.is_empty()),
+                "invalid unknown account receipt"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Reduce a private Runtime rejection to a fixed diagnostic class without copying its content.
+pub fn register_rejection_class(error: &str) -> &'static str {
+    if let Some(cause) = error.strip_prefix("registration outcome unknown; query the original operation, do not resend: ") {
+        if let Some(detail) = cause.strip_prefix("authentication salt request failed: ") {
+            if let Some(class) = authorization_request_class(detail, true) { return class; }
+        }
+        if let Some(detail) = cause.strip_prefix("register request failed: ") {
+            match authorization_request_class(detail, false) {
+                Some("auth_login_http_unauthorized") => return "register_http_unauthorized",
+                Some("auth_login_http_forbidden") => return "register_http_forbidden",
+                Some("auth_login_http_rate_limited") => return "register_http_rate_limited",
+                Some("auth_login_http_server_error") => return "register_http_server_error",
+                Some("auth_login_http_other") => return "register_http_other",
+                Some("auth_login_transport") => return "register_transport",
+                _ => {},
+            }
+        }
+        for (head, class) in [
+            ("server did not return an authentication salt", "auth_salt_missing"),
+            ("salt hex decode failed", "auth_salt_invalid_hex"),
+            ("Failed to read JSON", "auth_salt_reply_parse_failed"),
+            ("failed to parse response", "register_reply_parse_failed"),
+            ("register failed", "register_token_missing"),
+        ] {
+            if cause == head || cause.strip_prefix(head).is_some_and(|tail| tail.starts_with(": ")) {
+                return class;
+            }
+        }
+    }
+    let groups: &[(&str, &[&str])] = &[
+        ("register_remote_unknown", &[
+            "registration outcome unknown; query the original operation, do not resend",
+        ]),
+        ("register_native_credentials", &[
+            "migration keyring destination contains a different credential",
+            "migration keyring destination is ambiguous or invalid; original credentials were preserved",
+            "remove new credential after readback mismatch",
+            "migration keyring readback mismatch",
+            "migration keyring write/readback failed; no snapshot was published",
+            "credential backend is unavailable during recovery",
+            "recovery credential is unavailable",
+            "recovery credential is empty",
+            "offline auth requires a persistent credential backend; the volatile kernel keyring cannot recover this transaction",
+        ]),
+        ("register_state_conflict", &[
+            "invalid auth idempotency key", "auth ownership changed", "account and server are required",
+            "auth idempotency conflict",
+            "resolve the interrupted transaction before admitting another account operation",
+            "auth receipt capacity reached", "registration binding mismatch",
+            "unbound source receipt is missing", "registration requires a receipt-backed unbound vault",
+            "recovery code does not match the unbound vault", "account receipt is missing",
+            "account recovery is missing", "source profile changed before account commit",
+            "target profile changed before account commit", "target changed while acquiring ownership",
+            "target session changed during login; original account was preserved",
+            "account admission is missing", "account commit does not own recovery",
+            "interrupted login must be recovered before another commit",
+        ]),
+        ("register_material_invalid", &[
+            "authorization did not return a user", "authorization did not return a token",
+            "vault missing version", "unsupported vault version; original factors were preserved",
+            "vault missing kdf_salt", "vault missing wrapped_urk", "vault missing urk_nonce",
+        ]),
+        ("register_local_compatibility", &[
+            "destination belongs to another account",
+            "legacy session changed or migration would replace its data key",
+            "original credential backend missing; compatibility could not be verified",
+            "local key compatibility could not be verified; original data was preserved",
+        ]),
+    ];
+    for (class, heads) in groups {
+        if heads.iter().any(|head| error == *head
+            || error.strip_prefix(*head).is_some_and(|tail| tail.starts_with(": "))) {
+            return *class;
+        }
+    }
+    "register_unclassified"
+}
+
+fn authorization_request_class(error: &str, salt: bool) -> Option<&'static str> {
+    // ureq 2.x Display puts the URL before the first ": "; never search a private suffix.
+    let (has_url, detail) = if error.starts_with("https://") || error.starts_with("http://") {
+        let (url, detail) = error.split_once(": ")?;
+        if url.chars().any(char::is_whitespace) { return None; }
+        (true, detail)
+    } else {
+        (false, error)
+    };
+    let category = if let Some(code) = detail.strip_prefix("status code ") {
+        if !has_url || code.len() != 3 || !code.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        match code {
+            "401" => 0, "403" => 1, "429" => 2,
+            _ if code.starts_with('5') => 3,
+            _ if matches!(code.as_bytes()[0], b'4'..=b'9') => 4,
+            _ => return None,
+        }
+    } else {
+        let kinds = ["Bad URL", "Unknown Scheme", "Dns Failed",
+            "Insecure request attempted with https_only set", "Connection Failed",
+            "Too Many Redirects", "Bad Status", "Bad Header", "Network Error",
+            "Malformed proxy", "Proxy failed to connect", "Provided proxy credentials are incorrect"];
+        if !kinds.iter().any(|kind| detail == *kind
+            || detail.strip_prefix(*kind).is_some_and(|tail| tail.starts_with(": "))) {
+            return None;
+        }
+        5
+    };
+    Some(if salt {
+        ["auth_salt_http_unauthorized", "auth_salt_http_forbidden", "auth_salt_http_rate_limited",
+            "auth_salt_http_server_error", "auth_salt_http_other", "auth_salt_transport"][category]
+    } else {
+        ["auth_login_http_unauthorized", "auth_login_http_forbidden", "auth_login_http_rate_limited",
+            "auth_login_http_server_error", "auth_login_http_other", "auth_login_transport"][category]
+    })
+}
+
+impl crate::AccountCoordinator {
+    /// Classify a validated private login rejection; unknown text retains the generic response.
+    pub fn login_rejection_class(error: &str) -> Option<&'static str> {
+        if error.starts_with("original decryption factors do not unlock this account; the original account was preserved: ") {
+            return Some("vault_unlock_rejected");
+        }
+        for head in ["local library uses different key material; original data was preserved",
+            "destination belongs to another account"] {
+            if error == head || error.strip_prefix(head).is_some_and(|tail| tail.starts_with(": ")) {
+                return Some("account_material_rejected");
+            }
+        }
+        let cause = error.strip_prefix("authorization outcome unknown; query the original operation, do not resend: ")?;
+        if let Some(detail) = cause.strip_prefix("authentication salt request failed: ") {
+            return authorization_request_class(detail, true);
+        }
+        if let Some(detail) = cause.strip_prefix("login request failed: ") {
+            return authorization_request_class(detail, false);
+        }
+        for (head, class) in [
+            ("server did not return an authentication salt", "auth_salt_missing"),
+            ("salt hex decode failed", "auth_salt_invalid_hex"),
+            ("failed to parse response", "auth_login_reply_parse_failed"),
+            ("TOTP challenge did not return a ticket", "auth_totp_ticket_missing"),
+            ("invalid TOTP challenge ticket", "auth_totp_ticket_invalid"),
+            ("login failed", "auth_login_token_missing"),
+        ] {
+            if cause == head || cause.strip_prefix(head).is_some_and(|tail| tail.starts_with(": ")) {
+                return Some(class);
+            }
+        }
+        None
+    }
+}
+
+pub(crate) fn validate_account_response(
+    response: RpcResponse<ResultEnvelope>,
+    request: &RpcRequest,
+    profile: &Path,
+    pid: u32,
+    source: &Path,
+    register: bool,
+) -> Result<ResultEnvelope> {
+    anyhow::ensure!(
+        response.v == request.v
+            && response.id == request.id
+            && response.bin == "rsrs-runtime"
+            && response.pid == Some(pid)
+            && response.operation_id == request.operation_id
+            && response.idempotency_key == request.idempotency_key
+            && response.scope.is_none()
+            && response.web_url.is_none(),
+        "account control response identity mismatch"
+    );
+    if let Some(directory) = &response.data_dir {
+        anyhow::ensure!(
+            Path::new(directory).canonicalize()? == profile,
+            "account response launch profile mismatch"
+        );
+    }
+    if response.error.is_some() {
+        let envelope = response
+            .envelope
+            .as_ref()
+            .context("account control rejection envelope missing")?;
+        let (code, message) = match response.code.as_deref() {
+            Some("unauthorized") => ("unauthorized", "account launch or parent authorization failed"),
+            Some("scope_mismatch") => ("scope_mismatch", "account control binding changed or does not match"),
+            Some("auth_ownership_unavailable") => ("auth_ownership_unavailable", "account library ownership is unavailable"),
+            Some("control_unavailable") => ("control_unavailable", "account controller is unavailable"),
+            Some("account_outcome_unknown") => ("account_outcome_unknown", "account outcome is unknown; query the original operation without replaying"),
+            Some("control_outcome_unknown") => ("control_outcome_unknown", "account deadline or parent authorization ended; query the original operation without replaying"),
+            _ => anyhow::bail!("invalid account control rejection code"),
+        };
+        let deadline = code == "control_outcome_unknown";
+        let executed = code == "account_outcome_unknown";
+        anyhow::ensure!(
+            !response.ok
+                && response.exit == 2
+                && response
+                    .error
+                    .as_deref()
+                    .is_some_and(|error| !error.is_empty())
+                && envelope.command == "auth-account"
+                && matches!(envelope.status, Status::Fail)
+                && envelope.details.is_null()
+                && envelope.actions.is_empty()
+                && envelope.related.is_empty()
+                && envelope.items.len() == 2
+                && envelope.items[0].name == "control_ready"
+                && envelope.items[0].value
+                    == (if deadline {
+                        "unknown"
+                    } else if executed {
+                        "true"
+                    } else {
+                        "false"
+                    })
+                && (if deadline {
+                    matches!(envelope.items[0].status, Status::Skip)
+                } else if executed {
+                    matches!(envelope.items[0].status, Status::Ok)
+                } else {
+                    matches!(envelope.items[0].status, Status::Fail)
+                })
+                && envelope.items[1].name == "store_ready"
+                && envelope.items[1].value == "false"
+                && matches!(envelope.items[1].status, Status::Skip)
+                && (if deadline {
+                    envelope.summary == serde_json::json!({"outcome":"unknown"})
+                        && envelope.errors.is_empty()
+                } else {
+                    envelope.summary == serde_json::json!({})
+                        && envelope.errors.len() == 1
+                        && response.error.as_ref() == envelope.errors.first()
+                }),
+            "invalid account control rejection envelope"
+        );
+        // Never echo the Runtime diagnostic; every rejection retains the original operation.
+        if register && request.method == HOST_AUTH_REGISTER_METHOD && code == "account_outcome_unknown" {
+            let class = register_rejection_class(response.error.as_deref().context("account control rejection diagnostic missing")?);
+            anyhow::bail!("Runtime rejected account control ({code}): {message}; register_kind={class}");
+        }
+        if !register && request.method == HOST_AUTH_LOGIN_METHOD && code == "account_outcome_unknown" {
+            if let Some(class) = response.error.as_deref().and_then(crate::AccountCoordinator::login_rejection_class) {
+                anyhow::bail!("Runtime rejected account control ({code}): {message}; login_kind={class}");
+            }
+        }
+        anyhow::bail!("Runtime rejected account control ({code}): {message}");
+    }
+    let envelope = response
+        .envelope
+        .context("account control result is missing")?;
+    anyhow::ensure!(
+        envelope.command == "auth-account"
+            && envelope.details.is_null()
+            && envelope.errors.is_empty(),
+        "invalid account control envelope"
+    );
+    for (name, value) in [("control_ready", "true"), ("store_ready", "false")] {
+        let mut items = envelope.items.iter().filter(|item| item.name == name);
+        anyhow::ensure!(
+            items.next().is_some_and(|item| item.value == value
+                && if name == "control_ready" {
+                    matches!(item.status, Status::Ok)
+                } else {
+                    matches!(item.status, Status::Skip)
+                })
+                && items.next().is_none(),
+            "account helper readiness was not confirmed"
+        );
+    }
+    let receipt: HostAuthAccountResult = serde_json::from_value(envelope.summary.clone())
+        .map_err(|_| anyhow::anyhow!("invalid account receipt shape"))?;
+    validate_account_receipt(
+        &receipt,
+        request
+            .operation_id
+            .as_deref()
+            .context("account operation is missing")?,
+        source,
+        register,
+    )?;
+    if request.method == HOST_AUTH_LOGIN_METHOD {
+        let params: HostAuthLoginParams = serde_json::from_str(
+            request
+                .args
+                .first()
+                .context("login request parameters are missing")?,
+        )
+        .map_err(|_| anyhow::anyhow!("invalid login request parameters"))?;
+        if let Some(login) = receipt.login.as_ref() {
+            anyhow::ensure!(
+                login.user == params.user
+                    && login.addr.trim_end_matches('/') == params.addr.trim().trim_end_matches('/'),
+                "login receipt user or server differs from the original request"
+            );
+        }
+    }
+    let code = match receipt.outcome {
+        HostAuthAccountOutcome::AwaitingInput
+        | HostAuthAccountOutcome::AwaitingVerification
+        | HostAuthAccountOutcome::Committed => None,
+        HostAuthAccountOutcome::Unknown => Some("account_outcome_unknown"),
+        HostAuthAccountOutcome::RolledBack => Some("account_rolled_back"),
+    };
+    anyhow::ensure!(
+        response.code.as_deref() == code
+            && if code.is_none() {
+                response.ok
+                    && response.exit == 0
+                    && if receipt.outcome == HostAuthAccountOutcome::AwaitingInput {
+                        matches!(envelope.status, Status::Pending)
+                            && matches!(
+                                request.method.as_str(),
+                                HOST_AUTH_LOGIN_METHOD | HOST_AUTH_ACCOUNT_RESULT_METHOD
+                            )
+                    } else {
+                        matches!(envelope.status, Status::Ok)
+                    }
+            } else {
+                !response.ok && response.exit == 2 && matches!(envelope.status, Status::Fail)
+            },
+        "account control outcome/status mismatch"
+    );
+    Ok(envelope)
+}
+
+#[cfg(test)]
+mod tests;

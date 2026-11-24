@@ -1,0 +1,516 @@
+"""Offline fixture installation tests; no credentials, downloads or live processes."""
+import hashlib
+import ast
+import json
+import os
+import re
+import runpy
+import subprocess
+import sys
+from pathlib import Path
+import tempfile
+import types
+import unittest
+from unittest.mock import Mock, call, patch
+
+from native_fixture_process import install_official_runtime, same_existing_path, canonical_scope_path, runtime_scope_ids, runtime_install_diagnostic
+
+
+from native_runtime_installation_tests import FixtureInstallationCases
+
+
+class FixtureInstallationTests(FixtureInstallationCases, unittest.TestCase):
+    def test_published_autostart_uses_verified_archive_and_requires_hosted_registration(self):
+        scripts = Path(__file__).resolve().parent
+        workflow = (scripts.parent / '.github/workflows/release-native-validation.yml').read_text(encoding='utf-8')
+        expression = re.search(r'include: \$\{\{ fromJSON\((.*)\) \}\}', workflow)
+        self.assertIsNotNone(expression)
+        matrix = re.fullmatch(
+            r"inputs\.recovery_matrix \|\| format\('(\[\{0\}\{1\}\{2\}\])', '([^']+)', "
+            r"!inputs\.shard_macos_upgrades && '([^']+)' \|\| '', '([^']+)'\)",
+            expression[1],
+        )
+        self.assertIsNotNone(matrix)
+        template, before, apple, after = matrix.groups()
+        full = json.loads(template.format(before, apple, after))
+        manifest = json.loads((scripts.parent / 'npm/artifact-manifest.json').read_text(encoding='utf-8'))
+        self.assertEqual(sorted(row['target'] for row in full), sorted(row['triple'] for row in manifest['targets']))
+        apple_target = 'aarch64-apple-darwin'
+        self.assertEqual([row for row in full if row['target'] == apple_target],
+                         [{'os': 'macos-15', 'target': apple_target}])
+        self.assertEqual(json.loads(template.format(before, '', after)),
+                         [row for row in full if row['target'] != apple_target])
+        workflow, apple_jobs = workflow.split('\n  macos-native:\n', 1)
+        apple_setup = apple_jobs.split('\n  macos-upgrade-shards:\n', 1)[0]
+        self.assertIn('if: inputs.shard_macos_upgrades', apple_setup)
+        self.assertIn(f'target: [{apple_target}]', apple_setup)
+        self.assertIn('runs-on: macos-15', apple_setup)
+        self.assertIn('test "$RUNNER_ENVIRONMENT" = github-hosted', apple_setup)
+        self.assertIn('test "$(uname -m)" = arm64', apple_setup)
+        self.assertLess(apple_setup.index('python -m venv "$RUNNER_TEMP/upgrade-python"'),
+                        apple_setup.index('      - *native_autostart'))
+        name = 'Verify OS autostart registration from verified release bytes'
+        step = workflow.split('      - &native_autostart\n        name: ' + name + '\n')[1].split('\n      - ')[0]
+        self.assertIn("if: inputs.validation_profile == 'full' && !inputs.musl_source_recovery\n", step)
+        self.assertNotIn('inputs.artifact_source', step)  # Candidate and published full use the same verified archive.
+        self.assertIn('set -euo pipefail', step)
+        self.assertIn('unset GH_TOKEN GITHUB_TOKEN RSRS_RUNTIME_BIN', step)
+        for variable in ('RSRS_PUBLISHED_RUNTIME_ARCHIVE', 'RSRS_PUBLISHED_RUNTIME_VERSION'):
+            self.assertIn('${' + variable + ':?Verified published Runtime ', step)
+        self.assertIn('exe="target/ci/${{ matrix.target }}/release/rsrs"', step)
+        self.assertIn('exe="$exe.exe"', step)
+        self.assertIn('py="$RUNNER_TEMP/upgrade-python/bin/python"', step)
+        self.assertIn('py="$RUNNER_TEMP/upgrade-python/Scripts/python.exe"', step)
+        self.assertIn('"$py" scripts/test-runtime-autostart.py --binary "$exe" --register \\\n'
+                      '            --runtime-archive "$RSRS_PUBLISHED_RUNTIME_ARCHIVE" --runtime-version "$RSRS_PUBLISHED_RUNTIME_VERSION"', step)
+        self.assertLess(workflow.index('run: &native_extract_run node npm/scripts/extract-artifact.mjs validated-cli'),
+                        workflow.index(name))
+        preparation = 'Prepare isolated upgrade Python and the fixed Windows wheel key'
+        self.assertLess(workflow.index(preparation), workflow.index(name))
+        runtime_install = 'Install and verify the official pinned standalone Runtime'
+        systemd = 'Prepare hosted Linux user systemd for OS autostart'
+        self.assertLess(workflow.index(runtime_install), workflow.index(systemd))
+        self.assertLess(workflow.index(systemd), workflow.index(name))
+        systemd_step = workflow.split('      - name: ' + systemd + '\n')[1].split('\n      - ')[0]
+        for guard in ("if: runner.os == 'Linux' && inputs.validation_profile == 'full'",
+                      'test "$GITHUB_ACTIONS" = true',
+                      'test "$RUNNER_ENVIRONMENT" = github-hosted',
+                      'sudo loginctl enable-linger "$(id -un)"',
+                      'sudo systemctl start "user@$uid.service"',
+                      'sudo systemctl is-active --quiet "user@$uid.service"',
+                      'export XDG_RUNTIME_DIR="/run/user/$uid"',
+                      'export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"'):
+            self.assertIn(guard, systemd_step)
+        proofs = ('test ! -L "$XDG_RUNTIME_DIR"',
+                  'test "$(stat -c \'%u:%a\' "$XDG_RUNTIME_DIR")" = "$uid:700"',
+                  'test ! -L "$XDG_RUNTIME_DIR/bus"',
+                  'test -S "$XDG_RUNTIME_DIR/bus"',
+                  'test "$(stat -c \'%u\' "$XDG_RUNTIME_DIR/bus")" = "$uid"',
+                  'systemctl --user start dbus.service',
+                  'systemctl --user is-active --quiet dbus.socket dbus.service',
+                  'test "$(busctl --user call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus NameHasOwner s org.freedesktop.systemd1)" = \'b true\'',
+                  'test "$(busctl --user call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus GetConnectionUnixUser s org.freedesktop.systemd1)" = "u $uid"',
+                  '>> "$GITHUB_ENV"')
+        for proof in proofs:
+            self.assertIn(proof, systemd_step)
+        for before, after in zip(proofs, proofs[1:]):
+            self.assertLess(systemd_step.index(before), systemd_step.index(after))
+        for forbidden in ('dbus-run-session', 'continue-on-error', '|| true', 'retry'):
+            self.assertNotIn(forbidden, systemd_step)
+        self.assertEqual(workflow.count('python -m venv "$RUNNER_TEMP/upgrade-python"'), 1)
+        for dependency in ('dbus-x11 gnome-keyring', 'SecretStorage==3.3.3 jeepney==0.9.0'):
+            self.assertEqual(workflow.count(dependency), 1)
+            self.assertLess(workflow.index(dependency), workflow.index(name))
+        self.assertNotIn('login-regression-python', workflow)
+        self.assertIn('dbus-run-session -- env RSRS_SS_FIXTURE_BUS=private "$RUNNER_TEMP/upgrade-python/bin/python" scripts/dev-login-interruption-smoke.py', workflow)
+        for forbidden in ('--previous-binary', '--runtime-binary', 'cargo ', 'continue-on-error', '|| true'):
+            self.assertNotIn(forbidden, step)
+        for actions, runner in [('false', 'github-hosted'), ('true', 'self-hosted'), ('true', '')]:
+            with self.subTest(actions=actions, runner=runner):
+                result = subprocess.run([sys.executable, str(scripts / 'test-runtime-autostart.py'),
+                                         '--binary', 'must-not-execute', '--register'],
+                                        env={**os.environ, 'GITHUB_ACTIONS': actions, 'RUNNER_ENVIRONMENT': runner},
+                                        capture_output=True, text=True, timeout=10)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('OS registration acceptance is limited to an ephemeral GitHub-hosted runner', result.stderr)
+        source = '\n'.join((scripts / name).read_text(encoding='utf-8') for name in (
+            'test-runtime-autostart.py', 'runtime_autostart_registration.py', 'runtime_autostart_upgrade.py'))
+        supervisor = (scripts.parent / 'cli/src/autostart/supervise.rs').read_text(encoding='utf-8')
+        for variable in ('HOME', 'USERPROFILE'):
+            restore = f'std::env::set_var("{variable}", &config.user_home);'
+            self.assertLess(supervisor.index('lifecycle::owned(&config)?;'), supervisor.index(restore))
+            self.assertLess(supervisor.index(restore), supervisor.index('lifecycle_io::migrate_legacy_session()?;'))
+        self.assertLess(source.index('assert not root.exists()'), source.index('        foreground(False)'))
+        self.assertLess(source.index('        foreground(False)'), source.index('        seed_local_credentials(binary, env, keys, root)'))
+        self.assertLess(source.index('        seed_local_credentials(binary, env, keys, root)'), source.index('        health = foreground(True)'))
+        self.assertLess(source.index('        binary = str(base / "bin"'), source.index('        seed_local_credentials(binary, env, keys, root)'))
+        for proof in ('health["credential_state"] == "required"', '"keyless startup created a session"',
+                      '"keyless startup opened a library"', 'keys.configure_business_env(env)',
+                      'keys.configure_env(env)', 'hosted_user_bus=True', 'keys.cleanup()',
+                      '"registration changed the CLI image used for key custody"',
+                      '"synthetic native credential cleanup failed; fixture retained"'):
+            self.assertIn(proof, source)
+        for proof in ('query.returncode == 0, "unlocked foreground status failed"',
+                      'query.returncode == 2 and status_reply["status"] == "warn"',
+                      'status_reply["summary"]["credential_state"] == "required"',
+                      'status_reply["summary"]["store_ready"] is False'):
+            self.assertIn(proof, source)
+        self.assertNotIn('"session.json").write', source)
+        self.assertNotIn('keys.put(', source)
+        # Execute the actual seeding helper; subprocesses stand in only for this offline contract.
+        helpers = runpy.run_path(str(scripts / 'test-runtime-autostart.py'))
+        seed = helpers['seed_local_credentials']
+        ready = helpers['foreground_health_ready']
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runtime = root / 'official-runtime'
+            runtime.write_bytes(b'offline-image-never-executed')
+            foreign = root / 'foreign'
+            foreign.mkdir()
+            health = dict(server='respire', managed_id=None, exe=str(runtime),
+                installation_root=str(root), data_dir=str(root), pid=123, instance_id='owned-instance',
+                process_start_id='owned-birth', image_sha256='a'*64, store_ready=False, startup_complete=False)
+            owner, complete = ready(health, root, runtime, False, None)
+            self.assertFalse(complete, 'store_ready=false must not accept incomplete startup')
+            for expected in (False, True):
+                for startup in (None, False, True):
+                    candidate = dict(health, store_ready=expected, startup_complete=startup)
+                    self.assertEqual(ready(candidate, root, runtime, expected, owner)[1], startup is True)
+                self.assertFalse(ready(dict(health, startup_complete=True), root, runtime, not health['store_ready'], owner)[1])
+            for field, value in (('data_dir', str(foreign)), ('installation_root', str(foreign)),
+                                 ('exe', str(root)), ('instance_id', 'replacement'), ('pid', 124),
+                                 ('process_start_id', 'replacement'), ('image_sha256', 'b'*64)):
+                with self.subTest(health=field), self.assertRaises(AssertionError):
+                    ready(dict(health, **{field: value}), root, runtime, False, owner)
+        self.assertIn('health.get("startup_complete") is True', source)
+        operation = '12345678-1234-4234-9234-123456789abc'
+        alias = 'login-' + 'fedcba98' * 4  # Native alias is independent of the operation ID.
+        for fault in ('', 'keygen', 'keygen_early', 'keygen_prepared', 'keygen_nonjson', 'keygen_original_changed', 'keygen_cleanup', 'handoff', 'locked',
+                      'bound', 'foreign', 'material', 'session_alias', 'backend', 'stop', 'secondary', 'secondary_foreign_root'):
+            with self.subTest(seed=fault), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory).resolve()
+                profile = root / 'accounts/secondary-profile' if fault.startswith('secondary') else root
+                profile.mkdir(parents=True, exist_ok=True)
+                keys = types.SimpleNamespace(entries=set(), credential_backend='native')
+                calls = []
+                def cli(command, **kwargs):
+                    calls.append(command[2:])
+                    self.assertEqual(command[:2], ['owned-cli', '--json'])
+                    self.assertTrue(kwargs['capture_output'])
+                    self.assertEqual(kwargs['timeout'], 45)
+                    if command[2:] == ['keygen']:
+                        if fault != 'keygen_early':
+                            journal = root / 'runtime/autostart/offline-keygen.json'
+                            journal.parent.mkdir(parents=True)
+                            if fault == 'foreign':
+                                (root / 'foreign').mkdir()
+                            journal.write_text(json.dumps({'schema': 1, 'operation_id': operation,
+                                'stage': 'prepared' if fault.startswith('keygen') else 'committed',
+                                'root': str(profile if fault == 'secondary_foreign_root' else root), 'source': str(profile),
+                                'profile': str(root / 'foreign' if fault == 'foreign' else profile),
+                                'material': None if fault in ('keygen_prepared', 'keygen_original_changed') else {'vault_version': 4, 'auth_operation_id': operation if fault != 'material' else 'foreign',
+                                             'keyring_account': alias, 'keyring_backend': 'foreign' if fault == 'backend' else 'native'}}), encoding='utf-8')
+                            session = {'vault_version': 4, 'keyring_account': 'login-' + 'a'*32 if fault == 'session_alias' else alias,
+                                       'keyring_backend': 'native'}
+                            if fault == 'bound':
+                                session['user'] = 'foreign-account'
+                            (profile / 'session.json').write_text(json.dumps(session), encoding='utf-8')
+                        return types.SimpleNamespace(returncode=int(fault.startswith('keygen')),
+                            stdout='private-sentinel-never-report' if fault == 'keygen_nonjson' else json.dumps({'summary': {'super': 'private-sentinel-never-report'},
+                                               'errors': [('offline keygen original operation changed' if fault == 'keygen_original_changed' else 'host auth credential write failed') + ': private-sentinel-never-report']}),
+                            stderr='private-sentinel-never-report')
+                    if command[2:] == ['runtime', 'status']:
+                        return types.SimpleNamespace(returncode=0, stdout=json.dumps(
+                            {'summary': {'runtime': {'store_ready': fault != 'locked'}}}))
+                    return types.SimpleNamespace(returncode=int(
+                        fault == 'handoff' and command[2:] == ['runtime', 'start']
+                        or fault in ('stop', 'keygen_cleanup') and command[2:] == ['runtime', 'stop']),
+                        stdout='private-sentinel-never-report', stderr='private-sentinel-never-report')
+                with patch('subprocess.run', side_effect=cli):
+                    if fault and fault != 'secondary':
+                        with self.assertRaises(AssertionError) as raised:
+                            seed('owned-cli', {'RSRS_DATA_DIR': str(root)}, keys, profile)
+                        self.assertNotIn('private-sentinel-never-report', str(raised.exception))
+                        if fault.startswith('keygen'):
+                            self.assertIn('synthetic CLI keygen failed', str(raised.exception))
+                            self.assertIn('"category": "' + ('unclassified' if fault == 'keygen_nonjson' else 'original_operation_changed' if fault == 'keygen_original_changed' else 'native_custody') + '"', str(raised.exception))
+                            if fault == 'keygen_cleanup':
+                                self.assertIn('cleanup also failed', raised.exception.__notes__[0])
+                                self.assertNotIn('private-sentinel-never-report', str(raised.exception.__cause__))
+                    else:
+                        seed('owned-cli', {'RSRS_DATA_DIR': str(root)}, keys, profile)
+                self.assertEqual(calls[0], ['keygen'])
+                self.assertEqual(calls[-1], ['runtime', 'stop'])
+                self.assertEqual(calls.count(['keygen']), 1)
+                self.assertEqual(keys.entries, set() if fault in ('foreign', 'secondary_foreign_root', 'material', 'backend', 'keygen_early', 'keygen_prepared', 'keygen_original_changed') else
+                    {('rsrs', 'super:' + alias)})
+                if fault in ('', 'secondary'):
+                    self.assertEqual(calls, [['keygen'], ['runtime', 'start'], ['runtime', 'status'], ['runtime', 'stop']])
+
+        seed_secondary = source.index('        seed_local_credentials(binary, env, keys, secondary)')
+        self.assertLess(seed_secondary, source.index('        enabled = run("runtime", "autostart", "enable")'))
+        for proof in ('command("account", "use", "secondary-profile")', 'command("account", "use", "main")',
+                      '(secondary / "rsrs.db").is_file()',
+                      'secondary_session["keyring_account"] != primary_session["keyring_account"]'):
+            self.assertIn(proof, source)
+        self.assertNotIn('secondary_env', source)
+        self.assertNotIn('copy_managed_installation(managed_fixture / "bin", secondary)', source)
+        # Execute the actual setup: selecting a profile must retain the installation environment.
+        tree = ast.parse(source)
+        setup = next(node.body for node in ast.walk(tree) if isinstance(node, ast.Try)
+                     and any(isinstance(item, ast.Assign) and ast.unparse(item.targets[0]) == 'secondary'
+                             for item in node.body))
+        first = next(index for index, item in enumerate(setup) if isinstance(item, ast.Assign)
+                     and ast.unparse(item.targets[0]) == 'secondary')
+        last = next(index for index, item in enumerate(setup) if isinstance(item, ast.Expr)
+                    and ast.unparse(item.value) == 'seed_local_credentials(binary, env, keys, secondary)')
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            env = {'RSRS_DATA_DIR': str(root), 'RSRS_BIN_DIR': str(root / 'bin')}
+            seed = Mock()
+            command = Mock(return_value=types.SimpleNamespace(returncode=0))
+            scope = dict(root=root, env=env, binary='owned-cli', Path=Path, keys=object(),
+                         command=command, seed_local_credentials=seed)
+            exec(compile(ast.Module(body=setup[first:last + 1], type_ignores=[]), '<secondary-profile>', 'exec'), scope)
+            self.assertEqual(command.call_args_list, [call('account', 'use', 'secondary-profile')])
+            self.assertEqual(seed.call_args.args, ('owned-cli', env, scope['keys'], root / 'accounts/secondary-profile'))
+            self.assertIs(seed.call_args.args[1], env)
+            self.assertEqual(env, {'RSRS_DATA_DIR': str(root), 'RSRS_BIN_DIR': str(root / 'bin')})
+        # Run the actual switch block offline: config must stay idle before explicit start.
+        from contextlib import nullcontext
+        switch = next(node for node in ast.walk(ast.parse(source)) if isinstance(node, ast.For)
+                      and ast.unparse(node.target) == 'target' and ast.unparse(node.iter) == '(secondary, root)')
+        code = compile(ast.Module(body=[switch], type_ignores=[]), '<profile-switch-contract>', 'exec')
+        for fault in ('', 'running', 'locked', 'pending'):
+            with self.subTest(switch=fault), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory).resolve()
+                secondary = root / 'accounts/secondary profile'
+                secondary.mkdir(parents=True)
+                if fault == 'pending':
+                    marker = root / 'runtime/autostart/maintenance.json'
+                    marker.parent.mkdir(parents=True)
+                    marker.write_text('{"phase":"Paused"}', encoding='utf-8')
+                results = []
+                for pid, target in enumerate((secondary, root), start=2):
+                    results.extend([{}, {'runtime': {'running': fault == 'running'}}, {},
+                                    {'runtime': {'data_dir': str(target), 'pid': pid, 'store_ready': fault != 'locked'}}])
+                run = Mock(side_effect=results)
+                pairs = [object(), object()]
+                owned = Mock(side_effect=[nullcontext(pair) for pair in pairs])
+                replaced = Mock()
+                scope = dict(root=root, secondary=secondary, previous_pid=1, Path=Path,
+                             os=types.SimpleNamespace(name='nt'), run=run,
+                             owned_windows_pair=owned, require_replacement_pair=replaced)
+                if fault:
+                    with self.assertRaises(AssertionError):
+                        exec(code, scope)
+                else:
+                    exec(code, scope)
+                    self.assertEqual(run.call_args_list, [item for target in (secondary, root) for item in
+                        (call('config', '--data-dir', str(target)), call('runtime', 'status'),
+                         call('runtime', 'start'), call('runtime', 'status'))])
+                    self.assertEqual(replaced.call_args_list, [call(pairs[0], secondary), call(pairs[1], root)])
+                    self.assertEqual(scope['previous_pid'], 3)
+
+    def test_scope_ids_use_os_canonical_paths_and_preserve_bound_accounts(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            profile = root / 'profile'
+            profile.mkdir()
+            expected_root = canonical_scope_path(root)
+            expected_profile = canonical_scope_path(profile)
+            expected = tuple(hashlib.sha256(value.encode()).hexdigest()
+                             for value in (expected_root, expected_profile))
+            self.assertEqual(runtime_scope_ids(root, profile, {}), expected)
+            self.assertEqual(runtime_scope_ids(root / '.', profile / '..' / 'profile', {}), expected)
+            bound = hashlib.sha256(b'fixture-account').hexdigest()
+            self.assertEqual(runtime_scope_ids(root, profile, {'user': 'fixture-account'}), (expected[0], bound))
+            self.assertNotEqual(runtime_scope_ids(root, root, {})[1], expected[1])
+            with self.assertRaises(OSError):
+                runtime_scope_ids(root, root / 'missing', {})
+            with self.assertRaises(ValueError):
+                runtime_scope_ids(root, profile, {'user': 1})
+            if os.name == 'nt':
+                self.assertTrue(expected_root.startswith('\\\\?\\'))
+                self.assertEqual(runtime_scope_ids(expected_root, expected_profile, {}), expected)
+                self.assertNotEqual(hashlib.sha256(str(root).encode()).hexdigest(), expected[0])
+
+    def test_path_identity_requires_the_same_existing_file_or_directory(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            first, second = root / 'first', root / 'second'
+            first.write_bytes(b'one')
+            second.write_bytes(b'one')
+            self.assertTrue(same_existing_path(first, root / '.' / 'first'))
+            self.assertTrue(same_existing_path(root, root.resolve()))
+            self.assertFalse(same_existing_path(first, second))
+            self.assertFalse(same_existing_path(first, root))
+            self.assertFalse(same_existing_path(first, root / 'missing'))
+            self.assertFalse(same_existing_path('', root))
+            self.assertFalse(same_existing_path(1, root))
+            self.assertFalse(same_existing_path({'path': str(root)}, root))
+            if os.name == 'nt':
+                self.assertTrue(same_existing_path('\\\\?\\' + str(first.resolve()), first))
+                self.assertTrue(same_existing_path('\\\\?\\' + str(root.resolve()), root))
+
+    def test_upgrade_fixture_reuses_verified_runtime_after_legacy_seed(self):
+        tree = ast.parse(Path(__file__).with_name('test-real-m3-account-switch.py').read_text(encoding='utf-8'))
+        branches = [node for node in ast.walk(tree) if isinstance(node, ast.If)]
+        fresh = next(node for node in branches
+                     if ast.unparse(node.test) == 'not (args.seed_binary and args.runtime_binary)')
+        upgrade = next(node for node in branches
+                       if ast.unparse(node.test) == 'args.seed_binary and args.runtime_binary')
+        calls = [node for node in ast.walk(upgrade) if isinstance(node, ast.Call)
+                 and isinstance(node.func, ast.Name)]
+        install = next(node for node in calls if node.func.id == 'install_published_runtime')
+        self.assertFalse(any(node.func.id == 'install_official_runtime' for node in calls))
+        loop = next(node for node in tree.body if isinstance(node, ast.For))
+        lifecycle = ast.parse(Path(__file__).with_name('m3_account_lifecycle.py').read_text(encoding='utf-8'))
+        seed, switch_accounts, reopen = (node for node in lifecycle.body if isinstance(node, ast.FunctionDef))
+        session = next(node for node in ast.walk(seed) if isinstance(node, ast.Call)
+                       and isinstance(node.func, ast.Attribute) and node.func.attr == 'write_text'
+                       and any(isinstance(part, ast.Constant) and part.value == 'session.json'
+                               for part in ast.walk(node.func.value)))
+        old_host = next(node for node in branches if any(isinstance(child, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id == 'web_help' for target in child.targets)
+            for child in node.body))
+        exec(compile(ast.Module(body=[old_host], type_ignores=[]), '<skip-old-host>', 'exec'),
+             dict(args=types.SimpleNamespace(seed_binary=True), database_upgrade=True))
+        seed_call = next(node for node in ast.walk(loop) if isinstance(node, ast.Call)
+                         and ast.unparse(node.func) == seed.name)
+        self.assertLess(fresh.end_lineno, seed_call.lineno)
+        self.assertLess(session.lineno, seed.end_lineno)
+        self.assertLess(seed_call.lineno, install.lineno)
+        baseline = next(node for node in upgrade.body if isinstance(node, ast.Assign)
+                        and any(isinstance(target, ast.Name) and target.id == 'legacy_data' for target in node.targets))
+        self.assertLess(baseline.lineno, install.lineno)
+        snapshot_assert = next(node for node in ast.walk(upgrade) if isinstance(node, ast.Assert)
+                               and any(isinstance(part, ast.Name) and part.id == 'legacy_data'
+                                       for part in ast.walk(node.test)))
+        self.assertGreater(snapshot_assert.lineno, install.lineno)
+        custody = next(node for node in ast.walk(loop) if isinstance(node, ast.Call)
+                       and isinstance(node.func, ast.Name) and node.func.id == 'migrate_fixture_custody')
+        switch_call = next(node for node in ast.walk(loop) if isinstance(node, ast.Call)
+                           and ast.unparse(node.func) == switch_accounts.name)
+        switch = next(node for node in ast.walk(switch_accounts) if isinstance(node, ast.Call)
+                      and isinstance(node.func, ast.Name) and node.func.id == 'run'
+                      and [getattr(arg, 'value', None) for arg in node.args[:2]] == ['account', 'use'])
+        self.assertLess(snapshot_assert.lineno, custody.lineno)
+        self.assertLess(custody.lineno, switch_call.lineno)
+        self.assertLess(switch.lineno, switch_accounts.end_lineno)
+        for fault in (None, 'missing', 'changed-data', 'invalid-artifact'):
+            with self.subTest(artifact=fault), tempfile.TemporaryDirectory() as directory:
+                main = Path(directory)
+                alternate = main / 'accounts/alternate'
+                data = {str(main): 'original-main', str(alternate): 'original-alternate'}
+                def reuse(binary, env):
+                    if fault == 'invalid-artifact':
+                        raise ValueError('fixture artifact verification failed')
+                    if fault == 'changed-data':
+                        data[str(main)] = 'changed database'
+                    return None if fault == 'missing' else main / 'verified-runtime'
+                helper = Mock(side_effect=reuse)
+                scope = dict(args=types.SimpleNamespace(seed_binary=True, runtime_binary='selected-runtime', client2_binary=None),
+                    main=main, alternate=alternate, binary='fixture-cli', env={}, runtime_artifact_reused=False,
+                    json=json, os=os, port=15169,
+                    snapshot=lambda profile: data[str(profile)], install_published_runtime=helper)
+                code = compile(ast.Module(body=[upgrade], type_ignores=[]), '<reuse-upgrade-artifact>', 'exec')
+                if fault:
+                    with self.assertRaises(ValueError if fault == 'invalid-artifact' else AssertionError):
+                        exec(code, scope)
+                    self.assertFalse(scope['runtime_artifact_reused'])
+                else:
+                    exec(code, scope)
+                    self.assertTrue(scope['runtime_artifact_reused'])
+                    self.assertEqual(scope['args'].runtime_binary, main / 'verified-runtime')
+                helper.assert_called_once_with('fixture-cli', scope['env'])
+        post_restart = next(node for node in ast.walk(reopen) if isinstance(node, ast.If)
+                            and ast.unparse(node.test) == 'args.seed_binary'
+                            and any(isinstance(child, ast.For) for child in node.body)
+                            and any(isinstance(child, ast.Call) and isinstance(child.func, ast.Name)
+                                    and child.func.id == 'verify_fixture_custody' for child in ast.walk(node)))
+        for platform in ('darwin', 'linux'):
+            with self.subTest(platform=platform), tempfile.TemporaryDirectory() as directory:
+                main = Path(directory)
+                alternate = main / 'accounts/alternate'
+                alternate.mkdir(parents=True)
+                config = main / 'client.json'
+                config.write_text(json.dumps({'data_dir': str(main)}), encoding='utf-8')
+                events = []
+                def select_account(*command):
+                    self.assertEqual(command[:2], ('account', 'use'))
+                    events.append(command[2])
+                    profile = alternate if command[2] == 'alternate' else main
+                    config.write_text(json.dumps({'data_dir': str(profile)}), encoding='utf-8')
+                def verify(profile, *unused):
+                    if platform == 'darwin':
+                        self.assertEqual(json.loads(config.read_bytes())['data_dir'], str(profile))
+                    events.append('verify-' + profile.name)
+                namespace = dict(args=types.SimpleNamespace(seed_binary=True, runtime_binary='runtime'),
+                    sys=types.SimpleNamespace(platform=platform), main=main, alternate=alternate,
+                    run=select_account, wait_index_ready=lambda: events.append('ready'),
+                    verify_fixture_custody=verify, keys=None, binary='fixture-cli', env={},
+                    custody_slots={str(path): None for path in (main, alternate)},
+                    expected_urks={str(path): None for path in (main, alternate)},
+                    recovery_factors={str(path): None for path in (main, alternate)},
+                    before_restart={str(path): str(path) for path in (main, alternate)},
+                    config_before=config.read_bytes(), snapshot=lambda path: path,
+                    library_state=lambda path, factors: str(path), replacement='restart-owner',
+                    observe_runtime=lambda: 'selected-owner')
+                exec(compile(ast.Module(body=[post_restart], type_ignores=[]), '<post-restart-custody>', 'exec'), namespace)
+                expected = (['alternate', 'ready', 'verify-alternate', 'main', 'ready', 'verify-' + main.name]
+                            if platform == 'darwin' else ['verify-alternate', 'verify-' + main.name])
+                self.assertEqual(events, expected)
+                self.assertEqual(namespace['replacement'], 'selected-owner' if platform == 'darwin' else 'restart-owner')
+
+    def run_fixture(self, fault=None):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / 'fixture'
+            root.mkdir()
+            (root / 'bin').mkdir()
+            version, triple = '1.0.21-dev.17', 'synthetic-target'
+            image = b'synthetic Runtime; never executed'
+            digest = hashlib.sha256(image).hexdigest()
+            env = {'RSRS_DATA_DIR': str(root), 'RSRS_RUNTIME_TRIPLE': triple,
+                   'RSRS_RUNTIME_BIN': '/external/runtime', 'GH_TOKEN': 'not-real',
+                   'GITHUB_TOKEN': 'not-real', 'RSRS_CORE_TEST_MODE': '1'}
+            metadata = {'schema_version': 2, 'runtime_version': version,
+                        'target_triple': triple, 'binary_sha256': digest}
+            installed = root / 'bin/runtime' / version / ('rsrs-runtime.exe' if os.name == 'nt' else 'rsrs-runtime')
+
+            def installer(command, **kwargs):
+                self.assertEqual(command, ['fixture-cli', '--json', 'runtime', 'install', '--version', version])
+                for key in ('RSRS_RUNTIME_BIN', 'RSRS_CORE_TEST_MODE', 'GH_TOKEN', 'GITHUB_TOKEN'):
+                    self.assertNotIn(key, kwargs['env'])
+                self.assertEqual(kwargs['env']['RSRS_DATA_DIR'], str(root))
+                if fault == 'exit':
+                    return types.SimpleNamespace(returncode=1, stdout=json.dumps({
+                        'summary': {'reason': 'runtime_error', 'token': 'private-installer-sentinel'},
+                        'errors': ['runtime restart blocked: owner roots do not match this installation',
+                                   'private-installer-sentinel']}), stderr='private-installer-sentinel')
+                installed.parent.mkdir(parents=True)
+                installed.write_bytes(b'corrupt' if fault == 'image' else image)
+                if fault == 'target':
+                    metadata['target_triple'] = 'wrong-target'
+                encoded = json.dumps(metadata)
+                proof = {'metadata_json': encoded,
+                         'metadata_sha256': hashlib.sha256(encoded.encode()).hexdigest()}
+                if fault == 'proof':
+                    proof['metadata_sha256'] = '0' * 64
+                receipt = {'version': version, 'sha256': digest, 'release': proof}
+                if fault == 'version':
+                    receipt['version'] = '1.0.21-dev.16'
+                (root / 'bin/runtime.json').write_text(json.dumps(receipt))
+                return types.SimpleNamespace(returncode=0)
+
+            if fault == 'existing':
+                (root / 'bin/runtime.json').write_text('{}')
+            hosted = {'GITHUB_ACTIONS': 'true', 'RUNNER_ENVIRONMENT': 'github-hosted',
+                      'RUNNER_TEMP': temporary}
+            if fault == 'host':
+                hosted['RUNNER_ENVIRONMENT'] = 'self-hosted'
+            if fault == 'outside':
+                hosted['RUNNER_TEMP'] = str(root)
+            with patch.dict(os.environ, hosted, clear=True), patch('subprocess.run', side_effect=installer) as run:
+                if fault:
+                    with self.assertRaises((ValueError, RuntimeError)) as raised:
+                        install_official_runtime('fixture-cli', env, version, digest)
+                    if fault == 'exit':
+                        diagnostic = json.loads(str(raised.exception).split('; diagnostic=', 1)[1])
+                        self.assertEqual(diagnostic, {'exit_code': 1, 'structured_reason': 'runtime_error',
+                            'category': 'owner_roots_mismatch', 'envelope': 'object'})
+                        self.assertNotIn('private-installer-sentinel', str(raised.exception))
+                        run.assert_called_once()
+                    self.assertEqual(env['RSRS_RUNTIME_BIN'], '/external/runtime')
+                    if fault in ('host', 'outside', 'existing'):
+                        run.assert_not_called()
+                else:
+                    result = install_official_runtime('fixture-cli', env, version, digest)
+                    self.assertEqual(result, installed.resolve())
+                    self.assertEqual(env['RSRS_RUNTIME_BIN'], str(result))
+                    run.assert_called_once()
+
+
+
+if __name__ == '__main__':
+    unittest.main()
