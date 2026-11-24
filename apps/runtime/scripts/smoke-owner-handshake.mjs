@@ -136,7 +136,7 @@ function secureWindowsFixtureDirectory(root) {
   // harness; do not weaken Runtime's enforcement to accommodate the temp root.
   execFileSync(powershell, ['-NoProfile', '-NonInteractive', '-Command', script], {
     env: {SystemRoot: systemRoot, WINDIR: systemRoot, RESPIRE_SYNTHETIC_ACL_DIR: root},
-    stdio: 'ignore', windowsHide: true, timeout: 10000,
+    stdio: 'ignore', windowsHide: true, timeout: 60000,
   });
 }
 
