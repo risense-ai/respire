@@ -14,6 +14,7 @@ import {
   fetchInventory,
   fetchProfileState,
   readProfileState,
+  activeModelScope,
   profileStateSettled,
   applyEngineChoice,
   openDownloadModal,
@@ -26,6 +27,9 @@ import { bindModelSettings, FUSION_MODES, FUSION_NUMERIC } from "./models-settin
 export function models(root, ctx) {
   const view = {
     engineState: { engine: "cpu", model: "quantized" },
+    runtimeActive: undefined,
+    runtimeActiveScope: null,
+    legacyEngineState: null,
     inventory: null,
     sawMissingBaseline: false,
     baselinePrepared: false,
@@ -173,16 +177,29 @@ export function models(root, ctx) {
     }
     await applyEngineAfterDownload(mode, engine);
   }
+  function acceptRuntimeActive(details, scope) {
+    if (details?.activeKnown && scope && scope === activeModelScope(ctx.desktop?.health)) {
+      view.runtimeActive = details.active;
+      view.runtimeActiveScope = scope;
+    }
+  }
   async function applyEngineAfterDownload(mode, engine) {
+    const scope = activeModelScope(ctx.desktop?.health);
+    const model = view.modelID;
     try {
       view.switchInFlight = true;
       view.stateOverride = null;
       renderDynamic(true);
       const result = await applyEngineChoice({
-        model: view.modelID,
+        model,
         engine,
         variant: mode.variant,
       });
+      acceptRuntimeActive(result.details, scope);
+      if (!isProfileModel(model) && scope === activeModelScope(ctx.desktop?.health) &&
+          view.runtimeActive === null) {
+        view.legacyEngineState = { engine: result.engine, model: result.variant };
+      }
       if (result.fallback || result.failed) {
         // Reflect what the runtime actually fell back to; the mode tag and
         // the status card must not advertise the failed selection.
@@ -266,6 +283,7 @@ export function models(root, ctx) {
     if (loading || !ctx.desktop?.connected) return;
     loading = true;
     loaded = true;
+    const scope = activeModelScope(ctx.desktop?.health);
     try {
       const savedModel = localStorage.getItem("respire-model");
       if (savedModel && MODEL_OPTIONS.some(([id]) => id === savedModel))
@@ -305,6 +323,7 @@ export function models(root, ctx) {
               ? "fp16"
               : "quantized"),
         };
+        view.legacyEngineState = view.engineState;
       }
       if (values[2].status === "fulfilled") backend = summary(values[2].value);
       if (values[3].status === "fulfilled") {
@@ -317,7 +336,8 @@ export function models(root, ctx) {
         view.profileState = values[4].value;
         // The runtime's catalog carries what is actually active; the selector
         // keeps an explicit local choice when one exists.
-        const { active, switchState } = readProfileState(view.profileState);
+        const { active, activeKnown, switchState } = readProfileState(view.profileState);
+        acceptRuntimeActive({ active, activeKnown }, scope);
         const activeModel = active?.model || "";
         if (activeModel && !view.switchInFlight) {
           const known = MODEL_OPTIONS.some(([id]) => id === activeModel);
@@ -412,8 +432,10 @@ export function models(root, ctx) {
       renderVariants();
       return;
     }
+    const scope = activeModelScope(ctx.desktop?.health);
     view.profileState = await fetchProfileState();
-    const { active } = readProfileState(view.profileState);
+    const { active, activeKnown } = readProfileState(view.profileState);
+    acceptRuntimeActive({ active, activeKnown }, scope);
     if (active?.model === view.modelID) {
       view.engineState = {
         engine: active.engine || "cpu",
@@ -454,6 +476,21 @@ export function models(root, ctx) {
       }
     }
   }
+  async function refreshM3Inventory() {
+    if (!root.isConnected || view.modelID !== "m3") return true;
+    try {
+      const inventory = await fetchInventory("m3");
+      if (root.isConnected && view.modelID === "m3" && inventory.model === "m3") {
+        view.inventory = inventory;
+        renderVariants();
+        renderDynamic(true);
+      }
+      return true;
+    } catch (error) {
+      if (root.isConnected) notify(error.message, true);
+      return false;
+    }
+  }
   bindModelActions(view, {
     root,
     renderAdvancedVisibility,
@@ -465,6 +502,8 @@ export function models(root, ctx) {
     ctx,
     currentMirror,
     load,
+    refreshM3Inventory,
+    acceptRuntimeActive,
   });
   const { adoptFusion, renderFusion } = bindModelSettings({ root, ctx, fusion, currentMirror, load });
   update();

@@ -12,6 +12,9 @@ import {
   modeForVariant,
   performanceAvailable,
   readProfileState,
+  activeVariantSelection,
+  activeModelScope,
+  marksActiveVariant,
 } from "./model-kit.js";
 
 // Scenario-mode states: the page speaks in "can I use it now" terms instead of
@@ -83,6 +86,11 @@ const SWITCH_PHASES = {
 };
 
 export function createModelsView(view, { root, ctx, live }) {
+  const activeSelection = () => view.runtimeActiveScope === activeModelScope(ctx.desktop?.health)
+    ? activeVariantSelection(view.runtimeActive, view.legacyEngineState)
+    : null;
+  const currentVariant = (variant, engine) =>
+    marksActiveVariant(activeSelection(), view.modelID, variant, engine);
   // Engine availability mirrors the old form: GPU is off on Linux, NPU only
   // on Windows; a running download or apply disables switching. Shared with
   // the wizard via model-kit; the OS check is an entry gate, not hardware
@@ -94,8 +102,7 @@ export function createModelsView(view, { root, ctx, live }) {
   function engineChips(variant, opActive) {
     return ["cpu", "gpu", "npu"]
       .map((engine) => {
-        const active =
-          view.engineState.engine === engine && view.engineState.model === variant.name;
+        const active = currentVariant(variant.name, engine);
         return `<button class="engine-chip${active ? " active" : ""}" data-apply data-engine="${engine}" data-variant="${h(
           variant.name,
         )}"${engineEnabled(engine, opActive) ? "" : " disabled"}${i18nMessages.m663ae289c366e504}${engine.toUpperCase()} · ${
@@ -115,21 +122,21 @@ export function createModelsView(view, { root, ctx, live }) {
       `GPU${engineAvailable(platform, "gpu") ? i18nMessages.m537352400c495fb8 : i18nMessages.m30b4456e2243ce0e}`,
       `NPU${engineAvailable(platform, "npu") ? i18nMessages.m537352400c495fb8 : i18nMessages.mde7c72a5f1da4274}`,
     ];
-    const label =
-      MODEL_OPTIONS.find(([id]) => id === view.modelID)?.[1] || view.modelID;
+    const active = activeSelection();
+    const label = MODEL_OPTIONS.find(([id]) => id === active?.model)?.[1] || active?.model || "-";
     const probe = view.lastProbe
       ? `${i18nMessages.m0496a3bcda0575de}${view.lastProbe.selected}${i18nMessages.mda047c04c9b5e27e}${view.lastProbe.elapsed_ms}${i18nMessages.m4cf435bfd8907c1c}`
       : "";
     const snapshotNote = ctx.desktop?.engine?.note
       ? ` ${ctx.desktop.engine.note}`
       : "";
-    node.textContent = `${i18nMessages.md567fd653565c629}${label} · ${view.engineState.model}${i18nMessages.m765ab9c51918e21e}${view.engineState.engine.toUpperCase()}${i18nMessages.m4ddc0667b7c58915}${probe}${i18nMessages.m97a2b38e72546427}${entries.join(" / ")}${i18nMessages.mb7a7b3a5d77b24d2}${snapshotNote}`;
+    node.textContent = `${i18nMessages.md567fd653565c629}${label} · ${active?.variant || "-"}${i18nMessages.m765ab9c51918e21e}${active?.engine?.toUpperCase() || "-"}${i18nMessages.m4ddc0667b7c58915}${probe}${i18nMessages.m97a2b38e72546427}${entries.join(" / ")}${i18nMessages.mb7a7b3a5d77b24d2}${snapshotNote}`;
   }
   // One status renderer: switching state first, then client-side parallel
   // download, runtime download/verify, installed, or missing.
   function variantStatus(variant, op, downloading, task) {
     const busy = downloading === variant.name;
-    const current = view.engineState.model === variant.name;
+    const current = currentVariant(variant.name);
     if (view.switchInFlight && view.switchingVariant === variant.name) {
       if (!isProfileModel(view.modelID))
         return `${i18nMessages.m1e9762ef816d3fbb}`;
@@ -176,7 +183,7 @@ export function createModelsView(view, { root, ctx, live }) {
               : variant.name === "fp32"
                 ? i18nMessages.m8ad5ce2b50a7ece5
                 : "";
-        const activeHere = view.engineState.model === variant.name;
+        const activeHere = currentVariant(variant.name);
         const ops = variant.installed
           ? `<div class="variant-ops">${engineChips(variant, Boolean(op.active) || view.switchInFlight)}</div><button data-model="download" data-variant="${h(variant.name)}"${downloading === variant.name ? " disabled" : ""}>${activeHere ? i18nMessages.mff8d2afbf63e1811 : i18nMessages.m4673a23061656125}</button>`
           : `<button data-model="download" data-variant="${h(variant.name)}"${downloading === variant.name ? " disabled" : ""}${i18nMessages.m95de3b8faabce594}`;
@@ -246,8 +253,8 @@ export function createModelsView(view, { root, ctx, live }) {
     const variant = modeVariant(currentMode());
     if (!variant?.installed || !view.inventory?.tokenizer_installed) return PAGE_STATES.EMPTY;
     if (view.switchInFlight) return PAGE_STATES.VERIFYING;
-    if (view.engineState.model !== currentMode().variant) return PAGE_STATES.EMPTY;
-    if (currentMode().requiresGPU && view.engineState.engine === 'cpu') return PAGE_STATES.EMPTY;
+    if (!currentVariant(currentMode().variant)) return PAGE_STATES.EMPTY;
+    if (currentMode().requiresGPU && activeSelection()?.engine === 'cpu') return PAGE_STATES.EMPTY;
     if (!view.lastVerifiedAt && ctx.desktop?.health?.inference?.phase !== 'ready') return PAGE_STATES.EMPTY;
     return PAGE_STATES.READY;
   }
@@ -372,9 +379,7 @@ export function createModelsView(view, { root, ctx, live }) {
       for (const chip of document.querySelectorAll(
         `[data-apply][data-variant="${CSS.escape(variant.name)}"]`,
       )) {
-        const active =
-          view.engineState.engine === chip.dataset.engine &&
-          view.engineState.model === variant.name;
+        const active = currentVariant(variant.name, chip.dataset.engine);
         chip.classList.toggle("active", active);
         chip.disabled = !engineEnabled(chip.dataset.engine, Boolean(op.active) || view.switchInFlight);
       }

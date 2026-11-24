@@ -6,6 +6,8 @@ import {
   applyLegacyEngine,
   submitProfileSwitch,
   fallbackMessage,
+  activeModelScope,
+  managedM3ApplySelection,
   openDownloadModal,
 } from "./model-kit.js";
 
@@ -20,6 +22,8 @@ export function bindModelActions(view, {
   ctx,
   currentMirror,
   load,
+  refreshM3Inventory,
+  acceptRuntimeActive,
 }) {
   root.addEventListener("click", (event) => {
     const toggle = event.target.closest("[data-action=toggle-advanced]");
@@ -69,9 +73,15 @@ export function bindModelActions(view, {
         view.switchInFlight = true;
         renderVariants();
         notify(`${i18nMessages.mf756893b5a1a7aa8}${engine.toUpperCase()} · ${variant}${i18nMessages.m79ecb4c2993c2d33}`);
+        const scope = activeModelScope(ctx.desktop?.health);
         try {
           const { envelope, result } = await applyLegacyEngine(engine, variant);
           view.engineState = { engine: result.engine, model: result.model };
+          const active = managedM3ApplySelection(result);
+          acceptRuntimeActive({ activeKnown: active !== undefined, active }, scope);
+          if (scope === activeModelScope(ctx.desktop?.health) && view.runtimeActive === null) {
+            view.legacyEngineState = view.engineState;
+          }
           if (!result.fallback) view.lastVerifiedAt = new Date();
           const probe = result.probe || {};
           if (typeof probe.elapsed_ms === "number" && probe.selected)
@@ -190,8 +200,9 @@ export function bindModelActions(view, {
       }
       if (result && root.isConnected)
         $("[data-result]", root).innerHTML = resultView(i18nMessages.m4347dbc9b646e415, result);
-      if (operation !== "probe")
-        notify(i18nMessages.m18df5c941d940c3d);
+      const refreshed = operation !== "uninstall" || summary(result).removed !== true ||
+        await refreshM3Inventory();
+      if (operation !== "probe" && refreshed) notify(i18nMessages.m18df5c941d940c3d);
       await ctx.refresh();
     });
   });

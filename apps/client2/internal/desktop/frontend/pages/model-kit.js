@@ -177,7 +177,41 @@ export function readProfileState(state) {
     switchState: progress.switch || {},
     operation: progress.operation || {},
     active: catalog.active || null,
+    activeKnown: Object.hasOwn(catalog, "active"),
   };
+}
+
+const canonicalModelID = (id) => (id === "bge-m3" ? "m3" : id);
+
+export const activeModelScope = (health) =>
+  health?.instance_id && health.account_id && health.generation > 0
+    ? [health.instance_id, health.account_id, health.generation].join("/")
+    : null;
+
+export function activeVariantSelection(active, legacy) {
+  // Only the authoritative null selection establishes implicit legacy M3.
+  if (active === null && legacy?.model && legacy?.engine) {
+    return { model: "m3", variant: legacy.model, engine: legacy.engine };
+  }
+  if (!active?.model) return null;
+  const model = canonicalModelID(active.model);
+  return { model, variant: active.variant || graniteVariant(model), engine: active.engine };
+}
+
+export function marksActiveVariant(active, model, variant, engine) {
+  return Boolean(active?.variant && active.model === canonicalModelID(model) &&
+    active.variant === variant && (engine === undefined || active.engine === engine));
+}
+
+export function managedM3ApplySelection(result) {
+  // The existing managed switch receipt identifies the activated pair.
+  // An ordinary legacy inference probe does not establish a profile change.
+  const receipt = result?.probe;
+  const selection = receipt?.result?.selection;
+  if (result?.fallback || receipt?.state !== "ready" || receipt.active_changed !== true ||
+      canonicalModelID(selection?.model) !== "m3" || !selection.variant || !selection.engine ||
+      selection.variant !== result.model || selection.engine !== result.engine) return undefined;
+  return selection;
 }
 
 export async function applyLegacyEngine(engine, variant) {
@@ -407,7 +441,9 @@ export async function applyEngineChoice({ model, engine, variant }) {
     };
   }
   const { envelope, result } = await applyLegacyEngine(engine, variant);
+  const active = managedM3ApplySelection(result);
   return {
+    details: { activeKnown: active !== undefined, active },
     engine: result.engine,
     variant: result.model,
     fallback: Boolean(result.fallback),
