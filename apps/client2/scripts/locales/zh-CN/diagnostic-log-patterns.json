@@ -1,0 +1,10 @@
+{
+  "connection_refused": "积极拒绝",
+  "health_unconfirmed": "Runtime 状态无法确认",
+  "installation_proof": "安装凭据|身份或版本不匹配",
+  "receipt_invalid": "未返回完整回执|未返回有效 JSON|回执协议",
+  "runtime_unavailable": "Runtime 未运行",
+  "memory_missing": "不存在",
+  "timeout": "超时",
+  "connected": "连接 Runtime:"
+}

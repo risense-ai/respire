@@ -1,0 +1,152 @@
+package host
+
+import "respire-client2/internal/i18n"
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
+	"time"
+)
+
+type HealthInfo struct {
+	Server           string `json:"server"`
+	Version          string `json:"bin"`
+	Protocol         int    `json:"v"`
+	PID              uint32 `json:"pid"`
+	Exe              string `json:"exe"`
+	DataDir          string `json:"data_dir"`
+	ManagedID        string `json:"managed_id"`
+	InstallationRoot string `json:"installation_root"`
+	InstallationID   string `json:"installation_id"`
+	ImagePath        string `json:"image_path"`
+	ImageSHA256      string `json:"image_sha256"`
+	ProcessStartID   string `json:"process_start_id"`
+	RuntimeVersion   string `json:"runtime_version"`
+	StoreReady       bool   `json:"store_ready"`
+	StartupComplete  bool   `json:"startup_complete"`
+	CredentialState  string `json:"credential_state"`
+	AccountID        string `json:"account_id"`
+	InstanceID       string `json:"instance_id"`
+	Generation       uint64 `json:"generation"`
+}
+
+type runtimeScope struct {
+	AccountID  string `json:"account_id"`
+	InstanceID string `json:"instance_id"`
+	Generation uint64 `json:"generation"`
+}
+
+func (m *Manager) requestScope(ctx context.Context) (*runtimeScope, error) {
+	health, _, err := m.Health(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if health.AccountID == "" || health.InstanceID == "" || health.Generation == 0 {
+		return nil, errors.New(i18n.Messagede6dec05cdb21fef)
+	}
+	return &runtimeScope{health.AccountID, health.InstanceID, health.Generation}, nil
+}
+
+func legacyRPCUsesReceipt(method any) bool {
+	switch method {
+	case "runtime.status", "assets.status", "model.catalog", "model.progress", "cli.progress", "runtime.result":
+		return false
+	default:
+		return true
+	}
+}
+
+func (m *Manager) legacyRPCRequest(ctx context.Context, request map[string]any) (json.RawMessage, error) {
+	if _, exists := request["scope"]; !exists {
+		scope, err := m.requestScope(ctx)
+		if err != nil {
+			return nil, err
+		}
+		request["scope"] = scope
+	}
+	if legacyRPCUsesReceipt(request["method"]) {
+		request["operation_id"] = request["id"]
+		request["idempotency_key"] = request["id"]
+		if id, ok := request["id"].(string); ok {
+			if parent, _, child := strings.Cut(id, "/"); child {
+				request["parent_operation_id"] = parent
+			}
+		}
+	}
+	return m.localRequest(ctx, http.MethodPost, "/api/rpc", request)
+}
+
+func (m *Manager) localRequest(ctx context.Context, method, path string, body any) (json.RawMessage, error) {
+	var input io.Reader
+	if body != nil {
+		b, err := json.Marshal(body)
+		if err != nil {
+			return nil, err
+		}
+		input = bytes.NewReader(b)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, m.Endpoint+path, input)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if method == http.MethodGet && path == "/api/health" {
+		req.Header.Set("X-Respire-Health", "runtime-v1")
+	}
+	res, err := m.localClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+	return readRuntimeJSON(res)
+}
+
+func readRuntimeJSON(res *http.Response) (json.RawMessage, error) {
+	b, err := io.ReadAll(io.LimitReader(res.Body, 8<<20+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(b) > 8<<20 {
+		return nil, errors.New("Runtime response exceeds 8 MiB")
+	}
+	if res.StatusCode != 200 {
+		return nil, fmt.Errorf("Runtime HTTP %d", res.StatusCode)
+	}
+	if !json.Valid(b) {
+		return nil, errors.New("Runtime response is not JSON")
+	}
+	return b, nil
+}
+
+func (m *Manager) Health(ctx context.Context) (HealthInfo, json.RawMessage, error) {
+	b, err := m.localRequest(ctx, "GET", "/api/health", nil)
+	var h HealthInfo
+	if err != nil {
+		return h, nil, err
+	}
+	if err = json.Unmarshal(b, &h); err != nil {
+		return h, nil, err
+	}
+	if h.Server != "respire" || h.Protocol != 1 || h.PID == 0 {
+		return h, nil, errors.New(i18n.Message5c273b33837ce224)
+	}
+	return h, b, nil
+}
+
+func (m *Manager) RPC(command string) (json.RawMessage, error) {
+	if command != "status" && command != "doctor" {
+		return nil, errors.New("unsupported diagnostic command")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if _, _, err := m.Health(ctx); err != nil {
+		return nil, err
+	}
+	return m.legacyRPCRequest(ctx, map[string]any{"v": 1, "id": fmt.Sprintf("client2-%d", time.Now().UnixNano()), "method": "cli.exec", "args": []string{"--json", command}})
+}

@@ -1,0 +1,286 @@
+import { messages as i18nMessages } from "../ui/i18n/messages.js";
+import {
+  $,
+  all,
+  h,
+  number,
+  date,
+  bytes,
+  metric,
+  panel,
+  pairs,
+  execute,
+  action,
+  isPending,
+  notify,
+} from "../ui/core.js";
+import {
+  MODEL_OPTIONS,
+  fetchProfileState,
+  readProfileState,
+} from "./model-kit.js";
+
+import { stats } from "./stats.js";
+
+const phases = {
+  idle: i18nMessages.mdae661d17c2dd8f0,
+  running: i18nMessages.m01679253dade46b3,
+  ok: i18nMessages.mf28461bb49c85647,
+  err: i18nMessages.m336e8460fd284629,
+  scheduled: i18nMessages.m2fcab8f67ceeae3e,
+  ready: i18nMessages.mb073db9c0bd6f2ed,
+  failed: i18nMessages.m28384d7afd2e4fa6,
+  loading: i18nMessages.md04fcbda737fc0c6,
+  unavailable: i18nMessages.m460b3574e4bdb8ca,
+};
+export const phase = (value) => phases[value] || value || "—";
+export function heading(title, description, actions = "") {
+  return `<div class="page-heading"><div><div class="eyebrow">RESPIRE / LOCAL WORKSPACE</div><h1>${h(title)}</h1><p>${h(description)}</p></div><div class="heading-actions">${actions}</div></div>`;
+}
+const ENGINE_NAMES = { cpu: "CPU", gpu: "GPU", npu: "NPU" };
+export function overview(root, ctx) {
+  // Polls update status around these controls without replacing focused buttons.
+  root.innerHTML =
+    '<div data-overview-summary></div>' +
+    '<section class="section-gap" data-overview-stats></section>' +
+    '<div class="section-gap" data-overview-details></div>' +
+    panel(
+      "Runtime",
+      i18nMessages.m5fa416eee7f98137,
+    ) +
+    '<div data-overview-onboarding></div>';
+  const summaryRoot = $("[data-overview-summary]", root);
+  const statsView = stats($("[data-overview-stats]", root), ctx);
+  const detailsRoot = $("[data-overview-details]", root);
+  const runtimeStatus = $("[data-runtime-status]", root);
+  const runtimeError = $("[data-runtime-error]", root);
+  const startButton = $('[data-host="start"]', root);
+  const stopButton = $('[data-host="stop"]', root);
+  const onboarding = $("[data-overview-onboarding]", root);
+  runtimeStatus.closest(".panel").classList.add("section-gap");
+  // Onboarding: prompt/plugin readiness is checked once per page visit.
+  let promptsReady = null;
+  // Runtime active selection (profile models); refreshed with the page.
+  let profileSelection = null;
+  let hostPending = false;
+  async function loadProfileSelection() {
+    if (!ctx.desktop?.connected) return;
+    try {
+      const { active } = readProfileState(await fetchProfileState());
+      profileSelection = active;
+    } catch {
+      profileSelection = null;
+    }
+    if (root.isConnected) update();
+  }
+  function update() {
+    statsView.update();
+    const state = ctx.desktop || {},
+      s = ctx.status?.summary || {},
+      health = state.health || {},
+      sync = s.sync_live || {},
+      index = s.retrieval_index || {},
+      inference = health.inference || {},
+      op = s.model_operation || {},
+      session = s.session || {};
+    const nowTask = state.task || {};
+    if (promptsReady === null && state.connected)
+      ctx
+        .api("inject-targets")
+        .then((r) => {
+          promptsReady = (r.targets || []).some(
+            (t) => t.state === "fresh" || !!t.plugin?.source,
+          );
+          if (root.isConnected) update();
+        })
+        .catch(() => {
+          promptsReady = false;
+        });
+    // What inference runs on right now: profile models override the legacy
+    // inference.json snapshot the client reads locally.
+    const selection = profileSelection;
+    const snapshot = state.engine || {};
+    const engine = String(
+      selection?.engine || snapshot.engine || "cpu",
+    ).toLowerCase();
+    const engineName = ENGINE_NAMES[engine] || engine.toUpperCase();
+    const modelID = selection?.model || snapshot.model_profile || "m3";
+    const modelName =
+      MODEL_OPTIONS.find(([id]) => id === modelID)?.[1] || modelID;
+    const variant = selection?.variant || snapshot.variant || "quantized";
+    const file = selection?.variant ? null : snapshot.file;
+    const note = selection ? "" : snapshot.note || "";
+    summaryRoot.innerHTML =
+      heading(
+        i18nMessages.me8705434968b58fd,
+        i18nMessages.md4138a10d95dbb7a,
+        `${i18nMessages.mdea3a195d4b5e4d1}`,
+      ) +
+      `<div class="metrics">${metric(i18nMessages.m1dcb520e9408dad5, number(s.local_alive), `${i18nMessages.mdf1c26055f9f39f5}${number(s.local_total)}${i18nMessages.m32aca0663f5c881e}`)}${metric(i18nMessages.me25115d1d25e3421, number(sync.remote_alive), s.remote_configured ? i18nMessages.m2616c6d1ebc7614a : i18nMessages.m9183a87f3a6c526e)}${metric(i18nMessages.me09cbaccf1dd8bf8, number(sync.pending), `${number(sync.conflicts)}${i18nMessages.m0cc6b0935f0e15b9}`)}${metric(i18nMessages.m11676e8ace776256, phase(index.state), index.error || "")}</div>`;
+    detailsRoot.innerHTML = `<div class="grid">${panel(
+        i18nMessages.mdcfe516d1114e14f,
+        pairs([
+          [i18nMessages.m6320b4a8722a851f, phase(sync.phase)],
+          [
+            i18nMessages.m6e9adb42a28942eb,
+            s.autosync === undefined ? "—" : s.autosync ? i18nMessages.m8a4ef3e48e4e8a5a : i18nMessages.m6744b4c6a9aa0038,
+          ],
+          [
+            i18nMessages.mf2be833267a9befd,
+            `${number(sync.pulled)} / ${number(sync.pushed)}`,
+          ],
+          [
+            i18nMessages.m81e60238bae4e54b,
+            s.sync_scheduler?.last_success_unix
+              ? date(s.sync_scheduler.last_success_unix * 1000)
+              : i18nMessages.m25280b57b647e36e,
+          ],
+          [i18nMessages.m061246bd31e084a7, session.user || i18nMessages.m54392fa24b359913],
+          [i18nMessages.m02739d1bae8bd996, s.server_addr],
+        ]) +
+          `<div class="panel-body"><button data-command="sync" ${isPending("sync") ? "disabled" : ""}>${isPending("sync") ? i18nMessages.m4e2238b74ec75987 : i18nMessages.m36e7a43a1c674e50}</button>${sync.error ? `<p class="form-error section-gap">${h(sync.error)}</p>` : ""}</div>`,
+      )}
+      ${panel(
+        i18nMessages.mc243416c93c07db7,
+        pairs([
+          [i18nMessages.m52f79fed15ec2723, `${modelName} · ${variant}`],
+          [i18nMessages.mdce2964c63735772, engineName],
+          [
+            i18nMessages.mae6a774ff968b21e,
+            selection
+              ? i18nMessages.me40e70a00da921fd
+              : file
+                ? file
+                : `${variant}${i18nMessages.mda047c04c9b5e27e}${engineName}${i18nMessages.md193b359a0da2d6d}`,
+          ],
+          [i18nMessages.m8168e2d3bbb44b32, phase(inference.phase)],
+          [i18nMessages.m07ae2c46b85c3d54, number(inference.queued)],
+          [
+            i18nMessages.md5a7af1c407f935f,
+            index.running
+              ? i18nMessages.m0a53c8de45a1ed4a
+              : index.scheduled
+                ? i18nMessages.m4f021f59121c6827
+                : phase(index.state),
+          ],
+          [
+            i18nMessages.m281dccfa29c6c9fb,
+            op.active ? `${phase(op.phase)} · ${op.item || ""}` : i18nMessages.mac3f9d75f986bef6,
+          ],
+        ]) +
+          `<div class="model-progress">${note ? `<p class="hint">${h(note)}</p>` : ""}${op.active ? `<div class="progress-label"><span>${h(op.item || op.phase)}</span><span>${h(bytes(op.done))} / ${h(bytes(op.total))}</span></div><progress ${op.total ? `value="${h(op.done)}" max="${h(op.total)}"></progress>` : ""}` : ""}${i18nMessages.m5974f611004cf8f8}`,
+      )}</div>`;
+    runtimeStatus.innerHTML =
+      pairs([
+        [i18nMessages.ma5574109f0208e89, state.connected ? i18nMessages.m5be0323e8adcaeae : i18nMessages.m3d52574ce1500561],
+        [i18nMessages.m5f76b2bf82dd2c5d, health.bin || "—"],
+        [
+          i18nMessages.mf938903ab4abdd10,
+          state.managed
+            ? i18nMessages.m878870aae77f58b3
+            : state.connected
+              ? i18nMessages.m2bdc6bc9fc8c17c8
+              : i18nMessages.m3d52574ce1500561,
+        ],
+        [
+          i18nMessages.m9ed69551e83de61d,
+          `${number(health.rpc?.executing_until_reply)} / ${number(health.rpc?.queued_or_cancelled_pending_removal)}`,
+        ],
+        [i18nMessages.m8a06a866ced279eb, nowTask.stage || "—"],
+      ]) +
+        `${nowTask.busy && nowTask.total ? `<div class="model-progress"><div class="progress-label"><span>${h(nowTask.stage)}</span><span>${h(bytes(nowTask.done))} / ${h(bytes(nowTask.total))}</span></div><progress value="${h(nowTask.done)}" max="${h(nowTask.total)}"></progress></div>` : ""}`;
+    startButton.disabled = hostPending || Boolean(nowTask.busy);
+    stopButton.disabled = hostPending || Boolean(nowTask.busy || !state.connected);
+    runtimeError.innerHTML = nowTask.error
+      ? `<div class="panel-body form-error">${h(nowTask.error)}</div>`
+      : "";
+    // First-run checklist: each step clears by real state, and the whole card
+    // disappears once everything is done.
+    const steps = [
+      {
+        done: state.connected,
+        title: i18nMessages.m3137e284699880bc,
+        desc: nowTask.busy
+          ? nowTask.stage
+          : state.connected
+            ? i18nMessages.m789937e986026902
+            : i18nMessages.mf6cf07a86e67576f,
+        action: nowTask.busy
+          ? null
+          : { go: "updates", label: i18nMessages.mc92129b3f00e0509 },
+      },
+      {
+        done: Boolean(session.user),
+        title: i18nMessages.mfe44d969c6fb8fcf,
+        desc: i18nMessages.mc7468ea210c7e511,
+        action: { go: "accounts", label: i18nMessages.m6eb2f39b4387f88e },
+      },
+      {
+        done: Boolean(session.has_local_keys),
+        title: i18nMessages.m1cca9b4c3c9cd3dd,
+        desc: i18nMessages.mcca07358949e550b,
+        action: { go: "accounts", label: i18nMessages.m6eb2f39b4387f88e },
+      },
+      {
+        done: Boolean(promptsReady),
+        title: i18nMessages.m519aa329bdfb20db,
+        desc: i18nMessages.mc216849aad09b2b0,
+        action: { go: "injection", label: i18nMessages.m7bbfa3e2e75a6daf },
+      },
+    ];
+    onboarding.innerHTML = !steps.every((step) => step.done)
+      ? `${i18nMessages.mfa38e689e6c7e1ca}${steps
+          .map(
+            (step) =>
+              `<div class="row spread"><div class="row-copy"><strong><span class="dot ${
+                step.done ? "online" : ""
+              }" style="margin-right:8px"></span>${h(step.title)}</strong><small>${h(step.desc)}</small></div>${
+                step.done
+                  ? i18nMessages.mf27aac25467851e3
+                  : step.action
+                    ? `<button data-go="${h(step.action.go)}">${h(step.action.label)}</button>`
+                    : ""
+              }</div>`,
+          )
+          .join("")}</div></div>`
+      : "";
+    if (ctx.statusError)
+      onboarding.insertAdjacentHTML(
+        "beforeend",
+        `${i18nMessages.m0bb307125afa6949}${h(ctx.statusError)}</p>`,
+      );
+  }
+  root.addEventListener("click", (event) => {
+    const button = event.target.closest("button");
+    if (!button) return;
+    if (button.dataset.go) ctx.navigate(button.dataset.go);
+    if (button.dataset.command)
+      action(button, async () => {
+        await execute(button.dataset.command);
+        notify(i18nMessages.m678b02618ee73838);
+        await ctx.refresh();
+      });
+    if (button.dataset.host)
+      action(button, async () => {
+        hostPending = true;
+        update();
+        try {
+          await ctx.api(button.dataset.host, {});
+          await ctx.refresh();
+        } finally {
+          hostPending = false;
+        }
+      }).finally(() => {
+        if (root.isConnected) update();
+      });
+  });
+  update();
+  loadProfileSelection();
+  return {
+    update,
+    refresh() {
+      update();
+      return statsView.refresh();
+    },
+  };
+}

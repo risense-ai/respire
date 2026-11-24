@@ -1,0 +1,299 @@
+package host
+
+import "respire-client2/internal/i18n"
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+// The copied test executable exercises the real host process boundary without a reset service.
+func TestMain(m *testing.M) {
+	if os.Getenv("RESPIRE_TEST_RECOVERY_CLI") != "1" {
+		os.Exit(m.Run())
+	}
+	if len(os.Args) == 2 && os.Args[1] == "--version" {
+		fmt.Println("rsrs 1.0.18")
+		os.Exit(0)
+	}
+	if len(os.Args) == 3 && os.Args[1] == "--json" && os.Args[2] == "capabilities" {
+		methods := []string{"core_config.set", "core_config.result"}
+		unsupported := os.Getenv("RESPIRE_TEST_CORE_UNSUPPORTED")
+		if unsupported == "once" {
+			marker := os.Getenv("RESPIRE_TEST_RECOVERY_CALLS") + ".capability"
+			if _, err := os.Stat(marker); errors.Is(err, os.ErrNotExist) {
+				if err := os.WriteFile(marker, nil, 0600); err != nil {
+					os.Exit(1)
+				}
+				unsupported = "1"
+			}
+		}
+		if unsupported == "1" {
+			methods = nil
+		} else if unsupported == "result" {
+			methods = methods[:1]
+		}
+		status, exit := "ok", 0
+		switch unsupported {
+		case "warn":
+			status, methods = "warn", nil
+		case "warn-supported":
+			status = "warn"
+		case "nonzero":
+			methods, exit = nil, 7
+		case "nonzero-supported":
+			exit = 7
+		case "malformed":
+			fmt.Print("invalid capabilities JSON")
+			os.Exit(0)
+		}
+		if json.NewEncoder(os.Stdout).Encode(map[string]any{"status": status, "summary": map[string]any{"capabilities": map[string]any{"host_rpc": map[string]any{"version": 1, "transport": "stdio", "methods": methods}}}}) != nil {
+			os.Exit(1)
+		}
+		os.Exit(exit)
+	}
+	args, err := json.Marshal(os.Args[1:])
+	if err == nil {
+		var log *os.File
+		log, err = os.OpenFile(os.Getenv("RESPIRE_TEST_RECOVERY_CALLS"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+		if err == nil {
+			_, err = log.Write(append(args, '\n'))
+			if closeErr := log.Close(); err == nil {
+				err = closeErr
+			}
+		}
+	}
+	var raw []byte
+	if err == nil {
+		raw, err = os.ReadFile(os.Getenv("RESPIRE_TEST_RECOVERY_REPLY"))
+	}
+	if err != nil {
+		os.Exit(1)
+	}
+	if len(os.Args) == 3 && os.Args[1] == "--json" && os.Args[2] == "--host-rpc-stdio" {
+		var request struct {
+			ID     string `json:"id"`
+			Method string `json:"method"`
+		}
+		if json.NewDecoder(os.Stdin).Decode(&request) != nil || (request.Method != "auth.reset" && request.Method != "core_config.set" && request.Method != "core_config.result") {
+			os.Exit(1)
+		}
+		if request.Method == "core_config.set" && os.Getenv("RESPIRE_TEST_CORE_DROP_REPLY") == "1" {
+			os.Exit(1)
+		}
+		if json.NewEncoder(os.Stdout).Encode(map[string]any{"v": 1, "id": request.ID, "ok": true, "envelope": json.RawMessage(raw)}) != nil {
+			os.Exit(1)
+		}
+	} else {
+		if len(os.Args) != 6 || os.Args[1] != "--json" || os.Args[2] != "runtime" || (os.Args[3] != "key-result" && os.Args[3] != "core-config-result") {
+			os.Exit(1)
+		}
+		if _, err := os.Stdout.Write(raw); err != nil {
+			os.Exit(1)
+		}
+	}
+	os.Exit(0)
+}
+
+func recoveryMaterialFixture(t *testing.T) (*Manager, string, string, string) {
+	t.Helper()
+	root := t.TempDir()
+	bin := filepath.Join(root, "bin")
+	if err := os.MkdirAll(bin, 0700); err != nil {
+		t.Fatal(err)
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	image, err := os.ReadFile(executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bin, cliBinary()), image, 0700); err != nil {
+		t.Fatal(err)
+	}
+	reply, calls := filepath.Join(root, "reply.json"), filepath.Join(root, "calls.jsonl")
+	t.Setenv("RESPIRE_TEST_RECOVERY_CLI", "1")
+	t.Setenv("RESPIRE_TEST_RECOVERY_REPLY", reply)
+	t.Setenv("RESPIRE_TEST_RECOVERY_CALLS", calls)
+	id := "desktop-20000000-0000-4000-8000-000000000001"
+	m := &Manager{Root: filepath.Join(root, "client"), DataRoot: root, Endpoint: "http://127.0.0.1:9", jobs: map[string]*Operation{}}
+	if err := os.MkdirAll(m.Root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	return m, id, reply, calls
+}
+
+func resetMaterialEnvelope(t *testing.T, m *Manager, outcome string) []byte {
+	t.Helper()
+	raw, err := json.Marshal(map[string]any{"status": "ok", "summary": map[string]any{
+		"operation_id": "20000000-0000-4000-8000-000000000002", "source_profile": m.DataRoot,
+		"outcome": outcome, "super": "synthetic-issued-recovery-material",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
+func TestHistoricalResetMaterialSurvivesRestartUntilExplicitSave(t *testing.T) {
+	m, id, _, calls := recoveryMaterialFixture(t)
+	legacy := resetMaterialEnvelope(t, m, "committed")
+	original := transactionFromEnvelope("auth_reset", legacy)
+	m.jobs[id] = &Operation{ID: id, Name: "auth_reset", State: "done", Started: time.Now(), host: true, write: true,
+		Envelope: legacy, Transaction: original}
+	if err := m.persistOperationsLocked(); err != nil {
+		t.Fatal(err)
+	}
+	job, err := m.Operation(id)
+	if err != nil || job.State != "done" || !job.MaterialPending || job.MaterialSaved {
+		t.Fatal("committed reset must await material save", err)
+	}
+	if err := m.Acknowledge(id); err != nil {
+		t.Fatal(err)
+	}
+	for restart := 0; restart < 2; restart++ {
+		m = &Manager{Root: m.Root, DataRoot: m.DataRoot, Endpoint: m.Endpoint}
+		if err := m.loadOperations(); err != nil {
+			t.Fatal(err)
+		}
+		job, err = m.Recover(id)
+		if err != nil || job.State != "unconfirmed" || !job.MaterialPending || len(job.Envelope) != 0 ||
+			job.Transaction == nil || *job.Transaction != *original || !strings.Contains(job.Error, i18n.Message27daa1011f44700d) {
+			t.Fatalf("restart must retain the original material receipt and direct the user to the original host: %+v %v", job, err)
+		}
+		if err := m.AcknowledgeRecoveryMaterial(id); err == nil {
+			t.Fatal("missing receipt material must stay unacknowledged")
+		}
+		raw, err := os.ReadFile(filepath.Join(m.Root, "requests.json"))
+		if err != nil || strings.Contains(string(raw), "synthetic-issued-recovery-material") {
+			t.Fatal("the journal must retain identity without persisting recovery material", err)
+		}
+	}
+	if _, err := os.Stat(calls); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("historical recovery attempted to execute the CLI", err)
+	}
+}
+
+func TestResetMaterialSaveFailureRetainsPendingReceipt(t *testing.T) {
+	m, id, _, _ := recoveryMaterialFixture(t)
+	raw := resetMaterialEnvelope(t, m, "committed")
+	m.jobs[id] = &Operation{ID: id, Name: "auth_reset", State: "done", host: true, write: true,
+		Envelope: raw, Transaction: transactionFromEnvelope("auth_reset", raw)}
+	// Make the journal destination unwritable without relying on platform permissions.
+	if err := os.Mkdir(filepath.Join(m.Root, "requests.json"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.AcknowledgeRecoveryMaterial(id); err == nil {
+		t.Fatal("a failed durable save must be reported")
+	}
+	job, err := m.Operation(id)
+	if err != nil || !job.MaterialPending || job.MaterialSaved {
+		t.Fatal("a failed save discarded the pending acknowledgement", err)
+	}
+}
+
+func TestHistoricalCoreConfigRecoveryPreservesIdentity(t *testing.T) {
+	m, id, _, calls := recoveryMaterialFixture(t)
+	binding := hostTransaction{OperationID: strings.TrimPrefix(id, "desktop-"), Kind: "core_config", RequestBound: true}
+	m.jobs[id] = &Operation{ID: id, Name: "agent_set", State: "unconfirmed", Started: time.Now(), host: true, write: true, Transaction: &binding}
+	if err := m.persistOperationsLocked(); err != nil {
+		t.Fatal(err)
+	}
+	m = &Manager{Root: m.Root, DataRoot: m.DataRoot, Endpoint: m.Endpoint}
+	if err := m.loadOperations(); err != nil {
+		t.Fatal(err)
+	}
+	job, err := m.Recover(id)
+	if err != nil || job.State != "unconfirmed" || job.Transaction == nil || *job.Transaction != binding ||
+		!strings.Contains(job.Error, i18n.Message27daa1011f44700d) {
+		t.Fatalf("historical query changed the original operation: %+v %v", job, err)
+	}
+	if _, err := m.Continue(id, "desktop-20000000-0000-4000-8000-000000000003", json.RawMessage(`{}`)); err == nil ||
+		!strings.Contains(err.Error(), i18n.Message27daa1011f44700d) {
+		t.Fatal("historical operation must direct continuation to the original host", err)
+	}
+	if _, err := os.Stat(calls); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("historical recovery attempted to execute the CLI", err)
+	}
+}
+
+func TestPendingResetMaterialCannotBeEvicted(t *testing.T) {
+	m := &Manager{jobs: map[string]*Operation{}}
+	for n := 0; n < 128; n++ {
+		id := fmt.Sprintf("desktop-20000000-0000-4000-8000-%012d", n)
+		m.jobs[id] = &Operation{ID: id, Name: "auth_reset", State: "done", host: true, Transaction: &hostTransaction{Kind: "key"}}
+	}
+	if _, err := m.Submit("auth_reset", "desktop-30000000-0000-4000-8000-000000000001", json.RawMessage(`{}`), true, "{}"); err == nil {
+		t.Fatal("must not evict unacknowledged material")
+	}
+	if len(m.jobs) != 128 {
+		t.Fatal("pending reset record was evicted")
+	}
+}
+
+func TestStartTaskCancellablePublishesBusyBeforeReturning(t *testing.T) {
+	m := &Manager{task: TaskState{Stage: i18n.Message56df21b4022f720d}}
+	release := make(chan struct{})
+	started := make(chan struct{})
+	if !m.StartTaskCancellable(i18n.Message9ce39f8d7b878f47, func(ctx context.Context) error {
+		close(started)
+		<-release
+		return nil
+	}) {
+		t.Fatal("first start must succeed")
+	}
+	// The busy state must be visible synchronously after Start returns: this
+	// is what lets a poller trust the snapshot instead of a stale pre-start
+	// terminal state from a previous task.
+	if snap := m.TaskSnapshot(); !snap.Busy || snap.Stage != i18n.Message9ce39f8d7b878f47 {
+		t.Fatalf("snapshot after start = %+v, want busy with stage set", snap)
+	}
+	if m.StartTaskCancellable(i18n.Message8fbbd60fa033605c, func(ctx context.Context) error { return nil }) {
+		t.Fatal("second start while busy must be rejected")
+	}
+	// A rejected start must not clobber the running task's progress state.
+	if snap := m.TaskSnapshot(); !snap.Busy || snap.Stage != i18n.Message9ce39f8d7b878f47 {
+		t.Fatalf("rejected start must leave the running task untouched: %+v", snap)
+	}
+	close(release)
+	<-started
+	waitTaskIdle(t, m)
+	snap := m.TaskSnapshot()
+	if snap.Stage != i18n.Message5a73ae60f30b9728 || snap.Error != "" {
+		t.Fatalf(i18n.Message1498df6e436b32f0, snap)
+	}
+}
+
+func TestStartTaskCancellableReportsFailure(t *testing.T) {
+	m := &Manager{task: TaskState{Stage: i18n.Message56df21b4022f720d}}
+	if !m.StartTaskCancellable(i18n.Message6263b2fe9382f0e8, func(ctx context.Context) error {
+		return errors.New(i18n.Messageb37df930536b4cfb)
+	}) {
+		t.Fatal("start must succeed")
+	}
+	waitTaskIdle(t, m)
+	snap := m.TaskSnapshot()
+	if snap.Stage != i18n.Messagebf50abaf51e2a82f || snap.Error != i18n.Messageb37df930536b4cfb {
+		t.Fatalf(i18n.Message457e37383862f225, snap)
+	}
+}
+
+func waitTaskIdle(t *testing.T, m *Manager) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for m.TaskSnapshot().Busy {
+		if time.Now().After(deadline) {
+			t.Fatal("task did not finish in time")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}

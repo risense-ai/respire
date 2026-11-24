@@ -1,0 +1,18 @@
+export const messages04 = {
+  mfd4b6a38ba0533a8: "<p class=\"hint\">正在查找相近记忆…</p>",
+  mfd52803bca1371ad: "尚未写入。存在待确认候选，请查看相近记忆，选择挂载或明确新建。",
+  mfd60472736365fa0: "验证完成",
+  mfdc9328d6920c915: "</div><p class=\"hint\">验证不改变默认召回方式。高质量查询与候选标题会发送给已配置的模型服务。Benchmark 只使用本机 Runtime，运行首轮及后续 8 轮，耗时包含 RPC 等待。</p><div class=\"actions\"><button type=\"submit\">开始验证</button><button type=\"button\" data-stop disabled>停止后续轮次</button></div><div data-check-result></div></form>",
+  mfdf8b6fd8dd6db38: "插件失败：",
+  mfe44d969c6fb8fcf: "登录或注册账户",
+  mfe51a8c86091b1e6: "HTTP 代理",
+  mfea405f9b01d1416: "概览",
+  mfebfae60a4295c23: "当前身份",
+  mfee683550df02f68: "日记",
+  mfef96e34f77b742b: "已撤销",
+  mff0934736802c998: "整理",
+  mff8d2afbf63e1811: "重新下载",
+  mffaace0c020824cc: "</button></div><div data-agents class=\"ag-list\"><div class=\"empty\">等待读取</div></div>",
+  mffd16b9de5fa61f3: "BGE-M3-Distill-8L 权重按需下载（多线程并行，约 0.3–1.1 GiB/个）。下载 quantized 权重与分词器后，可在下方选择推理方式切换使用：Runtime 会注册模型档案、加载并运行真实推理验证，失败自动回退。",
+  mffe81393b53ccdb5: "我已有恢复材料，继续",
+};
