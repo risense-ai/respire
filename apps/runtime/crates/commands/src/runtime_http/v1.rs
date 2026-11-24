@@ -17,6 +17,8 @@ mod owner_operations;
 mod owner_request;
 mod owner_routes;
 mod owner_scope;
+mod private_model_install;
+mod private_model_route;
 mod problem;
 use problem::{Problem, V1Result};
 
@@ -38,6 +40,8 @@ pub(super) fn router(bound: SocketAddr) -> Router {
         .with_state(state)
         .merge(owner_handshake::routes(bound))
         .merge(owner_routes::routes(bound))
+        .merge(private_model_route::routes(bound))
+        .merge(private_model_install::routes(bound))
 }
 
 async fn health() -> V1Result<Response> {

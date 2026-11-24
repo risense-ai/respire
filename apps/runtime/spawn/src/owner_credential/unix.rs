@@ -356,3 +356,7 @@ pub fn read_owner_credential(base: &Path, instance_id: &str) -> io::Result<Owner
 #[cfg(test)]
 #[path = "unix_tests.rs"]
 mod tests;
+
+#[path = "unix_model_stage.rs"]
+mod model_stage;
+pub use model_stage::{open_model_file, same_model_file, ModelStage};

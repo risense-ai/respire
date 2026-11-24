@@ -282,6 +282,12 @@ impl LocalStore {
         self.meta_get(respire_core_sdk::profiles::ACTIVE_SELECTION_KEY)?.map(|v| serde_json::from_str(&v).map_err(Into::into)).transpose()
     }
 
+    pub fn pending_selection(&self) -> Result<Option<respire_core_sdk::profiles::Selection>> {
+        self.meta_get("embedding_pending_selection_v1")?
+            .map(|value| serde_json::from_str(&value).map_err(Into::into))
+            .transpose()
+    }
+
     pub fn active_generation_key(&self) -> Result<String> {
         match self.active_selection()? {
             Some(selection) => respire_core_sdk::profiles::generation_key_for_profile(&selection),

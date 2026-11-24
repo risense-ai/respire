@@ -37,11 +37,17 @@ fn directory_name(instance_id: &str) -> io::Result<CString> {
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod unix;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-pub use unix::{create_owner_credential, read_owner_credential, OwnerCredential};
+pub use unix::{
+    create_owner_credential, open_model_file, read_owner_credential, same_model_file, ModelStage,
+    OwnerCredential,
+};
 
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
+pub use windows::model_stage::{open_model_file, same_model_file, ModelStage};
+#[cfg(windows)]
 pub use windows::{create_owner_credential, read_owner_credential, OwnerCredential};
 
+pub mod model_proof;
 pub mod proof;

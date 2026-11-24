@@ -95,7 +95,7 @@ fn validate_fields(parts: &Parts, peer: SocketAddr) -> V1Result<()> {
 
 /// Do not lose invalid fields or choose an arbitrary duplicate. Absent
 /// Origin remains distinguishable from a provided empty or malformed Origin.
-fn single<'a>(headers: &'a HeaderMap, name: &str) -> Result<Option<&'a str>, ()> {
+pub(super) fn single<'a>(headers: &'a HeaderMap, name: &str) -> Result<Option<&'a str>, ()> {
     let mut values = headers.get_all(name).iter();
     let Some(value) = values.next() else {
         return Ok(None);
