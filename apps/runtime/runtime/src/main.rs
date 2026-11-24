@@ -5,6 +5,7 @@
 //! This executable serves in the foreground and never launches another Runtime.
 
 mod startup_identity;
+mod startup_control;
 mod host_control;
 mod maintenance_control;
 mod snapshot_authority;
@@ -98,6 +99,11 @@ fn usage() -> &'static str {
 }
 
 fn run(boot_token: Option<String>) -> Result<i32> {
+    if std::env::args().nth(1).as_deref() == Some("--startup-control-internal") {
+        anyhow::ensure!(boot_token.is_none() && std::env::args_os().count() == 2,
+            "private startup control accepts no boot token or public runtime arguments");
+        return startup_control::run();
+    }
     if std::env::args().nth(1).as_deref() == Some("--host-control-internal") {
         anyhow::ensure!(
             boot_token.is_none() && std::env::args_os().count() == 2,
