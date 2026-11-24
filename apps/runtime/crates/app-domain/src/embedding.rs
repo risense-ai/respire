@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 use std::{
     collections::BTreeMap,
     io::{Read, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
 #[derive(Default, Serialize, Deserialize)]
@@ -73,7 +73,8 @@ fn resource(
         )),
     }
 }
-pub fn registry() -> Result<Registry> {
+/// Pins come from the Runtime release, before any host-supplied overrides.
+pub fn builtin_registry() -> Result<Registry> {
     let mut registry = Registry::default();
     let root = crate::service::main_data_dir().join("models");
     let m3_revision = "4de13258303883538bd53b696b452bf8099f0858";
@@ -124,6 +125,11 @@ pub fn registry() -> Result<Registry> {
             keyring_account: None,
         },
     );
+    Ok(registry)
+}
+
+pub fn registry() -> Result<Registry> {
+    let mut registry = builtin_registry()?;
     match std::fs::read(registry_path()) {
         Ok(bytes) => {
             let saved: Registry = serde_json::from_slice(&bytes)?;
@@ -190,6 +196,100 @@ pub fn configure(configure: Configure) -> Result<Value> {
     result?;
     Ok(json!({"saved":true,"activated":false,"registry":registry}))
 }
+/// Derive the same per-profile directory used by the Runtime publisher.
+pub fn runtime_owned_namespace(installation: &Path, profile: &Path) -> Result<PathBuf> {
+    use sha2::{Digest, Sha256};
+    let key = profile.to_str().context("managed profile is not UTF-8")?;
+    Ok(installation.join("runtime").join("model-assets-v1")
+        .join(format!("{:x}", Sha256::digest(key.as_bytes()))))
+}
+
+fn managed_entry(path: &Path, directory: bool) -> Option<std::fs::Metadata> {
+    let attrs = std::fs::symlink_metadata(path).ok()?;
+    if attrs.file_type().is_symlink() || (directory && !attrs.is_dir()) || (!directory && !attrs.is_file()) {
+        return None;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if attrs.file_attributes() & 0x400 != 0 { return None; }
+    }
+    (path.canonicalize().ok()?.as_path() == path).then_some(attrs)
+}
+
+fn project_managed_pair(profile: &mut ModelProfile, installation: &Path, account: &Path) -> Option<()> {
+    let namespace = runtime_owned_namespace(installation, account).ok()?;
+    let installation_runtime = installation.join("runtime");
+    let assets = namespace.parent()?;
+    let guard = namespace.join(".ownership");
+    for directory in [installation_runtime.as_path(), assets, &namespace, &guard] {
+        managed_entry(directory, true)?;
+    }
+    managed_entry(&guard.join("lock.db"), false)?;
+    if !profile.id.as_bytes().first().is_some_and(u8::is_ascii_alphanumeric)
+        || !profile.id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+    {
+        return None;
+    }
+    let model = namespace.join(&profile.id);
+    managed_entry(&model, true)?;
+    let weights = profile.weights.as_mut()?;
+    let filename = match weights.path.extension()?.to_str()? {
+        "onnx" => "model_quantized.onnx",
+        "safetensors" => "model.safetensors",
+        _ => return None,
+    };
+    let tokenizer = profile.tokenizer.as_mut()?;
+    let managed_weights = model.join(filename);
+    let managed_tokenizer = model.join("tokenizer.json");
+    if managed_entry(&managed_weights, false)?.len() != weights.size
+        || managed_entry(&managed_tokenizer, false)?.len() != tokenizer.size
+    {
+        return None;
+    }
+    weights.path = managed_weights;
+    tokenizer.path = managed_tokenizer;
+    Some(())
+}
+
+#[cfg(test)]
+mod managed_tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn managed_projection_requires_complete_pair_and_selected_profile() -> Result<()> {
+        let fixture = tempfile::tempdir()?;
+        let installation = fixture.path().canonicalize()?;
+        let alice = installation.join("alice");
+        let bob = installation.join("bob");
+        fs::create_dir(&alice)?;
+        fs::create_dir(&bob)?;
+        let mut catalog = builtin_registry()?;
+        let mut choice = catalog.models.remove("bge-small-zh-v1.5").context("fixture model")?;
+        choice.weights.as_mut().context("fixture weights")?.size = 4;
+        choice.tokenizer.as_mut().context("fixture tokenizer")?.size = 3;
+        let legacy = choice.weights.as_ref().context("fixture weights")?.path.clone();
+        let own = runtime_owned_namespace(&installation, &alice)?;
+        let guard = own.join(".ownership");
+        fs::create_dir_all(&guard)?;
+        fs::write(guard.join("lock.db"), [])?;
+        let candidate = own.join(&choice.id);
+        fs::create_dir(&candidate)?;
+        let weights = candidate.join("model_quantized.onnx");
+        fs::write(&weights, b"data")?;
+        assert!(project_managed_pair(&mut choice, &installation, &alice).is_none());
+        assert_eq!(choice.weights.as_ref().context("fixture weights")?.path, legacy);
+        let tokenizer = candidate.join("tokenizer.json");
+        fs::write(&tokenizer, b"tok")?;
+        assert!(project_managed_pair(&mut choice, &installation, &bob).is_none());
+        assert!(project_managed_pair(&mut choice, &installation, &alice).is_some());
+        assert_eq!(choice.weights.as_ref().context("managed weights")?.path, weights);
+        assert_eq!(choice.tokenizer.as_ref().context("managed tokenizer")?.path, tokenizer);
+        Ok(())
+    }
+}
+
 pub fn select(choice: Choice) -> Result<Selection> {
     let registry = registry()?;
     let mut profile = registry
@@ -197,6 +297,10 @@ pub fn select(choice: Choice) -> Result<Selection> {
         .get(&choice.model)
         .context("unknown model profile")?
         .clone();
+    // Never replace a user-configured profile. Eligibility is based on the
+    // complete authoritative recipe, not merely a familiar model name.
+    let is_builtin = builtin_registry()?.models.get(&choice.model)
+        .map(serde_json::to_value).transpose()? == Some(serde_json::to_value(&profile)?);
     if let Some(variant) = choice.variant.as_deref() {
         if choice.model == "m3" {
             let variant = MODEL_VARIANTS
@@ -224,6 +328,18 @@ pub fn select(choice: Choice) -> Result<Selection> {
             );
         } else {
             anyhow::ensure!(variant == "quantized", "custom models select resource paths in their profile; preset small supports quantized");
+        }
+    }
+    let supported_pair = choice.model != "m3"
+        || choice.variant.as_deref().is_none_or(|name| name == "quantized");
+    if is_builtin && supported_pair {
+        if let Ok(roots) = crate::service::resolved_roots() {
+            if let (Ok(installation), Ok(account)) = (
+                roots.installation_root.canonicalize(), roots.account_data_root.canonicalize(),
+            ) {
+                // Runtime still validates exact resource hashes on activation.
+                let _ = project_managed_pair(&mut profile, &installation, &account);
+            }
         }
     }
     let selection = Selection {

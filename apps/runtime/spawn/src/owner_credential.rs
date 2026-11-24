@@ -5,6 +5,13 @@ use std::{ffi::CString, io};
 
 pub const OWNER_RECORD_LEN: usize = 48;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum RemovalMetadata {
+    Journal,
+    CommitTemp,
+    Committed,
+}
+
 /// Raw record: 32-byte key followed by a 16-byte opaque authority epoch.
 /// No Debug/Display implementation; this is not an HTTP token.
 pub struct OwnerRecord([u8; OWNER_RECORD_LEN]);
@@ -37,11 +44,19 @@ fn directory_name(instance_id: &str) -> io::Result<CString> {
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod unix;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-pub use unix::{create_owner_credential, read_owner_credential, OwnerCredential};
+pub use unix::{
+    create_owner_credential, read_owner_credential, same_model_file, ModelRemovalRoot, ModelStage,
+    OwnerCredential,
+};
 
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
+pub use windows::model_removal::ModelRemovalRoot;
+#[cfg(windows)]
+pub use windows::model_stage::{same_model_file, ModelStage};
+#[cfg(windows)]
 pub use windows::{create_owner_credential, read_owner_credential, OwnerCredential};
 
+pub mod model_proof;
 pub mod proof;

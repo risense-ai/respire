@@ -158,17 +158,37 @@ pub fn read_owner_credential(base: &Path, instance_id: &str) -> io::Result<Owner
 }
 
 fn pinned_base(base: &Path) -> io::Result<OwnedHandle> {
+    pinned_base_with_sharing(
+        base,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        false,
+    )
+}
+
+fn pinned_base_with_sharing(
+    base: &Path,
+    last_share: u32,
+    canonical_model_path: bool,
+) -> io::Result<OwnedHandle> {
     let mut components = base.components().peekable();
     let Some(Component::Prefix(prefix)) = components.next() else {
         return Err(denied("owner credential requires an absolute Windows path"));
     };
-    if !matches!(prefix.kind(), Prefix::Disk(_)) || components.next() != Some(Component::RootDir) {
+    let drive = match prefix.kind() {
+        Prefix::Disk(drive) => drive,
+        Prefix::VerbatimDisk(drive) if canonical_model_path => drive,
+        _ => {
+            return Err(denied(
+                "owner credential requires a local Windows drive path",
+            ))
+        }
+    };
+    if components.next() != Some(Component::RootDir) {
         return Err(denied(
             "owner credential requires a local Windows drive path",
         ));
     }
-    let mut path = PathBuf::from(prefix.as_os_str());
-    path.push(r"\");
+    let path = PathBuf::from(format!("{}:\\", char::from(drive)));
     let name = wide(path.as_os_str())?;
     // DRIVE_FIXED; mapped, remote, removable and unknown volumes are denied.
     if unsafe { GetDriveTypeW(name.as_ptr()) } != 3 || components.peek().is_none() {
@@ -202,7 +222,11 @@ fn pinned_base(base: &Path) -> io::Result<OwnedHandle> {
             retained.as_raw_handle(),
             name,
             access | FILE_TRAVERSE,
-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            if components.peek().is_none() {
+                last_share
+            } else {
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE
+            },
             None,
             FILE_OPEN,
             FILE_DIRECTORY_FILE,
@@ -363,20 +387,38 @@ impl Drop for Removable {
     fn drop(&mut self) {
         // Never delete a string path when cleaning up. Windows may leave an
         // empty directory if interrupted or if a reader is still closing.
-        let info = FILE_DISPOSITION_INFO { DeleteFile: true };
-        unsafe {
-            SetFileInformationByHandle(
-                self.handle(),
-                FileDispositionInfo,
-                std::ptr::from_ref(&info).cast(),
-                std::mem::size_of_val(&info) as u32,
-            );
-        }
+        let _ = mark_delete(self.handle());
     }
 }
 
+fn mark_delete(handle: HANDLE) -> io::Result<()> {
+    let info = FILE_DISPOSITION_INFO { DeleteFile: true };
+    win(unsafe {
+        SetFileInformationByHandle(
+            handle,
+            FileDispositionInfo,
+            std::ptr::from_ref(&info).cast(),
+            std::mem::size_of_val(&info) as u32,
+        )
+    })
+}
+
+#[path = "windows_model_removal.rs"]
+pub(super) mod model_removal;
+#[path = "windows_model_stage.rs"]
+pub(super) mod model_stage;
+
 fn rename_to_secret(input: &Removable, directory: &Removable, replace: bool) -> io::Result<()> {
-    let name = wide(OsStr::new(SECRET_FILE))?;
+    rename_relative(
+        input.handle(),
+        directory.handle(),
+        OsStr::new(SECRET_FILE),
+        if replace { ATOMIC_REPLACE } else { 0 },
+    )
+}
+
+fn rename_relative(input: HANDLE, directory: HANDLE, leaf: &OsStr, flags: u32) -> io::Result<()> {
+    let name = wide(leaf)?;
     let name = &name[..name.len() - 1];
     let offset = std::mem::offset_of!(FILE_RENAME_INFO, FileName);
     let length = offset + std::mem::size_of_val(name);
@@ -386,8 +428,8 @@ fn rename_to_secret(input: &Removable, directory: &Removable, replace: bool) -> 
     // SAFETY: Aligned allocation contains the complete Win32 flexible
     // structure and name. RootDirectory is pinned and name is constant.
     unsafe {
-        (*raw).Anonymous.Flags = if replace { ATOMIC_REPLACE } else { 0 };
-        (*raw).RootDirectory = directory.handle();
+        (*raw).Anonymous.Flags = flags;
+        (*raw).RootDirectory = directory;
         (*raw).FileNameLength = std::mem::size_of_val(name) as u32;
         std::ptr::copy_nonoverlapping(
             name.as_ptr(),
@@ -396,7 +438,7 @@ fn rename_to_secret(input: &Removable, directory: &Removable, replace: bool) -> 
         );
         let mut status_block = IO_STATUS_BLOCK::default();
         let status = NtSetInformationFile(
-            input.handle(),
+            input,
             &mut status_block,
             raw.cast::<c_void>(),
             bytes as u32,

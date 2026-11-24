@@ -89,6 +89,26 @@ impl NativeOwner {
             .map(|_| ())
     }
 
+    /// Only a local native owner proof for the exact private model job may
+    /// yield admission. Ordinary owner permits and /rpc tokens never enter here.
+    pub(super) fn consume_model(
+        &mut self,
+        live: &OwnerBinding,
+        action: respire_spawn::owner_credential::model_proof::ModelAction,
+        model_id: &str,
+        proof: &str,
+        wall_ms: u64,
+    ) -> Result<(), Denied> {
+        self.registry.consume_private_model(
+            Some(live),
+            self.record.as_bytes(),
+            action,
+            model_id,
+            proof,
+            wall_ms,
+        )
+    }
+
     pub(super) fn exchange(
         &mut self,
         live: &OwnerBinding,

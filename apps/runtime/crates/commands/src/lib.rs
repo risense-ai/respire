@@ -29,6 +29,7 @@ pub mod host_hooks;
 pub mod i18n;
 pub mod metadata;
 pub mod model_assets;
+mod model_removal;
 pub mod model_progress;
 pub mod net_rpc;
 pub mod network;

@@ -17,6 +17,8 @@ use super::{
     problem::{Problem, V1Result},
 };
 
+pub(super) mod model_work;
+
 static ACTIVE: Mutex<Option<NativeOwner>> = Mutex::new(None);
 static QUEUE: OnceLock<mpsc::SyncSender<Work>> = OnceLock::new();
 static AUTH_BUDGET: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(16);
@@ -33,6 +35,7 @@ struct Work {
 
 pub(crate) struct OwnerDispatch {
     receiver: mpsc::Receiver<Work>,
+    model_receiver: mpsc::Receiver<model_work::Work>,
     last_refresh: Option<Instant>,
 }
 
@@ -41,6 +44,7 @@ pub(crate) fn start_dispatch() -> Option<OwnerDispatch> {
     QUEUE.set(sender).ok()?;
     Some(OwnerDispatch {
         receiver,
+        model_receiver: model_work::start()?,
         last_refresh: None,
     })
 }
@@ -57,6 +61,9 @@ impl OwnerDispatch {
         }
         if let Ok(work) = self.receiver.try_recv() {
             service_work(work, store, ownership);
+        }
+        if let Ok(work) = self.model_receiver.try_recv() {
+            model_work::service(work, store, ownership);
         }
     }
 }

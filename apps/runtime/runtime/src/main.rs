@@ -4,20 +4,21 @@
 //! The CLI or Client2 owns startup, supervision and shutdown through RPC.
 //! This executable serves in the foreground and never launches another Runtime.
 
-mod startup_identity;
-mod startup_control;
+mod auth_control;
+mod config_control;
 mod host_control;
-mod maintenance_control;
-mod snapshot_authority;
 mod identity_control;
 mod identity_write_control;
-mod space_control;
-mod profile_maintenance;
-mod config_control;
 mod key_control;
-mod migration_control;
+mod maintenance_control;
 mod metadata_control;
-mod auth_control;
+mod migration_control;
+mod model_control;
+mod profile_maintenance;
+mod snapshot_authority;
+mod space_control;
+mod startup_control;
+mod startup_identity;
 
 use std::io::Write;
 use std::process::ExitCode;
@@ -32,7 +33,14 @@ use respire_protocol::RuntimeIdentity;
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 fn main() -> ExitCode {
-    for name in ["RSRS_SUPER", "RSRS_PASS", "RESPIRE_SUPER", "RESPIRE_PASS", "ONEMEMORY_SUPER", "ONEMEMORY_PASS"] {
+    for name in [
+        "RSRS_SUPER",
+        "RSRS_PASS",
+        "RESPIRE_SUPER",
+        "RESPIRE_PASS",
+        "ONEMEMORY_SUPER",
+        "ONEMEMORY_PASS",
+    ] {
         std::env::remove_var(name);
     }
     // Remove the inherited secret before any worker or business code can spawn.
@@ -100,9 +108,25 @@ fn usage() -> &'static str {
 
 fn run(boot_token: Option<String>) -> Result<i32> {
     if std::env::args().nth(1).as_deref() == Some("--startup-control-internal") {
-        anyhow::ensure!(boot_token.is_none() && std::env::args_os().count() == 2,
-            "private startup control accepts no boot token or public runtime arguments");
+        anyhow::ensure!(
+            boot_token.is_none() && std::env::args_os().count() == 2,
+            "private startup control accepts no boot token or public runtime arguments"
+        );
         return startup_control::run();
+    }
+    if std::env::args().nth(1).as_deref() == Some("--model-install-internal") {
+        anyhow::ensure!(
+            boot_token.is_none() && std::env::args_os().count() == 2,
+            "private model install accepts no boot token or public runtime arguments"
+        );
+        return model_control::run_install();
+    }
+    if std::env::args().nth(1).as_deref() == Some("--model-control-internal") {
+        anyhow::ensure!(
+            boot_token.is_none() && std::env::args_os().count() == 2,
+            "private model control accepts no boot token or public runtime arguments"
+        );
+        return model_control::run();
     }
     if std::env::args().nth(1).as_deref() == Some("--host-control-internal") {
         anyhow::ensure!(
@@ -112,8 +136,10 @@ fn run(boot_token: Option<String>) -> Result<i32> {
         return host_control::run();
     }
     if std::env::args().nth(1).as_deref() == Some("--backend-load-probe-internal") {
-        anyhow::ensure!(boot_token.is_none() && std::env::args_os().count() == 2,
-            "private backend probe accepts no boot token or public runtime arguments");
+        anyhow::ensure!(
+            boot_token.is_none() && std::env::args_os().count() == 2,
+            "private backend probe accepts no boot token or public runtime arguments"
+        );
         // Dispatch before flags, authorization, hooks, keyring, store or listener initialization.
         respire_commands::model_assets::run_backend_probe_helper()?;
         return Ok(0);
@@ -143,8 +169,7 @@ fn run(boot_token: Option<String>) -> Result<i32> {
     };
 
     anyhow::ensure!(
-        !flags.version
-            || (!flags.supervised && boot_token.is_none()),
+        !flags.version || (!flags.supervised && boot_token.is_none()),
         "boot authorization and --supervised are only valid when serving"
     );
     if flags.version {
@@ -155,7 +180,7 @@ fn run(boot_token: Option<String>) -> Result<i32> {
         }
         return Ok(0);
     }
-    apply_data_dir(&flags);
+    apply_data_dir(&flags)?;
     if let Some(port) = flags.port {
         std::env::set_var("RSRS_RPC_PORT", port.to_string());
     }
@@ -186,18 +211,27 @@ fn parse_flags(args: impl Iterator<Item = String>) -> Result<Flags> {
             }
             "--port" => {
                 let value = args.next().context("--port requires a value")?;
-                let port: u16 = value.parse().context("--port requires a numeric port between 1 and 65535")?;
-                anyhow::ensure!(port > 0, "--port requires a numeric port between 1 and 65535");
+                let port: u16 = value
+                    .parse()
+                    .context("--port requires a numeric port between 1 and 65535")?;
+                anyhow::ensure!(
+                    port > 0,
+                    "--port requires a numeric port between 1 and 65535"
+                );
                 flags.port = Some(port);
             }
             "--data-dir" => {
                 flags.data_dir = Some(args.next().context("--data-dir requires a value")?.into());
             }
-            other => anyhow::bail!("unsupported Runtime argument: {other}; use the CLI or Client2 for host operations"),
+            other => anyhow::bail!(
+                "unsupported Runtime argument: {other}; use the CLI or Client2 for host operations"
+            ),
         }
     }
     let requested = [flags.serve, flags.version]
-        .into_iter().filter(|requested| *requested).count();
+        .into_iter()
+        .filter(|requested| *requested)
+        .count();
     anyhow::ensure!(requested <= 1, "combine at most one of serve and version");
     Ok(flags)
 }
@@ -210,13 +244,31 @@ mod frontend_route_tests {
     }
     #[test]
     fn original_client2_host_commands_require_an_external_host() {
-        for command in ["config", "logout", "grant", "account", "space", "migrate", "login",
-            "keygen", "keys-export", "inject", "inject-status", "inject-remove", "classify-config", "model"] {
+        for command in [
+            "config",
+            "logout",
+            "grant",
+            "account",
+            "space",
+            "migrate",
+            "login",
+            "keygen",
+            "keys-export",
+            "inject",
+            "inject-status",
+            "inject-remove",
+            "classify-config",
+            "model",
+        ] {
             assert!(parse(&["--json", command]).is_err(), "{command}");
         }
-        for args in [vec!["--host-rpc-stdio"], vec!["runtime", "install"],
-            vec!["runtime", "enable"], vec!["runtime", "account-result", "original-operation"],
-            vec!["model", "install-engines"]] {
+        for args in [
+            vec!["--host-rpc-stdio"],
+            vec!["runtime", "install"],
+            vec!["runtime", "enable"],
+            vec!["runtime", "account-result", "original-operation"],
+            vec!["model", "install-engines"],
+        ] {
             assert!(parse(&args).is_err(), "{args:?}");
         }
     }
@@ -227,20 +279,58 @@ mod frontend_route_tests {
         assert!(parse(&["--runtime-internal"])?.serve);
         assert_eq!(parse(&["serve", "--port", "15169"])?.port, Some(15169));
         assert!(parse(&["--version"])?.version);
-        for args in [vec!["runtime", "start"], vec!["runtime", "stop"],
-            vec!["runtime", "status"], vec!["--stop"], vec!["--status"],
-            vec!["--runtime-background-internal"], vec!["--runtime-exit-observer-internal"],
-            vec!["serve", "--port", "0"]] {
+        for args in [
+            vec!["runtime", "start"],
+            vec!["runtime", "stop"],
+            vec!["runtime", "status"],
+            vec!["--stop"],
+            vec!["--status"],
+            vec!["--runtime-background-internal"],
+            vec!["--runtime-exit-observer-internal"],
+            vec!["serve", "--port", "0"],
+        ] {
             assert!(parse(&args).is_err(), "{args:?}");
         }
         Ok(())
     }
 }
 
-fn apply_data_dir(flags: &Flags) {
+fn apply_data_dir(flags: &Flags) -> Result<()> {
     if let Some(dir) = &flags.data_dir {
         std::env::set_var("RSRS_DATA_DIR", dir);
     }
+    #[cfg(windows)]
+    normalize_configured_data_root()?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn normalize_configured_data_root() -> Result<()> {
+    use std::path::{Component, Path, Prefix};
+    let Some(configured) = std::env::var_os("RSRS_DATA_DIR").filter(|path| !path.is_empty()) else {
+        return Ok(());
+    };
+    let path = std::path::absolute(Path::new(&configured))?;
+    // Canonicalize the explicitly configured *root*, not individual Runtime
+    // files. The credential/endpoint providers still protect every descendant.
+    let resolved = respire_app::service::canonical_profile_path(&path)
+        .context("cannot resolve the configured Runtime data root")?;
+    let Some(Component::Prefix(prefix)) = resolved.components().next() else {
+        return Ok(());
+    };
+    if matches!(prefix.kind(), Prefix::VerbatimDisk(_)) {
+        let win32 = resolved
+            .to_str()
+            .and_then(|path| path.strip_prefix(r"\\?\"))
+            .context("configured Runtime data root is not a local Unicode path")?;
+        let win32 = Path::new(win32);
+        anyhow::ensure!(
+            respire_app::service::canonical_profile_path(win32).as_ref() == Some(&resolved),
+            "configured Runtime data root changed during normalization"
+        );
+        std::env::set_var("RSRS_DATA_DIR", win32);
+    }
+    Ok(())
 }
 
 fn publish_identity() {
@@ -257,7 +347,8 @@ fn serve_command(flags: &Flags, boot_token: Option<&str>) -> Result<i32> {
     let _ = respire_logging::init(respire_logging::LoggingConfig::new(log_path));
     install_panic_hook();
     respire_commands::model_assets::enable_backend_probe_host(
-        respire_commands::model_assets::BackendProbeHost::Serving);
+        respire_commands::model_assets::BackendProbeHost::Serving,
+    );
     startup_identity::authorize(
         flags.supervised,
         boot_token,

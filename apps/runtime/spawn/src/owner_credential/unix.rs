@@ -356,3 +356,10 @@ pub fn read_owner_credential(base: &Path, instance_id: &str) -> io::Result<Owner
 #[cfg(test)]
 #[path = "unix_tests.rs"]
 mod tests;
+
+#[path = "unix_model_stage.rs"]
+mod model_stage;
+pub use model_stage::{same_model_file, ModelStage};
+#[path = "unix_model_removal.rs"]
+mod model_removal;
+pub use model_removal::ModelRemovalRoot;

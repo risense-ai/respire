@@ -7,6 +7,7 @@ use std::{
 };
 use uuid::Uuid;
 
+mod private_model;
 mod replay;
 use replay::ReplayWindow;
 
