@@ -20,6 +20,7 @@ mod catalog;
 pub use catalog::ActiveTreeCatalog;
 mod feedback;
 pub use feedback::FeedbackCounts;
+mod schema_version;
 mod witness;
 pub use witness::{WitnessReport,witness_checkpoint_file,register_witness_functions};
 mod conflicts;
@@ -127,6 +128,7 @@ impl LocalStore {
         }
         let connection = Connection::open(path)
             .with_context(|| format!("failed to open local memory db: {}", path.display()))?;
+        schema_version::require_supported(&connection)?;
         connection.execute_batch(
             "
             PRAGMA journal_mode = WAL;
@@ -155,6 +157,7 @@ impl LocalStore {
         .with_context(|| {
             format!("failed to open initialized local memory db: {}", path.display())
         })?;
+        schema_version::require_supported(&connection)?;
         witness::register_witness_functions(&connection)?;
         connection.execute_batch("PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 30000;")?;
         connection
@@ -172,6 +175,7 @@ impl LocalStore {
             path,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         ).with_context(|| format!("failed to open read-only memory db: {}", path.display()))?;
+        schema_version::require_supported(&connection)?;
         connection.busy_timeout(std::time::Duration::from_secs(30))?;
         witness::register_witness_functions(&connection)?;
         Ok(Self { connection })
