@@ -313,3 +313,193 @@ fn result(code: i64) -> io::Result<()> {
         Err(io::Error::last_os_error())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::model_stage::ModelStage;
+    use super::*;
+    use std::{
+        cell::Cell,
+        fs,
+        io::Write,
+        os::unix::fs::{MetadataExt, OpenOptionsExt},
+    };
+
+    const MODEL: &str = "bge-small-zh-v1.5";
+    const WEIGHTS: &str = "model_quantized.onnx";
+    const TOKENIZER: &str = "tokenizer.json";
+    const PINNED_PAIR: [(&str, &[u8]); 2] = [
+        (WEIGHTS, b"synthetic weights"),
+        (TOKENIZER, b"synthetic tokenizer"),
+    ];
+
+    fn fixture_root() -> io::Result<(tempfile::TempDir, std::path::PathBuf)> {
+        // Match the existing owner-credential tests: Linux container /tmp
+        // can sit on overlayfs, which is not trusted by the OS owner policy.
+        #[cfg(target_os = "linux")]
+        let temp = tempfile::tempdir_in("/dev/shm").or_else(|_| tempfile::tempdir())?;
+        #[cfg(target_os = "macos")]
+        let temp = tempfile::tempdir()?;
+        let base = temp.path().canonicalize()?;
+        assert_eq!(fs::metadata(&base)?.mode() & 0o777, 0o700);
+        Ok((temp, base))
+    }
+
+    fn stage_pair(base: &Path, incoming: &str) -> io::Result<ModelStage> {
+        let mut stage = ModelStage::create(base, incoming)?;
+        for (leaf, bytes) in PINNED_PAIR {
+            stage.create_file(leaf)?.write_all(bytes)?;
+        }
+        stage.seal()?;
+        Ok(stage)
+    }
+
+    fn install_fixture(base: &Path) -> io::Result<ModelRemovalRoot> {
+        stage_pair(base, ".incoming-first-pair")?.publish(base, MODEL, || Ok(()))?;
+        ModelRemovalRoot::open(base, MODEL)
+    }
+
+    fn prepared_quarantine(root: &ModelRemovalRoot) -> io::Result<ModelQuarantine<'_>> {
+        let mut quarantine = root.create_quarantine()?;
+        let mut journal = quarantine.create_metadata(RemovalMetadata::Journal)?;
+        journal.write_all(br#"{"model_id":"bge-small-zh-v1.5","phase":"prepared"}"#)?;
+        journal.sync_all()?;
+        drop(journal);
+        quarantine.sync()?;
+        Ok(quarantine)
+    }
+
+    fn assert_missing(path: &Path) -> io::Result<()> {
+        let error = fs::symlink_metadata(path).expect_err("expected absent filesystem entry");
+        if error.kind() != io::ErrorKind::NotFound {
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn unix_removal_commits_exact_pair_and_cleans_private_quarantine() -> io::Result<()> {
+        let (_temp, base) = fixture_root()?;
+        let root = install_fixture(&base)?;
+        let quarantine_path = base.join(".runtime-model-removal-v1");
+        let model = base.join(MODEL);
+        let files = [
+            root.open_model_asset(WEIGHTS)?,
+            root.open_model_asset(TOKENIZER)?,
+        ];
+        let mut quarantine = prepared_quarantine(&root)?;
+        assert_eq!(fs::metadata(&quarantine_path)?.mode() & 0o777, 0o700);
+        assert_eq!(
+            fs::metadata(quarantine_path.join("journal.json"))?.mode() & 0o777,
+            0o600
+        );
+        for (index, (leaf, bytes)) in PINNED_PAIR.into_iter().enumerate() {
+            quarantine.move_from_model(leaf, &files[index], index)?;
+            assert_missing(&model.join(leaf))?;
+            let moved = quarantine_path.join(index.to_string());
+            assert_eq!(fs::read(&moved)?, bytes);
+            assert_eq!(fs::metadata(&moved)?.ino(), files[index].metadata()?.ino());
+        }
+        let mut marker = quarantine.create_metadata(RemovalMetadata::CommitTemp)?;
+        marker.write_all(MODEL.as_bytes())?;
+        marker.sync_all()?;
+        drop(marker);
+        assert_missing(&quarantine_path.join("committed"))?;
+        quarantine.publish_marker()?;
+        quarantine.sync()?;
+        assert_missing(&quarantine_path.join("commit.tmp"))?;
+        assert_eq!(
+            fs::read(quarantine_path.join("committed"))?,
+            MODEL.as_bytes()
+        );
+        assert_eq!(
+            fs::metadata(quarantine_path.join("committed"))?.mode() & 0o777,
+            0o600
+        );
+
+        for (index, file) in files.iter().enumerate() {
+            quarantine.delete_detached(file, index)?;
+            assert_missing(&quarantine_path.join(index.to_string()))?;
+        }
+        quarantine.delete_metadata(RemovalMetadata::Committed)?;
+        quarantine.delete_metadata(RemovalMetadata::Journal)?;
+        quarantine.finish()?;
+        assert_missing(&quarantine_path)?;
+        assert_eq!(model.read_dir()?.count(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn unix_removal_rollback_never_replaces_an_occupied_leaf() -> io::Result<()> {
+        let (_temp, base) = fixture_root()?;
+        let root = install_fixture(&base)?;
+        let model = base.join(MODEL);
+        let quarantine_path = base.join(".runtime-model-removal-v1");
+        let weights = root.open_model_asset(WEIGHTS)?;
+        let tokenizer = root.open_model_asset(TOKENIZER)?;
+        let mut quarantine = prepared_quarantine(&root)?;
+        quarantine.move_from_model(WEIGHTS, &weights, 0)?;
+
+        // The caller cancels before moving the second asset. Its untouched
+        // original is allowed when reconciling an uncertain attempted slot.
+        quarantine.restore_to_model(TOKENIZER, &tokenizer, 1)?;
+        assert_eq!(fs::read(model.join(TOKENIZER))?, PINNED_PAIR[1].1);
+        let occupied = model.join(WEIGHTS);
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&occupied)?
+            .write_all(b"unrelated fixture entry")?;
+        let denied = quarantine
+            .restore_to_model(WEIGHTS, &weights, 0)
+            .unwrap_err();
+        assert_eq!(denied.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&occupied)?, b"unrelated fixture entry");
+        assert_eq!(fs::read(quarantine_path.join("0"))?, PINNED_PAIR[0].1);
+        assert!(quarantine_path.join("journal.json").is_file());
+        assert!(quarantine.finish().is_err());
+
+        // Clear only the test-owned conflict and restore the exact original.
+        fs::remove_file(&occupied)?;
+        quarantine.restore_to_model(WEIGHTS, &weights, 0)?;
+        assert_eq!(fs::read(&occupied)?, PINNED_PAIR[0].1);
+        assert_eq!(fs::metadata(&occupied)?.ino(), weights.metadata()?.ino());
+        quarantine.sync()?;
+        quarantine.delete_metadata(RemovalMetadata::Journal)?;
+        quarantine.finish()?;
+        assert_missing(&quarantine_path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn unix_recovery_barrier_blocks_stage_creation_and_sealed_publish() -> io::Result<()> {
+        let (_temp, base) = fixture_root()?;
+        let root = install_fixture(&base)?;
+        let mut staged = stage_pair(&base, ".incoming-already-sealed")?;
+        // Drop the quarantine holder: the private entry is intentionally
+        // retained across operation/process lifetimes, never swept by Drop.
+        drop(prepared_quarantine(&root)?);
+        let protected = base.join(".runtime-model-removal-v1/journal.json");
+        let journal_before = fs::read(&protected)?;
+
+        assert!(ModelStage::create(&base, ".incoming-denied").is_err());
+        assert_missing(&base.join(".incoming-denied"))?;
+        let commit_checked = Cell::new(false);
+        assert!(staged
+            .publish(&base, "m3", || {
+                commit_checked.set(true);
+                Ok(())
+            })
+            .is_err());
+        assert!(!commit_checked.get());
+        assert_missing(&base.join("m3"))?;
+        drop(staged);
+        assert_missing(&base.join(".incoming-already-sealed"))?;
+        assert_eq!(fs::read(&protected)?, journal_before);
+        for (leaf, bytes) in PINNED_PAIR {
+            assert_eq!(fs::read(base.join(MODEL).join(leaf))?, bytes);
+        }
+        Ok(())
+    }
+}
