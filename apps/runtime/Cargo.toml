@@ -1,0 +1,60 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/client-host",
+    "crates/logging",
+    "runtime",
+    "spawn",
+    "crates/protocol",
+    "crates/crypto",
+    "crates/storage",
+    "crates/core-sdk",
+    "crates/app-domain",
+    "crates/app",
+    "crates/commands",
+]
+default-members = ["runtime"]
+
+
+[workspace.package]
+edition = "2021"
+version = "1.0.20"
+repository = "https://github.com/risense-ai/respire"
+
+[workspace.dependencies]
+respire_protocol = { path = "crates/protocol", version = "=2.0.0-dev.17" }
+respire_core_sdk = { path = "crates/core-sdk" }
+respire_app_domain = { path = "crates/app-domain" }
+respire_app = { path = "crates/app" }
+respire_storage = { path = "crates/storage" }
+respire_crypto = { path = "crates/crypto" }
+respire_commands = { path = "crates/commands" }
+respire_spawn = { path = "spawn" }
+
+anyhow = "1.0"
+base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+dirs = "6.0"
+hex = "0.4"
+rusqlite = { version = "0.32", features = ["bundled", "functions", "backup"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+tempfile = "3.15"
+ureq = { version = "2.12", features = ["json", "socks-proxy"] }
+uuid = { version = "1.0", features = ["v4", "v5"] }
+
+[patch.crates-io]
+tokenizers = { path = "../core/vendor/tokenizers" }
+
+[profile.release]
+strip = "debuginfo"
+lto = false
+codegen-units = 1
+panic = "unwind"
+
+[profile.dev.package.sha2]
+opt-level = 3
+
+[profile.test.package.respire_commands]
+opt-level = 1

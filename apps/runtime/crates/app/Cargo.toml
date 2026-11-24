@@ -1,0 +1,50 @@
+[package]
+name = "respire_app"
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.88"
+description = "respire app layer: auth, service, sync, inject, and transport"
+license-file = "../../LICENSE"
+repository.workspace = true
+publish = false
+
+[features]
+default = ["cpu-owned-ort-experiment"]
+native-fault-tests = ["respire_core_sdk/native-fault-tests"]
+cpu-owned-ort-experiment = ["respire_core_sdk/cpu-owned-ort-experiment"]
+
+[dependencies]
+respire_spawn = { path = "../../spawn" }
+respire_app_domain = { path = "../app-domain" }
+crossterm = "0.28"
+rpassword = "7"
+base64 = "0.22"
+flate2 = "1.1"
+respire_protocol = { path = "../protocol" }
+respire_storage = { path = "../storage" }
+respire_crypto = { path = "../crypto" }
+respire_core_sdk = { path = "../core-sdk", default-features = false }
+anyhow = "1.0"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+dirs = "6.0"
+rusqlite = { version = "0.32", features = ["bundled", "backup"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+ureq = { version = "2.12", features = ["json"] }
+sha1 = "0.10"
+sha2 = "0.10"
+hex = "0.4"
+uuid = { version = "1.0", features = ["v4"] }
+whoami = "2.1"
+
+[target.'cfg(windows)'.dependencies]
+winsafe = { version = "=0.0.28", features = ["advapi"] }
+
+[dev-dependencies]
+keyring = { version = "3", features = ["linux-native", "sync-secret-service", "vendored", "windows-native", "apple-native"] }
+respire_app_domain = { path = "../app-domain", features = ["test-support"] }
+tempfile = "3.15"
+tiny_http = "0.12"
+
+[lints.rust]
+unsafe_code = "forbid"
