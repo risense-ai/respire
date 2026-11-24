@@ -81,6 +81,9 @@ func (m *Manager) unlockNativeRuntime(ctx context.Context, health HealthInfo, st
 		health.Generation == 0 || !validHash(health.AccountID) {
 		return errors.New("Runtime unlock scope is invalid")
 	}
+	if m.hostAuthority == nil && m.startupControl != nil {
+		return m.unlockWithRuntimeExclusion(ctx, health, store)
+	}
 	takeover, err := m.lockRuntimeTakeover(ctx)
 	if err != nil {
 		return err
@@ -100,6 +103,29 @@ func (m *Manager) unlockNativeRuntime(ctx context.Context, health HealthInfo, st
 		return errors.New("Running Runtime image differs from the verified installation")
 	}
 	return m.unlockVerifiedRuntime(ctx, health, store, "", false)
+}
+
+// The Runtime helper retains the installation exclusion only. The serving
+// process still separately verifies the authenticated unlock and its scope.
+func (m *Manager) unlockWithRuntimeExclusion(ctx context.Context, health HealthInfo, store hostCredentialStore) error {
+	info, err := m.Installed()
+	if err != nil {
+		return err
+	}
+	guard, err := m.acquireStartup(ctx, info)
+	if err != nil {
+		return err
+	}
+	defer guard.Close()
+	held := guard.Held()
+	if err := m.verifyScopedRuntimeOwner(guard.workCtx, health, info, held.Profile, held.AccountID); err != nil {
+		return err
+	}
+	if err := m.unlockVerifiedRuntime(guard.workCtx, health, store, "", false); err != nil {
+		return err
+	}
+	_, err = guard.Finish(nil)
+	return err
 }
 
 // The caller holds takeover and has verified the Runtime image and process.

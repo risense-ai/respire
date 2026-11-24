@@ -157,6 +157,29 @@ func (m *Manager) DownloadModel(ctx context.Context, model, variant, mirror stri
 		files = []modelFileSpec{definition.Tokenizer, spec}
 	}
 	origins := modelOrigins(m.modelMirrorSetting(mirror))
+	// Keep the legacy baseline and its CPU engine package, plus every existing
+	// non-quantized variant, on their original paths. Only the explicit pinned
+	// quantized pair can use a verified Runtime's managed install capability.
+	if definition.ID == "m3" && variant == "quantized" {
+		health, supported, err := m.runtimeModelInstallCapability(ctx)
+		if err != nil {
+			return err
+		}
+		if supported {
+			return m.downloadManagedM3(ctx, health, definition, origins)
+		}
+	}
+	if err := m.downloadModelFiles(ctx, definition, dir, files, origins); err != nil {
+		return err
+	}
+	if definition.Legacy && variant == "baseline" && m3UsesCPUContainer() {
+		return m.downloadModelFrom(ctx, m3CPUContainerURL,
+			filepath.Join(m.ModelDir(), filepath.FromSlash(m3CPUContainer.rel)), m3CPUContainer)
+	}
+	return nil
+}
+
+func (m *Manager) downloadModelFiles(ctx context.Context, definition modelDefinition, dir string, files []modelFileSpec, origins []string) error {
 	for _, spec := range files {
 		dest := filepath.Join(dir, filepath.FromSlash(spec.rel))
 		if modelFileValid(dest, spec) {
@@ -178,10 +201,6 @@ func (m *Manager) DownloadModel(ctx context.Context, model, variant, mirror stri
 		if lastErr != nil {
 			return lastErr
 		}
-	}
-	if definition.Legacy && variant == "baseline" && m3UsesCPUContainer() {
-		return m.downloadModelFrom(ctx, m3CPUContainerURL,
-			filepath.Join(m.ModelDir(), filepath.FromSlash(m3CPUContainer.rel)), m3CPUContainer)
 	}
 	return nil
 }

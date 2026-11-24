@@ -1,4 +1,5 @@
 import { messages as i18nMessages } from "../ui/i18n/messages.js";
+import { t } from "../ui/i18n.js";
 import {
   $,
   h,
@@ -40,8 +41,10 @@ export async function membersDialog() {
     const result = await execute("space_members");
     if (!element.isConnected) return;
     const members = rows(result, "members");
+    const viewer = t(i18nMessages.m3b5ec3533b0e4485);
+    const editor = t(i18nMessages.md5c3328266122e34);
     $("[data-members]", element).innerHTML = members.length
-      ? `<ul class="clean">${members.map((member) => `<li class="row"><div class="row-copy"><strong>${h(member.device_name || member.session_id)}</strong><small>${member.readonly ? i18nMessages.m3b5ec3533b0e4485 : i18nMessages.md5c3328266122e34} · ${h(member.issued_at || "")}</small></div><button class="danger" data-kick="${h(member.session_id)}${i18nMessages.m96ef6a644a135fe9}`).join("")}</ul>`
+      ? `<ul class="clean">${members.map((member) => `<li class="row"><div class="row-copy"><strong>${h(member.device_name || member.session_id)}</strong><small>${h(member.readonly ? viewer : editor)} · ${h(member.issued_at || "")}</small></div><button class="danger" data-kick="${h(member.session_id)}${i18nMessages.m96ef6a644a135fe9}`).join("")}</ul>`
       : i18nMessages.m41848db1f0817cc4;
   }
   element.addEventListener("click", (event) => {

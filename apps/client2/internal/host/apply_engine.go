@@ -41,6 +41,32 @@ func applyEngine(ctx context.Context, m *Manager, args []string, id string) (jso
 	if err != nil {
 		return nil, err
 	}
+	if model == "quantized" {
+		health, supported, err := m.runtimeModelInstallCapability(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if supported {
+			if _, _, managed := m.managedM3Pair(health); managed {
+				known := runtimeScope{health.AccountID, health.InstanceID, health.Generation}
+				if *scope != known {
+					return nil, errOnlineModelUnavailable
+				}
+				choice, err := json.Marshal(map[string]string{
+					"model": "m3", "backend": "onnx", "engine": engine, "variant": model,
+				})
+				if err != nil {
+					return nil, err
+				}
+				operation := id + "/managed-switch"
+				receipt, err := m.switchManagedModel(ctx, string(choice), operation, scope)
+				if err != nil {
+					return receipt, err
+				}
+				return engineEnvelope(engine, model, false, "", receipt), nil
+			}
+		}
+	}
 	cliExec := func(step string, words ...string) (json.RawMessage, error) {
 		return m.executeRPCScoped(ctx, "cli.exec", append([]string{"--json"}, words...), id+"/"+step, scope)
 	}
@@ -92,6 +118,20 @@ func applyEngine(ctx context.Context, m *Manager, args []string, id string) (jso
 			strings.ToUpper(engine), model, probeErr, strings.ToUpper(prevEngine), prevModel, err)
 	}
 	return engineEnvelope(prevEngine, prevModel, true, probeErr.Error(), fbProbe), nil
+}
+
+func (m *Manager) switchManagedModel(ctx context.Context, choice, operation string, scope *runtimeScope) (json.RawMessage, error) {
+	receipt, err := m.executeRPCScoped(ctx, "model.switch", []string{choice}, operation, scope)
+	if err != nil {
+		// model.switch deliberately returns a pending envelope; other
+		// errors must not trigger a second switch or an engine downgrade.
+		var pending *unconfirmedError
+		var envelope struct{ Status string }
+		if !errors.As(err, &pending) || json.Unmarshal(receipt, &envelope) != nil || envelope.Status != "pending" {
+			return receipt, err
+		}
+	}
+	return m.inspectResult(ctx, operation, scope, errOnlineModelUnconfirmed)
 }
 
 // engineEnvelope composes the operation receipt; probe carries the runtime's

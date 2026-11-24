@@ -1,9 +1,14 @@
 import { messages as i18nMessages } from "../ui/i18n/messages.js";
+import { t } from "../ui/i18n.js";
 import { $, h, number, panel, metric, execute } from "../ui/core.js";
+
+function withCount(template, count) {
+  return t(template).replace("{count}", number(count));
+}
 
 function rate(hits, recalls) {
   if (!recalls) return i18nMessages.m301eb7291c894e38;
-  return `${Math.round((hits / recalls) * 100)}${i18nMessages.m9460f4ab7c37ea9c}`;
+  return withCount(i18nMessages.statsResultPercentage, Math.round((hits / recalls) * 100));
 }
 
 function localDay() {
@@ -27,7 +32,8 @@ export function stats(root, ctx) {
       const envelope = await execute("query_log", { stats: true, limit: 1 });
       if (!root.isConnected) return;
       const details = envelope?.details || {};
-      const daily = Array.isArray(details.daily) ? details.daily : [];
+      const hasDaily = Array.isArray(details.daily);
+      const daily = hasDaily ? details.daily : [];
       const today = daily.find((row) => row.day === localDay()) || {
         day: localDay(),
         recalls: 0,
@@ -37,18 +43,20 @@ export function stats(root, ctx) {
       };
       const rows = [...daily].reverse();
       body.innerHTML =
-        `<div class="metrics">${metric(i18nMessages.mfc40a227e904f869, number(today.recalls), today.day)}${metric(
+        `<div class="metrics">${metric(i18nMessages.mfc40a227e904f869, hasDaily ? number(today.recalls) : "-", today.day)}${metric(
           i18nMessages.ma86fba1fab962dad,
-          number(today.hits),
-          rate(today.hits, today.recalls),
-        )}${metric(i18nMessages.m1ff47789e9e07a55, number(details.total), `${i18nMessages.md4aa24a729178927}${number(details.empty_candidates)}`)}${metric(
+          hasDaily ? number(today.hits) : "-",
+          hasDaily ? rate(today.hits, today.recalls) : "-",
+        )}${metric(i18nMessages.m1ff47789e9e07a55, number(details.total), withCount(i18nMessages.statsEmptyCandidates, details.empty_candidates))}${metric(
           i18nMessages.m7ac21a786368d63f,
           number(details.with_adopted),
-          `${i18nMessages.m0fc6b42f8031ea9e}${number(details.good_total)}`,
+          withCount(i18nMessages.statsPositiveFeedback, details.good_total),
         )}</div>` +
         panel(
           i18nMessages.mc5f1c28c0d5f061d,
-          rows.length
+          !hasDaily
+            ? `<p class="empty">${h(i18nMessages.statsDailyUnavailable)}</p>`
+            : rows.length
             ? `${i18nMessages.m21d8457c18e9d4ce}${rows
                 .map(
                   (row) =>

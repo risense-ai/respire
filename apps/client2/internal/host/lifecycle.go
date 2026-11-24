@@ -107,7 +107,9 @@ func (m *Manager) unlockIfNeeded(health HealthInfo) error {
 		return nil
 	}
 	if samePath(health.InstallationRoot, m.DataRoot) && filepath.IsAbs(health.DataDir) {
-		relative, err := filepath.Rel(m.DataRoot, health.DataDir)
+		// Runtime may publish a DOS path for an installation that Client2
+		// opened using its extended Windows spelling.
+		relative, err := filepath.Rel(windowsDOSPath(m.DataRoot), windowsDOSPath(health.DataDir))
 		if err == nil && filepath.IsLocal(relative) {
 			// An accountless Runtime can serve its login and status endpoints while locked.
 			if _, err := os.Lstat(filepath.Join(health.DataDir, "session.json")); errors.Is(err, os.ErrNotExist) {

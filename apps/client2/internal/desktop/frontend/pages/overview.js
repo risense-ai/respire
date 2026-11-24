@@ -234,7 +234,7 @@ export function overview(root, ctx) {
             (step) =>
               `<div class="row spread"><div class="row-copy"><strong><span class="dot ${
                 step.done ? "online" : ""
-              }" style="margin-right:8px"></span>${h(step.title)}</strong><small>${h(step.desc)}</small></div>${
+              }"></span>${h(step.title)}</strong><small>${h(step.desc)}</small></div>${
                 step.done
                   ? i18nMessages.mf27aac25467851e3
                   : step.action

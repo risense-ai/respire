@@ -1,4 +1,5 @@
 import { messages as i18nMessages } from "../ui/i18n/messages.js";
+import { t } from "../ui/i18n.js";
 import {
   $,
   h,
@@ -11,13 +12,40 @@ import {
   dialog,
   showText,
   rows,
+  number,
 } from "../ui/core.js";
 import { heading } from "../pages/overview.js";
 import { entry, list } from "./model.js";
 
 const pad = (value) => String(value).padStart(2, "0");
-const dayOf = (date) =>
+export const localCalendarDay = (date) =>
   `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+
+function validDay(value) {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const utc = new Date(value + "T00:00:00Z");
+  return !Number.isNaN(utc.getTime()) && utc.toISOString().slice(0, 10) === value;
+}
+
+function localTimestamp(value) {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}T.+(?:Z|[+-]\d{2}:\d{2})$/.test(value)) return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function entryDay(item) {
+  if (validDay(item.day)) return item.day;
+  const titleDay = String(item.title || "").match(/\d{4}-\d{2}-\d{2}/)?.[0];
+  if (validDay(titleDay)) return titleDay;
+  const timestamp = localTimestamp(item.created_at);
+  return timestamp ? localCalendarDay(timestamp) : String(item.created_at || "").slice(0, 10);
+}
+
+function entryTime(item) {
+  const timestamp = localTimestamp(item.created_at);
+  if (!timestamp) return String(item.created_at || "").slice(11, 16);
+  return `${pad(timestamp.getHours())}:${pad(timestamp.getMinutes())}`;
+}
 export function diary(root, ctx) {
   const now = new Date();
   let month = `${now.getFullYear()}-${pad(now.getMonth() + 1)}`,
@@ -33,9 +61,7 @@ export function diary(root, ctx) {
       total = new Date(year, m, 0).getDate();
     const groups = new Map();
     for (const item of items) {
-      const day =
-        String(item.title || "").match(/\d{4}-\d{2}-\d{2}/)?.[0] ||
-        String(item.created_at || "").slice(0, 10);
+      const day = entryDay(item);
       if (!groups.has(day)) groups.set(day, []);
       groups.get(day).push(item);
     }
@@ -50,7 +76,7 @@ export function diary(root, ctx) {
       Array.from({ length: total }, (_, i) => {
         const day = `${month}-${pad(i + 1)}`,
           count = groups.get(day)?.length || 0;
-        return `<button class="calendar-day ${count ? "has-entries" : ""} ${day === dayOf(now) ? "today" : ""}" data-day="${day}"><span>${i + 1}</span>${count ? `<small>${count}${i18nMessages.m94dfbd71eadc8f59}` : ""}</button>`;
+        return `<button class="calendar-day ${count ? "has-entries" : ""} ${day === localCalendarDay(now) ? "today" : ""}" data-day="${day}"><span>${i + 1}</span>${count ? `<small>${h(t(count === 1 ? i18nMessages.diaryEntryCountOne : i18nMessages.diaryEntryCountMany).replace("{count}", number(count)))}</small>` : ""}</button>`;
       }).join("");
     function select(day) {
       $("[data-day-title]", root).textContent = day;
@@ -59,8 +85,8 @@ export function diary(root, ctx) {
       $("[data-entries]", root).innerHTML = entries.length
         ? `<ol class="timeline">${entries
             .map((item) => {
-              const time = String(item.created_at || "").slice(11, 16);
-              return `<li class="timeline-item"><span class="timeline-dot" aria-hidden="true"></span><div class="timeline-body"><button data-entry="${h(item.id)}">${h(item.title)}</button>${time ? `<small>${time}</small>` : ""}</div></li>`;
+              const time = entryTime(item);
+              return `<li class="timeline-item"><span class="timeline-dot" aria-hidden="true"></span><div class="timeline-body"><button data-entry="${h(item.id)}">${h(item.title)}</button>${time ? `<small>${h(time)}</small>` : ""}</div></li>`;
             })
             .join("")}</ol>`
         : i18nMessages.m3e9f5615f968cbf2;
@@ -69,7 +95,7 @@ export function diary(root, ctx) {
       const button = event.target.closest("[data-day]");
       if (button) select(button.dataset.day);
     };
-    if (month === dayOf(now).slice(0, 7)) select(dayOf(now));
+    if (month === localCalendarDay(now).slice(0, 7)) select(localCalendarDay(now));
   }
   async function load() {
     if (loading) return;

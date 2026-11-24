@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"reflect"
 	"respire-client2/internal/i18n"
-	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -50,22 +49,7 @@ func deviceProfileIdentity(profile string) (runtimeAuthIdentity, error) {
 }
 
 func (m *Manager) verifyDeviceConfigOwner(ctx context.Context, health HealthInfo, info InstalledRuntime, profile string) error {
-	if err := m.verifySelectedHealth(health, info); err != nil {
-		return err
-	}
-	birth, err := runtimeControlProcessBirth(ctx, int(health.PID))
-	if err != nil {
-		return err
-	}
-	prefix := map[string]string{"windows": "windows-filetime-", "linux": "linux-starttime-", "darwin": "darwin-lstart-"}[runtime.GOOS]
-	if birth == "" || health.ProcessStartID != prefix+birth {
-		return errors.New(i18n.Message82e68dcc37834b71)
-	}
-	root, err := canonicalSessionDirectory(m.DataRoot)
-	if err != nil {
-		return err
-	}
-	profile, err = canonicalSessionDirectory(profile)
+	profile, err := canonicalSessionDirectory(profile)
 	if err != nil {
 		return err
 	}
@@ -77,13 +61,7 @@ func (m *Manager) verifyDeviceConfigOwner(ctx context.Context, health HealthInfo
 	if identity.AccountID != nil {
 		account = *identity.AccountID
 	}
-	if !health.StartupComplete || health.ImageSHA256 != info.SHA256 ||
-		!samePath(health.ImagePath, health.Exe) || !samePath(health.DataDir, profile) ||
-		health.InstallationID != controlDigest([]byte(root)) || health.AccountID != account ||
-		!runtimeInstanceID.MatchString(health.InstanceID) || health.Generation == 0 {
-		return errors.New(i18n.Message34a4deabb8b33b2c)
-	}
-	return nil
+	return m.verifyScopedRuntimeOwner(ctx, health, info, profile, account)
 }
 
 func (m *Manager) validateDeviceConfig(ctx context.Context, intent deviceConfigIntent) (json.RawMessage, error) {

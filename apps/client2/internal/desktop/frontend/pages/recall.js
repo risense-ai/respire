@@ -1,4 +1,5 @@
 import { messages as i18nMessages } from "../ui/i18n/messages.js";
+import { t } from "../ui/i18n.js";
 import {
   $,
   h,
@@ -59,7 +60,10 @@ export function recallChecks(root) {
             limit: 20,
           });
           if (!section.isConnected) return;
-          output.innerHTML = `${i18nMessages.m2620d8fdb202f52a}${(performance.now() - started).toFixed(0)}${i18nMessages.m48e0bc461fc9d3fd}${h(summary(result).count)}${i18nMessages.m6609876f4d01aef9}${summary(result).selection_fallback ? `${i18nMessages.mb7c63e973858ae67}${h(summary(result).selection_fallback)}</p>` : ""}${resultView(i18nMessages.m1f86cffa5cafe3d1, result)}`;
+          const hint = t(i18nMessages.recallElapsedCount)
+            .replace("{elapsed}", (performance.now() - started).toFixed(0))
+            .replace("{count}", String(summary(result).count ?? ""));
+          output.innerHTML = `<p class="hint">${h(hint)}</p>${summary(result).selection_fallback ? `${i18nMessages.mb7c63e973858ae67}${h(summary(result).selection_fallback)}</p>` : ""}${resultView(i18nMessages.m1f86cffa5cafe3d1, result)}`;
           return;
         }
         const results = [];

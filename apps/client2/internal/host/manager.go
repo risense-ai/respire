@@ -210,6 +210,7 @@ type Manager struct {
 	mu              sync.Mutex
 	directRuntime   HealthInfo
 	hostAuthority   runtimeHostAuthority
+	startupControl  func(context.Context, InstalledRuntime) (*runtimeStartup, error)
 	cliInstallMu    sync.RWMutex
 	prefs           Preferences
 	task            TaskState
@@ -234,7 +235,13 @@ func New() (*Manager, error) {
 	if err != nil {
 		return nil, err
 	}
+	m.DataRoot, err = startupScopePath(m.DataRoot)
+	if err != nil {
+		return nil, err
+	}
+	m.Root = filepath.Join(m.DataRoot, "client2")
 	m.Endpoint = "http://127.0.0.1:" + port
+	m.startupControl = m.acquireStartup
 	m.localClient = &http.Client{Timeout: 30 * time.Second, Transport: &http.Transport{Proxy: nil}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	if err := m.loadOperations(); err != nil {
 		return nil, err

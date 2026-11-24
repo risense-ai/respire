@@ -240,6 +240,9 @@ button.workspace-label:hover {
   background: var(--muted);
   flex-shrink: 0;
 }
+[data-overview-onboarding] .dot {
+  margin-right: 8px;
+}
 .dot.online {
   background: var(--green);
 }

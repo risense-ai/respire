@@ -14,6 +14,7 @@ import {
   rows,
 } from "../ui/core.js";
 import { heading } from "./overview.js";
+import { t } from "../ui/i18n.js";
 import { entry } from "../memory/model.js";
 
 export async function inspectGrants(memory) {
@@ -56,7 +57,7 @@ export function grants(root, ctx) {
       $("[data-grants]", root).innerHTML = panel(
         i18nMessages.m5060cae0de5fb260,
         records.length
-          ? `<ul class="clean">${records.map((item) => `<li class="row"><div class="row-copy"><strong>${h(item.label || item.id)}${i18nMessages.m297c17cb8c2924f0}${h(item.root_id || item.root)} · ${h(item.revoked ? i18nMessages.mfef96e34f77b742b : i18nMessages.m3b5ec3533b0e4485)}</small></div>${item.revoked ? "" : `<button class="danger" data-revoke="${h(item.id)}${i18nMessages.m36e4ca8fc6d13508}`}</li>`).join("")}</ul>`
+          ? `<ul class="clean">${records.map((item) => `<li class="row"><div class="row-copy"><strong>${h(item.label || item.id)}</strong><small>${h(t(i18nMessages.grantSubtreeLabel))} ${h(item.root_id || item.root)} · ${h(t(item.revoked ? i18nMessages.mfef96e34f77b742b : i18nMessages.m3b5ec3533b0e4485))}</small></div>${item.revoked ? "" : `<button class="danger" data-revoke="${h(item.id)}${i18nMessages.m36e4ca8fc6d13508}`}</li>`).join("")}</ul>`
           : i18nMessages.m686cf93ed312b399,
       );
     } catch (e) {

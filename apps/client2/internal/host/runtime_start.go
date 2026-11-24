@@ -19,6 +19,9 @@ func (m *Manager) startDetached(ctx context.Context, info InstalledRuntime) (Hea
 	if err := m.verifyRuntimeSelection(info); err != nil {
 		return HealthInfo{}, err
 	}
+	if m.hostAuthority == nil && m.startupControl != nil {
+		return m.startWithStartupControl(ctx, info)
+	}
 	lock, err := m.lockRuntimeTakeover(ctx)
 	if err != nil {
 		return HealthInfo{}, err
@@ -39,12 +42,24 @@ func (m *Manager) verifyRuntimeSelection(info InstalledRuntime) error {
 }
 
 func (m *Manager) startDetachedLocked(ctx context.Context, info InstalledRuntime) (HealthInfo, error) {
+	return m.startDetachedComplete(ctx, info, nil)
+}
+
+func (m *Manager) startDetachedComplete(ctx context.Context, info InstalledRuntime, complete func(HealthInfo) error) (HealthInfo, error) {
 	if err := m.verifyRuntimeSelection(info); err != nil {
 		return HealthInfo{}, err
 	}
 	h, _, err := m.Health(ctx)
 	if err == nil {
-		return h, m.verifySelectedHealth(h, info)
+		if err := m.verifySelectedHealth(h, info); err != nil {
+			return HealthInfo{}, err
+		}
+		if complete != nil {
+			if err := complete(h); err != nil {
+				return HealthInfo{}, err
+			}
+		}
+		return h, nil
 	}
 	if !IsUnavailable(err) {
 		return HealthInfo{}, err
@@ -59,7 +74,12 @@ func (m *Manager) startDetachedLocked(ctx context.Context, info InstalledRuntime
 	if err := requireAbsentRuntimeAccountFile(filepath.Join(m.DataRoot, "runtime", "autostart", "offline-keygen.json")); err != nil {
 		return HealthInfo{}, fmt.Errorf(i18n.Messaged9c4a7410a734011, err)
 	}
-	if err := archiveTerminalRuntimeMaintenance(m.DataRoot); err != nil {
+	if complete != nil {
+		// The startup helper grants no authority to retire account maintenance.
+		if err := m.requireNoDeviceMaintenance(); err != nil {
+			return HealthInfo{}, fmt.Errorf("Startup exclusion cannot retire account maintenance: %w", err)
+		}
+	} else if err := archiveTerminalRuntimeMaintenance(m.DataRoot); err != nil {
 		return HealthInfo{}, err
 	}
 	if err := m.archiveStoppedEndpoint(ctx, endpoint.Host); err != nil {
@@ -67,17 +87,25 @@ func (m *Manager) startDetachedLocked(ctx context.Context, info InstalledRuntime
 	}
 	executable := filepath.Join(m.runtimeDir(info.Version), runtimeBinary())
 	cmd := runtimeServingCommand(executable, m.DataRoot, endpoint.Hostname(), endpoint.Port(), "")
-	health, err := m.launchRuntimeServing(ctx, cmd)
-	if err != nil {
-		return HealthInfo{}, err
-	}
-	if health.ImageSHA256 != info.SHA256 {
-		return HealthInfo{}, errors.New(i18n.Message35bb3c888073700d)
-	}
-	return health, m.verifySelectedHealth(health, info)
+	return m.launchRuntimeServingComplete(ctx, cmd, func(health HealthInfo) error {
+		if health.ImageSHA256 != info.SHA256 {
+			return errors.New(i18n.Message35bb3c888073700d)
+		}
+		if err := m.verifySelectedHealth(health, info); err != nil {
+			return err
+		}
+		if complete != nil {
+			return complete(health)
+		}
+		return nil
+	})
 }
 
 func (m *Manager) launchRuntimeServing(ctx context.Context, cmd *exec.Cmd) (HealthInfo, error) {
+	return m.launchRuntimeServingComplete(ctx, cmd, nil)
+}
+
+func (m *Manager) launchRuntimeServingComplete(ctx context.Context, cmd *exec.Cmd, complete func(HealthInfo) error) (result HealthInfo, resultErr error) {
 	if err := ctx.Err(); err != nil {
 		return HealthInfo{}, err
 	}
@@ -92,6 +120,16 @@ func (m *Manager) launchRuntimeServing(ctx context.Context, cmd *exec.Cmd) (Heal
 	}
 	exited := make(chan error, 1)
 	go func() { exited <- cmd.Wait() }()
+	reaped := false
+	defer func() {
+		if resultErr != nil && !reaped {
+			killErr := cmd.Process.Kill()
+			waitErr := <-exited
+			if cmd.ProcessState == nil {
+				resultErr = errors.Join(resultErr, fmt.Errorf("Runtime serving child exit unconfirmed: %w", errors.Join(killErr, waitErr)))
+			}
+		}
+	}()
 
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
@@ -102,16 +140,25 @@ func (m *Manager) launchRuntimeServing(ctx context.Context, cmd *exec.Cmd) (Heal
 				return HealthInfo{}, errors.New(i18n.Message7d43ff8e7e66eaf1)
 			}
 			if h.StartupComplete {
+				if complete != nil {
+					if err := complete(h); err != nil {
+						return HealthInfo{}, err
+					}
+				}
+				if err := ctx.Err(); err != nil {
+					return HealthInfo{}, err
+				}
 				m.mu.Lock()
 				m.directRuntime = h
 				m.mu.Unlock()
 				return h, nil
 			}
-		} else if !IsUnavailable(err) && ctx.Err() == nil {
+		} else if !runtimeStartingProbeRetryable(err) && ctx.Err() == nil {
 			return HealthInfo{}, err
 		}
 		select {
 		case err := <-exited:
+			reaped = true
 			return HealthInfo{}, fmt.Errorf(i18n.Message4c44537e0ef9342b, err, log.Name())
 		case <-ctx.Done():
 			return HealthInfo{}, fmt.Errorf(i18n.Messagee777666a7c16500d, log.Name(), ctx.Err())

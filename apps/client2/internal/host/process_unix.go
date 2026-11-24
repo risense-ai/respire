@@ -15,6 +15,8 @@ func configureRuntimeCommand(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 }
 
+func runtimeStartingProbeRetryable(err error) bool { return IsUnavailable(err) }
+
 func IsUnavailable(err error) bool {
 	var op *net.OpError
 	return errors.As(err, &op) && errors.Is(err, syscall.ECONNREFUSED)

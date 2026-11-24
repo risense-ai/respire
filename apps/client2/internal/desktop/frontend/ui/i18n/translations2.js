@@ -1,4 +1,11 @@
 export const translations2 = [
+  ["耗时 {elapsed} ms · 返回 {count} 条", "Elapsed {elapsed} ms · returned {count}"],
+  ["{count}% 有结果", "{count}% with results"],
+  ["空结果 {count}", "Empty results: {count}"],
+  ["自评有用 {count}", "Rated useful: {count}"],
+  ["当前 Runtime 未提供每日统计。", "This Runtime does not provide daily statistics."],
+  ["1 条日记", "1 entry"],
+  ["{count} 条日记", "{count} entries"],
   ["上一页", "Previous"],
   ["下一页", "Next"],
   ["上一页图谱", "Previous graph page"],
@@ -139,6 +146,9 @@ export const translations2 = [
   ["开始重建", "Start rebuild"],
   ["重新准备模型", "Reprepare model"],
   ["卸载模型", "Uninstall model"],
+    ["卸载受管模型", "Uninstall managed model"],
+    ["卸载 Runtime 管理的 BGE-M3", "Uninstall Runtime-managed BGE-M3"],
+    ["仅删除当前账号下由 Runtime 管理且未在使用的 BGE-M3 文件，不会停止 Runtime，也不会删除旧目录中的文件。", "Remove only inactive BGE-M3 files managed by Runtime for this account. Runtime will stay running, and files in the legacy location are not removed."],
   ["召回方式", "Retrieval mode"],
   ["快速 · 本机召回", "Fast · local retrieval"],
   ["高质量 · 模型筛选候选标题", "Quality · model-reranked candidate titles"],
@@ -349,4 +359,5 @@ export const translations2 = [
   ["检查频率", "Check interval"],
   ["开始使用", "Get started"],
   ["连接 Runtime", "Connect the Runtime"],
+  ["子树", "Subtree"],
 ];

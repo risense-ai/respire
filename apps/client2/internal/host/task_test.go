@@ -16,6 +16,12 @@ import (
 
 // The copied test executable exercises the real host process boundary without a reset service.
 func TestMain(m *testing.M) {
+	if len(os.Args) == 2 && os.Args[1] == "--startup-control-internal" {
+		os.Exit(startupControlFixture())
+	}
+	if len(os.Args) > 1 && os.Args[1] == "serve" && os.Getenv("RESPIRE_TEST_STARTUP_CONTROL") != "" {
+		os.Exit(startupServingFixture())
+	}
 	if os.Getenv("RESPIRE_TEST_RECOVERY_CLI") != "1" {
 		os.Exit(m.Run())
 	}

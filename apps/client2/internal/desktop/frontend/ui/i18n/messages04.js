@@ -1,4 +1,11 @@
 export const messages04 = {
+  recallElapsedCount: "耗时 {elapsed} ms · 返回 {count} 条",
+  statsResultPercentage: "{count}% 有结果",
+  statsEmptyCandidates: "空结果 {count}",
+  statsPositiveFeedback: "自评有用 {count}",
+  statsDailyUnavailable: "当前 Runtime 未提供每日统计。",
+  diaryEntryCountOne: "1 条日记",
+  diaryEntryCountMany: "{count} 条日记",
   mfd4b6a38ba0533a8: "<p class=\"hint\">正在查找相近记忆…</p>",
   mfd52803bca1371ad: "尚未写入。存在待确认候选，请查看相近记忆，选择挂载或明确新建。",
   mfd60472736365fa0: "验证完成",

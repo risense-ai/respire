@@ -36,7 +36,7 @@ export const messages03 = {
   mb06325c5660f0c29: "直连",
   mb073db9c0bd6f2ed: "就绪",
   mb0d3c9cfa0e1ef67: "；",
-  mb10b98c9247f55b0: "卸载全部模型文件",
+  mb10b98c9247f55b0: "卸载 Runtime 管理的 BGE-M3",
   mb1e8c7ae8b7d1b02: "</div><div class=\"reader-relations\"><h3>上下游关系</h3>",
   mb1fc54e00e2b3fa1: "必须是有限数字",
   mb219aa3abd310dab: "【前因】\n\n【行为】\n\n【后果】",

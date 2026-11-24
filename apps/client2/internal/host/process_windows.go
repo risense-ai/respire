@@ -74,6 +74,13 @@ func IsUnavailable(err error) bool {
 	return errors.As(err, &op) && errors.Is(err, windows.WSAECONNREFUSED)
 }
 
+// Only use this once our own serving child has been spawned. A reset while it
+// binds loopback is transient; an arbitrary existing listener is not absent.
+func runtimeStartingProbeRetryable(err error) bool {
+	var op *net.OpError
+	return IsUnavailable(err) || (errors.As(err, &op) && errors.Is(err, windows.WSAECONNRESET))
+}
+
 func (m *Manager) stopProcess(ctx context.Context, h HealthInfo, request func() error) error {
 	handle, err := runtimeProcess(h)
 	if err != nil {

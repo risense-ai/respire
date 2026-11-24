@@ -56,6 +56,36 @@ func (m *Manager) uninstallM3(ctx context.Context) (json.RawMessage, error) {
 }
 
 func (m *Manager) uninstallM3Locked(ctx context.Context) (result json.RawMessage, err error) {
+	// The current Client2 host can ask the running Runtime to remove its own
+	// assets, but cannot remove unowned legacy files or stop a live process.
+	if m.hostAuthority == nil && m.startupControl != nil {
+		selected, err := m.Installed()
+		if err != nil {
+			return nil, errors.Join(errRuntimeHostAuthorityUnavailable, err)
+		}
+		if err := m.verifyRuntimeSelection(selected); err != nil {
+			return nil, errors.Join(errRuntimeHostAuthorityUnavailable, err)
+		}
+		if _, _, err := m.runtimeAccountEndpoint(); err != nil {
+			return nil, err
+		}
+		health, _, healthErr := m.Health(ctx)
+		if healthErr == nil {
+			receipt, removeErr := m.removeRuntimeOwnedModel(ctx, health, "m3")
+			if removeErr != nil {
+				return nil, removeErr
+			}
+			return json.Marshal(map[string]any{
+				"command": "model", "status": "ok",
+				"summary": map[string]any{"model": "bge-m3", "removed": true, "deleted_files": receipt.Deleted},
+				"items":   []map[string]string{{"name": "model", "status": "ok", "value": "bge-m3"}},
+			})
+		}
+		if !IsUnavailable(healthErr) {
+			return nil, healthErr
+		}
+		return nil, errRuntimeHostAuthorityUnavailable
+	}
 	address, _, err := m.runtimeAccountEndpoint()
 	if err != nil {
 		return nil, err

@@ -2,7 +2,7 @@ import { messages as i18nMessages } from "./ui/i18n/messages.js";
 import { $, all, api, execute, notify, number, rows } from "./ui/core.js";
 import { overview } from "./pages/overview.js";
 import { memoryWorkspace } from "./memory/workspace.js";
-import { diary } from "./memory/diary.js";
+import { diary, localCalendarDay } from "./memory/diary.js";
 import { organize } from "./pages/organize.js";
 import { sessionImport } from "./pages/session-import.js";
 import { models } from "./pages/models.js";
@@ -167,7 +167,7 @@ async function refreshNavCounts() {
   navCounts.running = true;
   navCounts.at = Date.now();
   try {
-    const day = new Date().toISOString().slice(0, 10);
+    const day = localCalendarDay(new Date());
     const diaryEnv = await execute("diary_list", { from: day, to: day });
     if (!document.isConnected) return;
     $("#nav-diary-count").textContent = number(rows(diaryEnv).length);

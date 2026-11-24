@@ -128,6 +128,13 @@ func (m *Manager) ModelVariants(ctx context.Context, model string) (map[string]a
 		dir = m.ProfileDir(model)
 	}
 	present := installedVariantsFor(definition, dir)
+	var managedWeights, managedTokenizer string
+	var managed bool
+	if definition.ID == "m3" {
+		if health, supported, err := m.runtimeModelInstallCapability(ctx); err == nil && supported {
+			managedWeights, managedTokenizer, managed = m.managedM3Pair(health)
+		}
+	}
 	variants := make([]map[string]any, 0, len(definition.Variants))
 	for _, variant := range definition.Variants {
 		entry := map[string]any{
@@ -140,12 +147,16 @@ func (m *Manager) ModelVariants(ctx context.Context, model string) (map[string]a
 		if size, ok := present[variant.Name]; ok {
 			entry["bytes"], entry["installed"] = size, true
 		}
+		if managed && variant.Name == "quantized" {
+			entry["path"], entry["bytes"], entry["installed"], entry["runtime_managed"] = managedWeights, variant.Size, true, true
+		}
 		variants = append(variants, entry)
 	}
 	return map[string]any{
-		"model":               definition.ID,
-		"model_dir":           dir,
-		"tokenizer_installed": modelFileValid(filepath.Join(dir, "tokenizer.json"), definition.Tokenizer),
+		"model":     definition.ID,
+		"model_dir": dir,
+		"tokenizer_installed": (managed && modelFileValid(managedTokenizer, definition.Tokenizer)) ||
+			modelFileValid(filepath.Join(dir, "tokenizer.json"), definition.Tokenizer),
 		"cpu_container_ready": !definition.Legacy || m.cpuContainerPresent(dir),
 		"cpu_container_size":  m3CPUContainer.size,
 		"variants":            variants,
