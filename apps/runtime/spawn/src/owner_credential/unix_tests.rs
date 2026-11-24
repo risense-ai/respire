@@ -6,12 +6,28 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-struct Scratch(PathBuf);
+pub(super) struct Scratch(PathBuf);
 
 impl Scratch {
     fn create() -> Self {
+        Self::try_create_in(&std::env::temp_dir()).expect("fresh owner test directory")
+    }
+
+    pub(super) fn model_fixture() -> io::Result<Self> {
+        #[cfg(target_os = "linux")]
+        if let Ok(root) = Self::try_create_in(Path::new("/dev/shm")) {
+            return Ok(root);
+        }
+        Self::try_create_in(&std::env::temp_dir())
+    }
+
+    pub(super) fn path(&self) -> &Path {
+        &self.0
+    }
+
+    fn try_create_in(parent: &Path) -> io::Result<Self> {
         static COUNT: AtomicU64 = AtomicU64::new(0);
-        let parent = std::env::temp_dir().canonicalize().unwrap();
+        let parent = parent.canonicalize()?;
         for _ in 0..32 {
             let id = COUNT.fetch_add(1, Ordering::Relaxed);
             let path = parent.join(format!(
@@ -19,12 +35,12 @@ impl Scratch {
                 std::process::id()
             ));
             match fs::DirBuilder::new().mode(0o700).create(&path) {
-                Ok(()) => return Self(path),
+                Ok(()) => return Ok(Self(path)),
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-                Err(error) => panic!("fixture directory creation failed: {error}"),
+                Err(error) => return Err(error),
             }
         }
-        panic!("no fresh fixture directory");
+        Err(io::Error::from(io::ErrorKind::AlreadyExists));
     }
     fn instance(&self, id: &str) -> PathBuf {
         let name = directory_name(id).unwrap();

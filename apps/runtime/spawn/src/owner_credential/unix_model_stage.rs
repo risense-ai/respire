@@ -266,12 +266,10 @@ mod tests {
     use super::*;
     use std::fs;
 
-    fn root() -> io::Result<tempfile::TempDir> {
-        #[cfg(target_os = "linux")]
-        if let Ok(root) = tempfile::tempdir_in("/dev/shm") {
-            return Ok(root);
-        }
-        tempfile::tempdir()
+    use super::super::tests::Scratch;
+
+    fn root() -> io::Result<Scratch> {
+        Scratch::model_fixture()
     }
 
     fn prepare(base: &Path) -> io::Result<ModelStage> {

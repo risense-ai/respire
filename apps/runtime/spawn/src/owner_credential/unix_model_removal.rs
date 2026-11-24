@@ -333,14 +333,11 @@ mod tests {
         (TOKENIZER, b"synthetic tokenizer"),
     ];
 
-    fn fixture_root() -> io::Result<(tempfile::TempDir, std::path::PathBuf)> {
-        // Match the existing owner-credential tests: Linux container /tmp
-        // can sit on overlayfs, which is not trusted by the OS owner policy.
-        #[cfg(target_os = "linux")]
-        let temp = tempfile::tempdir_in("/dev/shm").or_else(|_| tempfile::tempdir())?;
-        #[cfg(target_os = "macos")]
-        let temp = tempfile::tempdir()?;
-        let base = temp.path().canonicalize()?;
+    use super::super::tests::Scratch;
+
+    fn fixture_root() -> io::Result<(Scratch, std::path::PathBuf)> {
+        let temp = Scratch::model_fixture()?;
+        let base = temp.path().to_owned();
         assert_eq!(fs::metadata(&base)?.mode() & 0o777, 0o700);
         Ok((temp, base))
     }
