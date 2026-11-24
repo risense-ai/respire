@@ -1,0 +1,583 @@
+//! The existing CLI account transaction coordinator, shared with the Runtime host facade.
+//! Business effects remain in the one-shot private Runtime helper.
+use crate::account_control::{self, AccountControl};
+use crate::maintenance::{HostLifecycle, Maintenance, RecoveryMode};
+use anyhow::{Context, Result};
+use respire_client_host::lock::LibraryLock;
+use respire_commands::output::ResultEnvelope;
+use respire_protocol::host_control::{
+    HostAuthAccountOutcome, HostAuthAccountResult, HostAuthAuthorization, HostAuthLoginContinuation,
+};
+use respire_protocol::{ControlBinding, HostAuthIdentity};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+/// Can only be created by a live coordinator after an AwaitingInput receipt.
+/// Retains the same operation, source identity and maintenance capability.
+pub struct AccountContinuation {
+    operation_id: String,
+    source: PathBuf,
+    original_identity: HostAuthIdentity,
+    was_serving: bool,
+    maintenance: Maintenance,
+}
+
+#[derive(Debug)]
+pub struct AccountOutcomeUnknown {
+    pub operation_id: String,
+    pub source_profile: PathBuf,
+    pub register: bool,
+}
+impl std::fmt::Display for AccountOutcomeUnknown {
+    fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(output, "account_outcome_unknown operation_id={} source_profile={} register={}; query the same operation, do not replay authentication",
+            self.operation_id, self.source_profile.display(), self.register)
+    }
+}
+impl std::error::Error for AccountOutcomeUnknown {}
+
+#[derive(Debug)]
+pub struct AccountHandoffPending {
+    pub operation_id: String,
+    pub source_profile: PathBuf,
+    pub register: bool,
+}
+impl std::fmt::Display for AccountHandoffPending {
+    fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        output.write_str(
+            "account committed; Runtime host handoff is pending; do not repeat authentication",
+        )
+    }
+}
+impl std::error::Error for AccountHandoffPending {}
+
+pub struct AccountCoordinator {
+    host: Arc<dyn HostLifecycle>,
+}
+impl AccountCoordinator {
+    pub fn new(host: Arc<dyn HostLifecycle>) -> Self {
+        Self { host }
+    }
+
+    /// Admit a new explicit account intent from the live original keygen owner.
+    /// The caller retains takeover; this independently queries the original Runtime receipt.
+    pub fn prepare_keygen_account(&self, takeover: &LibraryLock,
+        source: &crate::KeygenAccountTransfer, register: bool, user: &str, addr: &str,
+    ) -> Result<crate::KeygenAccountAdmission> {
+        crate::maintenance::prepare_keygen_account(takeover, Arc::clone(&self.host), source, register, user, addr)
+    }
+
+    /// Read only the exact durable mapping, including the crash-before-old-context-cleanup case.
+    pub fn lookup_existing_keygen_transfer(&self, takeover: &LibraryLock,
+        source: &crate::KeygenAccountTransfer, register: bool, user: &str, addr: &str,
+    ) -> Result<Option<crate::KeygenAccountAdmission>> {
+        self.host.require_account_write()?;
+        crate::maintenance::lookup_keygen_account(takeover, source, register, user, addr)
+    }
+
+    /// The old one-request desktop transport cannot retain an in-memory owner.
+    /// Continue only the exact durably bound operation, querying its receipt first.
+    pub fn login_or_continue(
+        &self,
+        addr: &str,
+        user: &str,
+        authorization: HostAuthAuthorization,
+        super_password: Option<&str>,
+        input: HostAuthLoginContinuation,
+    ) -> Result<ResultEnvelope> {
+        self.host.require_account_write()?;
+        let (root, _) = respire_client_host::config::control_roots()?;
+        if let Some((id, source)) =
+            crate::maintenance::pending_account(&root.canonicalize()?, false, user, addr)?
+        {
+            return self.operate(
+                &id,
+                Some(&source),
+                false,
+                AccountControl::LoginStep {
+                    addr: addr.to_owned(),
+                    user: user.to_owned(),
+                    authorization,
+                    super_password: super_password.map(str::to_owned),
+                    input,
+                },
+                None,
+            );
+        }
+        self.login_step(
+            addr,
+            user,
+            authorization,
+            super_password,
+            input,
+            None,
+            &mut None,
+        )
+    }
+
+    pub fn register_or_query(
+        &self,
+        addr: &str,
+        user: &str,
+        password: &str,
+    ) -> Result<ResultEnvelope> {
+        self.host.require_account_write()?;
+        let (root, _) = respire_client_host::config::control_roots()?;
+        if let Some((id, source)) =
+            crate::maintenance::pending_account(&root.canonicalize()?, true, user, addr)?
+        {
+            return self.operate(
+                &id,
+                Some(&source),
+                true,
+                AccountControl::Register {
+                    addr: addr.to_owned(),
+                    user: user.to_owned(),
+                    password: password.to_owned(),
+                    super_password: None,
+                    material: None,
+                },
+                None,
+            );
+        }
+        self.register(addr, user, password, None)
+    }
+
+    pub fn register(
+        &self,
+        addr: &str,
+        user: &str,
+        password: &str,
+        super_password: Option<&str>,
+    ) -> Result<ResultEnvelope> {
+        let (root, _) = respire_client_host::config::control_roots()?;
+        let pending = crate::maintenance::pending_account(&root.canonicalize()?, true, user, addr)?;
+        let id = pending.as_ref().map(|(id, _)| id.clone()).unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        self.operate(
+            &id,
+            pending.as_ref().map(|(_, source)| source.as_path()),
+            true,
+            AccountControl::Register {
+                addr: addr.to_owned(),
+                user: user.to_owned(),
+                password: password.to_owned(),
+                super_password: super_password.map(str::to_owned),
+                material: None,
+            },
+            None,
+        )
+    }
+
+    pub fn login_step(
+        &self,
+        addr: &str,
+        user: &str,
+        authorization: HostAuthAuthorization,
+        super_password: Option<&str>,
+        input: HostAuthLoginContinuation,
+        resume: Option<&HostAuthAccountResult>,
+        continuation: &mut Option<AccountContinuation>,
+    ) -> Result<ResultEnvelope> {
+        let operation = AccountControl::LoginStep {
+            addr: addr.to_owned(),
+            user: user.to_owned(),
+            authorization,
+            super_password: super_password.map(str::to_owned),
+            input,
+        };
+        if let Some(previous) = resume {
+            account_control::validate_account_receipt(
+                previous,
+                &previous.operation_id,
+                &previous.source_profile,
+                false,
+            )?;
+            if previous.outcome != HostAuthAccountOutcome::AwaitingInput {
+                return self.result(&previous.operation_id, &previous.source_profile, false);
+            }
+            let status = previous
+                .login
+                .as_ref()
+                .context("login continuation status is missing")?;
+            anyhow::ensure!(
+                status.user == user
+                    && status.addr.trim_end_matches('/') == addr.trim().trim_end_matches('/'),
+                "login continuation user or server differs from the original operation"
+            );
+            return self.operate(
+                &previous.operation_id,
+                Some(&previous.source_profile),
+                false,
+                operation,
+                Some(continuation),
+            );
+        }
+        let (root, _) = respire_client_host::config::control_roots()?;
+        let pending = crate::maintenance::pending_account(&root.canonicalize()?, false, user, addr)?;
+        let id = pending.as_ref().map(|(id, _)| id.clone()).unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        self.operate(
+            &id,
+            pending.as_ref().map(|(_, source)| source.as_path()),
+            false,
+            operation,
+            Some(continuation),
+        )
+    }
+
+    /// Explicit result reconnect does not issue a new login or registration.
+    pub fn result(
+        &self,
+        operation_id: &str,
+        source: &Path,
+        register: bool,
+    ) -> Result<ResultEnvelope> {
+        self.operate(
+            operation_id,
+            Some(source),
+            register,
+            AccountControl::Result,
+            None,
+        )
+    }
+
+    pub fn rollback(
+        &self,
+        operation_id: &str,
+        source: &Path,
+        register: bool,
+    ) -> Result<ResultEnvelope> {
+        self.operate(
+            operation_id,
+            Some(source),
+            register,
+            AccountControl::Rollback,
+            None,
+        )
+    }
+
+    /// Continue only a durably bound operation; no authentication admission is allowed.
+    pub fn continue_login(&self, operation_id: &str, source: &Path,
+        input: HostAuthLoginContinuation, super_password: Option<String>, totp: Option<String>,
+    ) -> Result<ResultEnvelope> {
+        self.operate_inner(operation_id, Some(source), false, AccountControl::Result, None,
+            Some((input, super_password, totp)))
+    }
+
+    fn operate(&self, operation_id: &str, original_source: Option<&Path>, register: bool,
+        operation: AccountControl, continuation: Option<&mut Option<AccountContinuation>>,
+    ) -> Result<ResultEnvelope> {
+        self.operate_inner(operation_id, original_source, register, operation, continuation, None)
+    }
+
+    fn operate_inner(
+        &self,
+        operation_id: &str,
+        original_source: Option<&Path>,
+        register: bool,
+        mut operation: AccountControl,
+        mut continuation: Option<&mut Option<AccountContinuation>>,
+        supplemental: Option<(HostAuthLoginContinuation, Option<String>, Option<String>)>,
+    ) -> Result<ResultEnvelope> {
+        self.host.require_account_write()?;
+        let id = uuid::Uuid::parse_str(operation_id).context("invalid account operation ID")?;
+        anyhow::ensure!(
+            id.get_version_num() == 4 && id.to_string() == operation_id,
+            "account operation ID must be a canonical random UUID"
+        );
+        self.host.verified_runtime()?.revalidate()?;
+        let (_, selected) = respire_client_host::config::control_roots()?;
+        let takeover = crate::maintenance::takeover_lock()?;
+        if original_source.is_none() {
+            std::fs::create_dir_all(&selected)?;
+        }
+        let source = original_source.unwrap_or(&selected).canonicalize()?;
+        if original_source.is_none() {
+            crate::auth_material::prepare_source(&takeover)?;
+        }
+        let saved = continuation.as_mut().and_then(|slot| slot.take());
+        let is_continuation =
+            original_source.is_some() && matches!(&operation, AccountControl::LoginStep { .. });
+        anyhow::ensure!(
+            saved.is_none() || is_continuation,
+            "live login continuation cannot be used for another operation"
+        );
+        let health = self.host.probe_runtime()?;
+        anyhow::ensure!(
+            health.is_some() || !self.host.endpoint_path().try_exists()?,
+            "account control blocked: recorded owner has no verifiable health/drain receipt"
+        );
+        let (mut maintenance, original_identity, restore_owner) = if let Some(saved) = saved {
+            anyhow::ensure!(
+                !register
+                    && saved.operation_id == operation_id
+                    && saved.source == source
+                    && selected.canonicalize()? == source
+                    && crate::identity(&source)? == saved.original_identity,
+                "login continuation changed its original operation or source identity"
+            );
+            (
+                saved.maintenance,
+                saved.original_identity,
+                Some(saved.was_serving),
+            )
+        } else {
+            let original_identity = crate::identity(&source)?;
+            let mode = if original_source.is_some() {
+                RecoveryMode::QueryOriginal
+            } else {
+                RecoveryMode::Fresh
+            };
+            let (maintenance, original_identity, was_serving) = Maintenance::begin_account_locked(
+                &takeover,
+                Arc::clone(&self.host),
+                mode,
+                operation_id,
+                &source,
+                register,
+                health.as_ref(),
+                &original_identity,
+                match &operation {
+                    AccountControl::Register { user, addr, .. }
+                    | AccountControl::LoginStep { user, addr, .. }
+                    | AccountControl::Login { user, addr, .. } => {
+                        Some((user.as_str(), addr.as_str()))
+                    }
+                    _ => None,
+                },
+            )?;
+            (maintenance, original_identity, Some(was_serving))
+        };
+        let restore_owner =
+            restore_owner.or_else(|| original_source.is_none().then_some(health.is_some()));
+        maintenance.check_account_runtime()?;
+        maintenance.drain_observed_runtime(health.as_ref())?;
+        let unknown = || AccountOutcomeUnknown {
+            operation_id: operation_id.to_owned(),
+            source_profile: source.clone(),
+            register,
+        };
+        let sent = maintenance.account_operation_sent()?;
+        let mut envelope = if !sent {
+            if matches!(&operation, AccountControl::Rollback) {
+                if register {
+                    maintenance.rollback_registration(operation_id, &source, &original_identity)?;
+                } else {
+                    crate::login_custody::LoginCustody::open(&takeover, maintenance.installation_root(),
+                        &source, operation_id)?.finish(true)?;
+                }
+                let was_serving = restore_owner.context("original registration serving state is missing")?;
+                maintenance.finish_rollback(&source, &original_identity, was_serving)?;
+                self.host.finish_key_handoff(&source, &original_identity, was_serving)?;
+                crate::maintenance::finish_account_routing(maintenance.installation_root(), operation_id)?;
+                let receipt = HostAuthAccountResult {
+                    operation_id: operation_id.to_owned(), outcome: HostAuthAccountOutcome::RolledBack,
+                    source_profile: source, target_profile: None, account_id: None,
+                    session_sha256: None, super_password: None, login: None,
+                };
+                return Ok(ResultEnvelope::new("registration-custody-rollback",
+                    respire_commands::output::Status::Ok, serde_json::to_value(receipt)?, Vec::new()));
+            }
+            anyhow::ensure!(
+                selected.canonicalize()? == source,
+                "unadmitted original operation selection changed"
+            );
+            require_unsent_admission(&operation, &crate::identity(&source)?, &original_identity)?;
+            if let AccountControl::Register { password, super_password, material, .. } = &mut operation {
+                *material = Some(maintenance.prepare_registration(operation_id, &source,
+                    &original_identity, password, super_password.as_deref())?);
+            }
+            exchange_account(
+                &takeover,
+                &mut maintenance,
+                &*self.host,
+                operation_id,
+                &source,
+                register,
+                operation,
+                None,
+            )?
+        } else if original_source.is_some()
+            && (supplemental.is_some() || matches!(&operation, AccountControl::LoginStep { .. }))
+        {
+            let queried = exchange_account(
+                &takeover,
+                &mut maintenance,
+                &*self.host,
+                operation_id,
+                &source,
+                register,
+                AccountControl::Result,
+                None,
+            )?;
+            let receipt: HostAuthAccountResult = serde_json::from_value(queried.summary.clone())
+                .map_err(|_| {
+                    anyhow::anyhow!("invalid login continuation receipt shape").context(unknown())
+                })?;
+            if receipt.outcome == HostAuthAccountOutcome::AwaitingInput {
+                if let Some((input, super_password, totp)) = supplemental {
+                    operation = crate::login_custody::LoginCustody::open(&takeover,
+                        maintenance.installation_root(), &source, operation_id)?
+                        .continue_operation(&receipt, input, super_password, totp)?;
+                }
+                let AccountControl::LoginStep { addr, user, .. } = &operation else {
+                    anyhow::bail!("original login continuation is missing");
+                };
+                let status = receipt
+                    .login
+                    .as_ref()
+                    .context("login continuation status is missing")?;
+                anyhow::ensure!(
+                    status.user == *user
+                        && status.addr.trim_end_matches('/') == addr.trim().trim_end_matches('/'),
+                    "queried login user or server differs from the original operation"
+                );
+                anyhow::ensure!(
+                    selected.canonicalize()? == source
+                        && crate::identity(&source)? == original_identity,
+                    "login continuation changed its original source identity"
+                );
+                exchange_account(
+                    &takeover,
+                    &mut maintenance,
+                    &*self.host,
+                    operation_id,
+                    &source,
+                    register,
+                    operation,
+                    None,
+                )?
+            } else {
+                queried
+            }
+        } else {
+            let operation = if original_source.is_some()
+                && matches!(&operation, AccountControl::Register { .. })
+            {
+                AccountControl::Result
+            } else {
+                operation
+            };
+            exchange_account(
+                &takeover,
+                &mut maintenance,
+                &*self.host,
+                operation_id,
+                &source,
+                register,
+                operation,
+                None,
+            )?
+        };
+        let mut receipt: HostAuthAccountResult =
+            serde_json::from_value(envelope.summary.clone())
+                .map_err(|_| anyhow::anyhow!("invalid account receipt shape").context(unknown()))?;
+        if matches!(
+            receipt.outcome,
+            HostAuthAccountOutcome::AwaitingVerification | HostAuthAccountOutcome::Committed
+        ) {
+            maintenance
+                .start_account_target(&source, operation_id, &receipt, register)
+                .map_err(|error| error.context(unknown()))?;
+            if receipt.outcome == HostAuthAccountOutcome::AwaitingVerification {
+                envelope = exchange_account(
+                    &takeover,
+                    &mut maintenance,
+                    &*self.host,
+                    operation_id,
+                    &source,
+                    register,
+                    AccountControl::Complete,
+                    Some(&receipt),
+                )?;
+                receipt = serde_json::from_value(envelope.summary.clone()).map_err(|_| {
+                    anyhow::anyhow!("invalid account completion receipt shape").context(unknown())
+                })?;
+            }
+        }
+        match receipt.outcome {
+            HostAuthAccountOutcome::AwaitingInput => {
+                if let (Some(slot), Some(was_serving)) = (continuation, restore_owner) {
+                    *slot = Some(AccountContinuation {
+                        operation_id: operation_id.to_owned(),
+                        source,
+                        original_identity,
+                        was_serving,
+                        maintenance,
+                    });
+                }
+                Ok(envelope)
+            }
+            HostAuthAccountOutcome::Committed => {
+                maintenance
+                    .verify_account_target(&source, operation_id, &receipt, register)
+                    .map_err(|error| error.context(unknown()))?;
+                let registration_super = if register {
+                    Some(maintenance.registration_super(operation_id, &source, &original_identity,
+                        receipt.target_profile.as_deref().context("committed registration target is missing")?)?)
+                } else { None };
+                maintenance.finish().map_err(|error| {
+                    error.context(AccountHandoffPending {
+                        operation_id: operation_id.to_owned(),
+                        source_profile: source.clone(),
+                        register,
+                    })
+                })?;
+                self.host
+                    .finish_account_handoff(&receipt)
+                    .map_err(|error| {
+                        error.context(AccountHandoffPending {
+                            operation_id: operation_id.to_owned(),
+                            source_profile: source.clone(),
+                            register,
+                        })
+                    })?;
+                if !register {
+                    crate::login_custody::LoginCustody::open(&takeover, maintenance.installation_root(),
+                        &source, operation_id)?.finish(false)?;
+                }
+                crate::maintenance::finish_account_routing(
+                    maintenance.installation_root(),
+                    operation_id,
+                )
+                .map_err(|error| {
+                    error.context(AccountHandoffPending {
+                        operation_id: operation_id.to_owned(),
+                        source_profile: source.clone(),
+                        register,
+                    })
+                })?;
+                if let Some(super_password) = registration_super {
+                    envelope.summary["super_password"] = serde_json::json!(super_password);
+                }
+                Ok(envelope)
+            }
+            HostAuthAccountOutcome::RolledBack => {
+                if register {
+                    maintenance.rollback_registration(operation_id, &source, &original_identity)?;
+                } else {
+                    crate::login_custody::LoginCustody::open(&takeover, maintenance.installation_root(),
+                        &source, operation_id)?.finish(true)?;
+                }
+                if let Some(was_serving) = restore_owner {
+                    maintenance.finish_rollback(&source, &original_identity, was_serving)?;
+                    self.host
+                        .finish_key_handoff(&source, &original_identity, was_serving)?;
+                }
+                crate::maintenance::finish_account_routing(
+                    maintenance.installation_root(),
+                    operation_id,
+                )?;
+                Ok(envelope)
+            }
+            HostAuthAccountOutcome::AwaitingVerification | HostAuthAccountOutcome::Unknown => {
+                Err(unknown().into())
+            }
+        }
+    }
+}
+
+include!("account/exchange_account.rs");
+
+#[cfg(test)]
+mod tests;

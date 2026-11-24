@@ -1,0 +1,488 @@
+"""Real Secret Service fixtures with private or explicitly verified hosted-user D-Bus."""
+import importlib.util
+from importlib.metadata import version
+import os
+from pathlib import Path
+import re
+import secrets
+import stat
+import subprocess
+import sys
+import time
+
+_spec = importlib.util.spec_from_file_location(
+    "migration_native_fixture_keys", Path(__file__).with_name("dev-migration-keyring.py"))
+_base = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_base)
+require = _base.require
+owned_path = _base.owned_path
+canonical_identity = _base.canonical_identity
+
+
+def hosted_user_bus_environment():
+    require(sys.platform.startswith("linux")
+            and os.environ.get("GITHUB_ACTIONS") == "true"
+            and os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted"
+            and os.environ.get("RSRS_SS_FIXTURE_BUS") != "private",
+            "hosted_user_bus_requires_dedicated_linux_runner")
+    uid = os.getuid()
+    runtime = Path(f"/run/user/{uid}")
+    bus = runtime / "bus"
+    require(not runtime.is_symlink() and runtime.is_dir()
+            and runtime.stat().st_uid == uid
+            and stat.S_IMODE(runtime.stat().st_mode) == 0o700,
+            "hosted_user_runtime_directory_invalid")
+    require(not bus.is_symlink() and bus.exists()
+            and stat.S_ISSOCK(bus.stat().st_mode) and bus.stat().st_uid == uid,
+            "hosted_user_bus_socket_invalid")
+    return {"XDG_RUNTIME_DIR": str(runtime), "DBUS_SESSION_BUS_ADDRESS": f"unix:path={bus}",
+            "RSRS_SS_FIXTURE_BUS": "hosted-user"}
+
+
+def private_provider_stderr(root):
+    root = owned_path(root)
+    metadata = root.stat()
+    require(root.is_dir() and not root.is_symlink() and metadata.st_uid == os.getuid()
+            and stat.S_IMODE(metadata.st_mode) == 0o700, "fixture_provider_root_not_private")
+    return os.fdopen(os.open(root / "provider.stderr", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb")
+
+
+# GNOME Keyring's secure allocator uses libc assert() to avoid GLib allocations.
+PROVIDER_LIBC_ASSERTION = re.compile(
+    rb"(?m)^gnome-keyring-daemon: (?:[^\r\n:]+/)?"
+    rb"(?P<file>egg-secure-memory\.c):(?P<line>[1-9][0-9]*): "
+    rb"(?P<function>[A-Za-z_][A-Za-z0-9_]*): Assertion `[^\r\n]+' failed\.\r?$")
+
+
+def provider_abort_type(stderr, exit_code):
+    # Linux SIGTRAP/SIGABRT; raw text, paths and assertion values stay private.
+    if exit_code not in (-5, -6):
+        return "unknown"
+    if re.search(rb"(?m)^(?:Bail out! )?(?:[A-Za-z0-9_-]+:)?ERROR:[^\r\n]+: assertion failed", stderr):
+        return "glib_assertion"
+    if exit_code == -6 and PROVIDER_LIBC_ASSERTION.search(stderr):
+        return "libc_assertion"
+    for marker, kind in ((b"free(): double free detected", "allocator_double_free"),
+                         (b"double free or corruption", "allocator_corruption"),
+                         (b"malloc(): corrupted", "allocator_corruption"),
+                         (b"munmap_chunk(): invalid pointer", "allocator_invalid_pointer"),
+                         (b"*** stack smashing detected ***", "stack_smashing")):
+        if marker in stderr:
+            return kind
+    if exit_code == -5:
+        marker = re.search(
+            rb"(?m)^(?:\*\* )?(?:\(gnome-keyring-daemon:[0-9]+\): )?"
+            rb"(?:(?:GLib(?:-GIO|-GObject)?|Gkm|Gkd|Egg|gnome-keyring-daemon)-)?"
+            rb"(ERROR|CRITICAL) \*\*:", stderr)
+        if marker:
+            return "glib_fatal_error" if marker[1] == b"ERROR" else "glib_fatal_critical"
+    return "unknown"
+
+
+def provider_abort_location(stderr, exit_code):
+    if exit_code not in (-5, -6):
+        return "unknown"
+    # Only the static assertion header is public; directories and expressions stay private.
+    match = re.search(
+        rb"(?m)^(?:Bail out! )?(?:(?:Gkm|Gkd|Egg|GLib|GLib-GObject|GLib-GIO):)?ERROR:"
+        rb"(?:[^\r\n:]+/)?"
+        rb"(?P<file>(?:(?:gkd|gkm|egg)-[a-z][a-z0-9-]*|"
+        rb"g(?:main|thread|variant|object|signal|type|mem|slice|messages|utils|hash|array|list|"
+        rb"slist|closure|error|quark|atomic|strfuncs))\.c):"
+        rb"(?P<line>[1-9][0-9]*):(?P<function>[A-Za-z_][A-Za-z0-9_]*): "
+        rb"assertion failed(?:[: ][^\r\n]*)?\r?$", stderr)
+    if match is None and exit_code == -6:
+        match = PROVIDER_LIBC_ASSERTION.search(stderr)
+    if match is None:
+        return "unknown"
+    return {"file": match["file"].decode("ascii"), "line": int(match["line"]),
+            "function": match["function"].decode("ascii")}
+
+
+class SecretServiceKeys(_base.TrackedKeys):
+    name = "linux-secret-service"
+    credential_backend = "secret_service"
+
+    def __init__(self, root, *, hosted_user_bus=False):
+        super().__init__(root)
+        self.daemon = None
+        self.daemon_stderr = None
+        self.connection = None
+        self.attribute_snapshots = {}
+        self.current_target_entries = set()
+        self.recovered_super_entries = set()
+        self.generic_schema_observed = set()
+        self.normalized_current_entries = set()
+        self.bus = os.environ.get("DBUS_SESSION_BUS_ADDRESS", "")
+        self.bus_mode = "hosted-user" if hosted_user_bus else "private"
+        if hosted_user_bus:
+            expected = hosted_user_bus_environment()
+            require(all(os.environ.get(key) == value for key, value in expected.items()),
+                    "hosted_user_bus_environment_mismatch")
+        else:
+            require(sys.platform.startswith("linux")
+                    and os.environ.get("RSRS_SS_FIXTURE_BUS") == "private"
+                    and self.bus.startswith("unix:"), "private_fixture_session_bus_required")
+        require(version("SecretStorage") == "3.3.3" and version("jeepney") == "0.9.0",
+                "secret_service_fixture_dependencies_not_pinned")
+        import secretstorage
+        from jeepney import DBusAddress, new_method_call
+        self.secretstorage = secretstorage
+        try:
+            self.connection = secretstorage.dbus_init()
+            address = DBusAddress("/org/freedesktop/DBus", "org.freedesktop.DBus",
+                                  "org.freedesktop.DBus")
+            if hosted_user_bus:
+                systemd = self.connection.send_and_get_reply(new_method_call(
+                    address, "NameHasOwner", "s", ("org.freedesktop.systemd1",)))
+                require(systemd.body == (True,), "hosted_user_systemd_owner_missing")
+                owner = self.connection.send_and_get_reply(new_method_call(
+                    address, "GetConnectionUnixUser", "s", ("org.freedesktop.systemd1",)))
+                require(owner.body == (os.getuid(),), "hosted_user_systemd_owner_mismatch")
+            reply = self.connection.send_and_get_reply(new_method_call(
+                address, "NameHasOwner", "s", ("org.freedesktop.secrets",)))
+            require(reply.body == (False,), "fixture_bus_already_has_secret_service")
+            control = root / "control"
+            control.mkdir(mode=0o700)
+            env = dict(os.environ, HOME=str(root), USERPROFILE=str(root),
+                       XDG_DATA_HOME=str(root / "data"), XDG_CONFIG_HOME=str(root / "config"),
+                       XDG_CACHE_HOME=str(root / "cache"), XDG_RUNTIME_DIR=str(control),
+                       DBUS_SESSION_BUS_ADDRESS=self.bus)
+            env.pop("GNOME_KEYRING_CONTROL", None)
+            for key in ("SSH_AUTH_SOCK", "GNOME_KEYRING_PID"):
+                env.pop(key, None)
+            self.private_env = {key: env[key] for key in (
+                "XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_RUNTIME_DIR")}
+            if hosted_user_bus:
+                self.private_env["XDG_RUNTIME_DIR"] = expected["XDG_RUNTIME_DIR"]
+            with private_provider_stderr(root) as stderr:
+                self.daemon_stderr = root / "provider.stderr"
+                self.daemon = subprocess.Popen([
+                    "gnome-keyring-daemon", "--foreground", "--unlock", "--components=secrets",
+                    "--control-directory", str(control)], env=env, stdin=subprocess.PIPE,
+                    stdout=subprocess.DEVNULL, stderr=stderr)
+            self.daemon.stdin.write(secrets.token_urlsafe(32).encode("utf-8"))
+            self.daemon.stdin.close()
+            deadline = time.monotonic() + 10
+            while True:
+                require(self.daemon.poll() is None, "fixture_secret_service_daemon_exited")
+                owner = self.connection.send_and_get_reply(new_method_call(
+                    address, "NameHasOwner", "s", ("org.freedesktop.secrets",)))
+                if owner.body != (True,):
+                    require(time.monotonic() < deadline, "fixture_secret_service_owner_not_ready")
+                    time.sleep(0.05)
+                    continue
+                owner_pid = self.connection.send_and_get_reply(new_method_call(
+                    address, "GetConnectionUnixProcessID", "s", ("org.freedesktop.secrets",)))
+                require(owner_pid.body == (self.daemon.pid,), "fixture_secret_service_owner_mismatch")
+                # Do not address Secret Service until our foreground process owns
+                # its bus name: an earlier call could autoactivate a runner daemon.
+                try:
+                    self.collection = secretstorage.get_collection_by_alias(self.connection, "default")
+                    require(not self.collection.is_locked(), "fixture_default_collection_locked")
+                    require(not list(self.collection.get_all_items()), "fixture_default_collection_not_empty")
+                    break
+                except (secretstorage.exceptions.ItemNotFoundException,
+                        secretstorage.exceptions.SecretServiceNotAvailableException):
+                    require(time.monotonic() < deadline, "fixture_default_collection_not_ready")
+                    time.sleep(0.05)
+        except Exception as error:
+            fixed_codes = {
+                "hosted_user_systemd_owner_missing", "hosted_user_systemd_owner_mismatch",
+                "fixture_bus_already_has_secret_service", "fixture_secret_service_daemon_exited",
+                "fixture_secret_service_owner_not_ready", "fixture_secret_service_owner_mismatch",
+                "fixture_default_collection_locked", "fixture_default_collection_not_ready",
+                "fixture_default_collection_not_empty",
+            }
+            code = str(error) if isinstance(error, RuntimeError) and str(error) in fixed_codes \
+                else "fixture_secret_service_initialization_failed"
+            try:
+                cleanup_passed = self.cleanup()["passed"]
+            except Exception:
+                cleanup_passed = False
+            if not cleanup_passed:
+                code += "_cleanup_failed"
+            raise RuntimeError(code) from None
+
+    def configure_env(self, env):
+        super().configure_env(env)
+        env["DBUS_SESSION_BUS_ADDRESS"] = self.bus
+        env["RSRS_SS_FIXTURE_BUS"] = self.bus_mode
+        return env
+
+    def configure_business_env(self, env):
+        self.configure_env(env)
+        env.update(self.private_env)
+        for key in ("DBUS_STARTER_ADDRESS", "DBUS_STARTER_BUS_TYPE", "DBUS_SESSION_BUS_PID",
+                    "GNOME_KEYRING_CONTROL", "GNOME_KEYRING_PID", "SSH_AUTH_SOCK",
+                    "GH_TOKEN", "GITHUB_TOKEN"):
+            env.pop(key, None)
+        return env
+
+    def verify_owner(self):
+        from jeepney import DBusAddress, new_method_call
+        require(self.daemon is not None and self.daemon.poll() is None,
+                "fixture_secret_service_daemon_exited")
+        address = DBusAddress("/org/freedesktop/DBus", "org.freedesktop.DBus", "org.freedesktop.DBus")
+        reply = self.connection.send_and_get_reply(new_method_call(
+            address, "GetConnectionUnixProcessID", "s", ("org.freedesktop.secrets",)))
+        require(reply.body == (self.daemon.pid,), "fixture_secret_service_owner_mismatch")
+
+    def cleanup_business_entries(self):
+        diagnostic = self.business_cleanup = {"passed": False, "stage": "owner_check",
+            "observed_entries": None, "validated_entries": 0, "deleted_entries": 0,
+            "remaining_entries": None}
+        self.verify_owner()
+        # Only this mode runs children against our initially empty private collection.
+        # Validate the entire owned set before deleting any entry.
+        diagnostic["stage"] = "enumeration"
+        items = list(self.collection.get_all_items())
+        diagnostic["observed_entries"] = len(items)
+        prefixes = ("super:", "pass:", "totp:", "legacy-secret:", "key-control:", "login-control:", "classify:ds-model@", "classify:ds@", "classify:")
+        classification = self.business_classification = {
+            "classified_entries": 0,
+            "attribute_matches": {key: {"matched": 0, "mismatched": 0}
+                                  for key in ("service", "target", "application")},
+            "known_prefix_counts": {key: 0 for key in (*prefixes, "other")}}
+        ownership = []
+        # Classify every item with fixed counters; never publish attributes or aliases.
+        # Keep validated_entries as the accepted prefix before the first rejection.
+        for item in items:
+            diagnostic["stage"] = "attribute_read"
+            attributes = item.get_attributes()
+            for key, expected in (("service", "rsrs"), ("target", "default"),
+                                  ("application", "rust-keyring")):
+                match = "matched" if attributes.get(key) == expected else "mismatched"
+                classification["attribute_matches"][key][match] += 1
+            username = attributes.get("username", "")
+            prefix = next((key for key in prefixes
+                           if isinstance(username, str) and username.startswith(key)), "other")
+            classification["known_prefix_counts"][prefix] += 1
+            classification["classified_entries"] += 1
+            ownership.append(bool(attributes.get("service") == "rsrs"
+                    and attributes.get("target") == "default"
+                    and attributes.get("application") == "rust-keyring"
+                    and isinstance(username, str)
+                    and re.fullmatch(r"(?:(?:super|pass|totp|legacy-secret|key-control|login-control):login-[a-f0-9]{32}"
+                        r"|(?:super|pass|legacy-secret):legacy-(?:[a-f0-9]{16}|[a-f0-9]{64}))", username)))
+        classification["owned_entries"] = sum(ownership)
+        classification["unowned_entries"] = len(ownership) - sum(ownership)
+        diagnostic["stage"] = "ownership_validation"
+        for owned in ownership:
+            require(owned, "unexpected_private_credential")
+            diagnostic["validated_entries"] += 1
+        diagnostic["stage"] = "deletion"
+        for item in items:
+            item.delete()
+            diagnostic["deleted_entries"] += 1
+        diagnostic["stage"] = "readback"
+        diagnostic["remaining_entries"] = len(list(self.collection.get_all_items()))
+        require(diagnostic["remaining_entries"] == 0, "native_fixture_cleanup_failed")
+        diagnostic.update(passed=True, stage="complete")
+
+    @staticmethod
+    def attributes(service, slot):
+        return {"target": "default", "service": service, "username": slot,
+                "application": "rust-keyring"}
+
+    def track_created_login(self, session, user, super_password, login_password, *, recovery_operation=None):
+        super().track_created_login(session, user, super_password, login_password,
+            recovery_operation=recovery_operation)
+        if recovery_operation is not None and user == "":
+            alias = session["keyring_account"]
+            require(("rsrs", "key-control:" + alias) in self.recovery_controls,
+                    "fixture_recovery_material_not_verified")
+            self.recovered_super_entries.add(("rsrs", "super:" + alias))
+
+    def register_current_target(self, session, user):
+        # Registration has already created and verified these exact login slots.
+        # Bind normalization to that returned alias, never reserved username slots.
+        alias = session.get("keyring_account")
+        require(re.fullmatch(r"ci-migrate-[a-f0-9]{16}", user)
+                and session.get("user") == user
+                and isinstance(alias, str) and re.fullmatch(r"login-[a-f0-9]{32}", alias),
+                "fixture_current_target_registration_invalid")
+        entries = {("rsrs", prefix + alias) for prefix in ("super:", "pass:")}
+        require(entries.isdisjoint(self.current_target_entries),
+                "fixture_current_target_registration_invalid")
+        for entry in entries:
+            require(entry in self.entries and entry in self.attribute_snapshots
+                    and self._find(*entry) is not None,
+                    "fixture_current_target_not_verified_owned_entry")
+        self.current_target_entries.update(entries)
+
+    def _find(self, service, slot, check_snapshot=True):
+        expected = self.attributes(service, slot)
+        lookup = {key: expected[key] for key in ("target", "service", "username")}
+        items = list(self.collection.search_items(lookup))
+        require(len(items) <= 1, "fixture_secret_service_entry_ambiguous")
+        if not items:
+            return None
+        item = items[0]
+        # Unreserved collisions only establish existence, never read their secret.
+        if (service, slot) in self.entries:
+            actual = item.get_attributes()
+            require(all(actual.get(key) == value for key, value in expected.items()),
+                    "fixture_secret_service_attributes_mismatch")
+            if check_snapshot:
+                snapshot = self.attribute_snapshots.setdefault((service, slot), dict(actual))
+                compared_actual, compared_snapshot = actual, snapshot
+                entry = (service, slot)
+                if entry in self.current_target_entries or entry in self.recovered_super_entries:
+                    # GNOME maps both an omitted schema and exact Generic to
+                    # persisted type 0. Preserve the first raw snapshot; this
+                    # baseline covers verified registration pairs and recovered
+                    # serving Super Keys, never old source or key-control slots.
+                    generic = "org.freedesktop.Secret.Generic"
+                    require(("xdg:schema" not in snapshot or snapshot["xdg:schema"] == generic)
+                            and ("xdg:schema" not in actual or actual["xdg:schema"] == generic),
+                            "fixture_current_target_schema_not_generic")
+                    present = "xdg:schema" in actual
+                    require(present or entry not in self.generic_schema_observed,
+                            "fixture_current_target_schema_reverted")
+                    if present:
+                        self.generic_schema_observed.add(entry)
+                        if "xdg:schema" not in snapshot:
+                            self.normalized_current_entries.add(entry)
+                    compared_actual = dict(actual, **{"xdg:schema": generic})
+                    compared_snapshot = dict(snapshot, **{"xdg:schema": generic})
+                if compared_actual != compared_snapshot:
+                    changed = {key for key in actual.keys() | snapshot.keys()
+                               if actual.get(key) != snapshot.get(key)}
+                    known = {"target", "service", "username", "application", "xdg:schema"}
+                    names = "_".join(sorted(changed & known)) or "none"
+                    raise RuntimeError("fixture_secret_service_attributes_changed_keys_" + names
+                                       + "_unknown_count_" + str(len(changed - known))
+                                       + "_schema_was_absent_" + str(int("xdg:schema" not in snapshot))
+                                       + "_schema_is_generic_" + str(int(actual.get("xdg:schema")
+                                           == "org.freedesktop.Secret.Generic")))
+            require(not item.is_locked(), "fixture_secret_service_entry_locked")
+        return item
+
+    def _read(self, service, slot):
+        item = self._find(service, slot)
+        if item is None:
+            return None
+        if (service, slot) not in self.entries:
+            return ""
+        return item.get_secret().decode("utf-8")
+
+    def _put(self, service, slot, value):
+        require((service, slot) in self.entries, "credential_not_owned_by_fixture")
+        item = self._find(service, slot)
+        if item is not None:
+            item.set_secret(value.encode("utf-8"))
+        else:
+            attributes = dict(self.attributes(service, slot),
+                              **{"xdg:schema": "org.freedesktop.Secret.Generic"})
+            self.collection.create_item("Synthetic migration fixture", attributes,
+                                        value.encode("utf-8"), replace=False)
+        self._find(service, slot)
+
+    def _remove(self, service, slot):
+        item = self._find(service, slot, check_snapshot=False)
+        if item is not None:
+            item.delete()
+        require(self._find(service, slot, check_snapshot=False) is None,
+                "fixture_credential_delete_readback_failed")
+        self.attribute_snapshots.pop((service, slot), None)
+
+    def cleanup(self):
+        # The private collection started empty and every slot was reserved absent.
+        # Attribute preservation failures must not prevent exact owned cleanup.
+        daemon_started = self.daemon is not None
+        daemon_exit_code = self.daemon.poll() if daemon_started else None
+        events, remaining = [], []
+        for index, (service, slot) in enumerate(sorted(self.entries)):
+            try:
+                self.verify_cleanup_material(service, slot)
+                item = self._find(service, slot, check_snapshot=False)
+                if item is not None:
+                    item.delete()
+                require(self._find(service, slot, check_snapshot=False) is None,
+                        "fixture_credential_delete_readback_failed")
+                self.attribute_snapshots.pop((service, slot), None)
+                events.append({"entry": index, "passed": True, "code": "credential_removed"})
+            except Exception:
+                event = {"entry": index, "passed": False, "code": "credential_cleanup_failed"}
+                events.append(event)
+                remaining.append(event)
+        report = {"passed": not remaining, "remaining_entries": remaining, "events": events}
+        report["provider_daemon"] = {"started": daemon_started,
+                                     "exit_code_at_cleanup_start": daemon_exit_code,
+                                     "abort_type": "unknown", "abort_location": "unknown"}
+        report["provider_schema_baseline"] = {
+            "scope": "verified_registration_pairs_and_verified_recovered_super_only",
+            "registered_entries": len(self.current_target_entries),
+            "recovered_super_entries": len(self.recovered_super_entries),
+            "observed_normalizations": len(self.normalized_current_entries),
+            "other_attributes_and_values": "strict",
+            "initial_raw_snapshots_overwritten": False,
+            "old_namespaces_and_migrated_aliases": "full_raw_attribute_snapshots",
+        }
+        if hasattr(self, "business_cleanup"):
+            report["business_credential_cleanup"] = self.business_cleanup
+        if hasattr(self, "business_classification"):
+            report["business_credential_classification"] = self.business_classification
+        if hasattr(self, "collection"):
+            collection = report["collection_cleanup"] = {"passed": False,
+                "stage": "enumeration", "remaining_entries": None}
+            try:
+                collection["remaining_entries"] = len(list(self.collection.get_all_items()))
+                collection["stage"] = "empty_check"
+                require(collection["remaining_entries"] == 0, "fixture_collection_not_empty")
+                collection.update(passed=True, stage="complete")
+            except Exception:
+                report["passed"] = False
+                code = "fixture_collection_not_empty" if collection["remaining_entries"] is not None \
+                    else "fixture_collection_enumeration_failed"
+                report["remaining_entries"].append({"code": code})
+        if self.connection is not None:
+            try:
+                self.connection.close()
+                self.connection = None
+            except Exception:
+                report["passed"] = False
+                report["remaining_entries"].append({"code": "fixture_bus_connection_close_failed"})
+        if self.daemon is not None:
+            try:
+                if self.daemon.poll() is None:
+                    self.daemon.terminate()
+                    try:
+                        self.daemon.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        self.daemon.kill()
+                        self.daemon.wait(timeout=5)
+                require(self.daemon.poll() is not None, "fixture_daemon_still_running")
+                if self.bus_mode == "hosted-user":
+                    from jeepney import DBusAddress, new_method_call
+                    connection = self.secretstorage.dbus_init()
+                    try:
+                        address = DBusAddress("/org/freedesktop/DBus", "org.freedesktop.DBus",
+                                              "org.freedesktop.DBus")
+                        owner = connection.send_and_get_reply(new_method_call(
+                            address, "NameHasOwner", "s", ("org.freedesktop.secrets",)))
+                        require(owner.body == (False,), "fixture_secret_service_owner_remained")
+                        report["hosted_bus_owner_released"] = True
+                    finally:
+                        connection.close()
+                self.daemon = None
+            except Exception:
+                report["passed"] = False
+                report["remaining_entries"].append({"code": "fixture_daemon_cleanup_failed"})
+        if self.daemon_stderr is not None:
+            try:
+                stderr = self.daemon_stderr.read_bytes()
+                report["provider_daemon"]["abort_type"] = provider_abort_type(stderr, daemon_exit_code)
+                report["provider_daemon"]["abort_location"] = provider_abort_location(stderr, daemon_exit_code)
+            except OSError:
+                report["passed"] = False
+                report["remaining_entries"].append({"code": "fixture_provider_diagnostic_read_failed"})
+        return report
+
+
+def create(root, *, hosted_user_bus=False):
+    root = _base.owned_path(root)
+    require(not root.exists(), "fixture_keyring_home_not_fresh")
+    root.mkdir(parents=True, mode=0o700)
+    return SecretServiceKeys(root, hosted_user_bus=hosted_user_bus)

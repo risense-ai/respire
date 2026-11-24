@@ -1,0 +1,25 @@
+//! Chinese strings for the CLI recall-fusion settings.
+pub const UPGRADE_REQUIRED: &str = "请先升级支持五轴融合设置的 CLI";
+pub const DRAFT_RESTORED: &str = "已恢复默认草稿；保存后写入配置";
+pub const SAVING: &str = "正在保存设置";
+pub const SAVED_NOT_APPLIED: &str = "配置已保存并回读；尚未验证常驻 Runtime 已应用";
+pub const TITLE: &str = "五轴注意力融合";
+pub const HOST_CONFIG: &str = "配置来自宿主；常驻 Runtime 应用状态未知。";
+pub const LOCAL_MODE: &str = "本地解析模式";
+pub const ENV_OVERRIDES: &str = "环境覆盖字段";
+pub const DRAFT_MODE: &str = "草稿模式";
+pub const PRIOR_SHARE: &str = "先验总份额";
+pub const LEXICAL_SHARE: &str = "词法份额";
+pub const TEMPERATURE: &str = "注意力温度";
+pub const RECENCY_GATE: &str = "普通查询时间门";
+pub const TEMPORAL_GATE: &str = "时间查询时间门";
+pub const HEAT_GATE: &str = "热度门";
+pub const TREE_GATE: &str = "树位置门";
+pub const TEMPORAL_SHARE: &str = "时间查询追加份额";
+pub const LOCAL_SETTING: &str = "本地配置";
+pub const SAVE: &str = "保存";
+pub const RESTORE_DRAFT: &str = "恢复默认草稿";
+pub const BACK: &str = "返回（放弃未保存修改）";
+pub const MODE_HELP: &str = "legacy 保持原算法；auto 按候选库大小选择。alpha + beta ≤ 1。";
+pub const KEY_HELP: &str = "Tab 切换字段；Ctrl+A 全选；Ctrl+S 保存；Esc 返回。环境变量优先。";
+pub const MENU: &str = "五轴注意力融合设置…";

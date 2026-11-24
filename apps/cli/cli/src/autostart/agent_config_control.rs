@@ -1,0 +1,514 @@
+//! One reviewed agent setting, using the existing maintenance marker and config CAS.
+use std::time::Duration;
+use anyhow::{Context, Result};
+use respire_commands::output::{ResultEnvelope, Status};
+use respire_protocol::config_control::*;
+use respire_protocol::metadata_control::metadata_identity;
+use respire_protocol::RpcRequest;
+
+fn host_config_preflight(root: &std::path::Path, profile: &std::path::Path) -> anyhow::Result<()> {
+    use serde_json::Value;
+    let read = |path: std::path::PathBuf| -> anyhow::Result<Option<Value>> {
+        respire_client_host::config::normalize_control_path(&path)?;
+        match std::fs::read(path) {
+            Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes)?)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    };
+    if let Some(journal) = read(root.join(".login-recovery.json"))? {
+        anyhow::ensure!(journal["schema_version"] == 2 && journal.get("active").is_some_and(Value::is_null),
+            "auth_recovery_pending: finish account recovery before changing agent configuration");
+    }
+    // These records only exclude an active restore; they never authorize recovery or database access.
+    respire_client_host::config::normalize_control_path(&profile.join(".snapshot-maintenance.json"))?;
+    anyhow::ensure!(!profile.join(".snapshot-maintenance.json").try_exists()?,
+        "snapshot maintenance blocks agent configuration; finish snapshot recovery first");
+    if let Some(journal) = read(profile.join(".snapshot-recovery.json"))? {
+        anyhow::ensure!(journal["schema_version"] == 1
+            && matches!(journal["phase"].as_str(), Some("verified" | "released" | "rolled_back")),
+            "snapshot recovery blocks agent configuration; finish snapshot recovery first");
+    }
+    Ok(())
+}
+
+fn validate_host_agent_config(intent: &AgentConfigIntent, profile: &std::path::Path) -> Result<()> {
+    let agent = crate::client_config::read_agent_config_for_write(profile)?;
+    anyhow::ensure!(!(agent["readonly_team"] == true
+        && intent.key.trim() == "readonly" && intent.value() == false),
+        "this space is read-only - you cannot lift read-only yourself");
+    if matches!(intent.key.trim(), "read_heat" | "recall_fusion") {
+        let candidate = intent.apply(&agent).map_err(anyhow::Error::msg)?;
+        core_candidate(&candidate)?;
+    }
+    Ok(())
+}
+
+fn core_candidate(agent: &serde_json::Value) -> Result<serde_json::Value> {
+    if let Some(value) = agent.get("read_heat") {
+        anyhow::ensure!(value.is_boolean(), "read_heat must be true or false");
+    }
+    if let Some(value) = agent.get("recall_fusion") { crate::recall_fusion::validate(value)?; }
+    Ok(serde_json::json!({"read_heat":agent.get("read_heat"), "recall_fusion":agent.get("recall_fusion")}))
+}
+
+/// Paused rejects new query execution; these counters cover requests admitted before it.
+fn wait_core_queries(owner: &crate::net_rpc::Health) -> Result<()> {
+    let scope = crate::net_rpc::request_scope(owner)?;
+    loop {
+        let current = crate::rpc::probe_runtime()?.context("core config owner exited while waiting for queries")?;
+        anyhow::ensure!(current.pid == owner.pid && current.process_start_id == owner.process_start_id
+            && crate::net_rpc::request_scope(&current)? == scope, "core config owner changed while waiting for queries");
+        let mut idle = true;
+        for field in ["ordinary_running", "lightweight_running", "queued_or_cancelled_pending_removal", "executing_until_reply"] {
+            let count = current.rpc[field].as_u64().with_context(|| format!(
+                "core config requires Runtime query occupancy field {field}"))?;
+            idle &= count == 0;
+        }
+        if idle { return Ok(()); }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CoreConfigTransaction {
+    scope: Option<respire_protocol::RuntimeRequestScope>,
+    revision: u64,
+    candidate: serde_json::Value,
+    validated: Option<serde_json::Value>,
+    apply_sent: bool,
+    rollback_sent: bool,
+    response: Option<respire_protocol::RpcResponse<ResultEnvelope>>,
+}
+
+fn core_exchange(
+    maintenance: Option<&mut super::lifecycle::Maintenance>,
+    profile: &std::path::Path,
+    scope: &respire_protocol::RuntimeRequestScope,
+    method: &str,
+    operation: &str,
+    candidate: Option<&serde_json::Value>,
+    revision: Option<u64>,
+) -> Result<respire_protocol::RpcResponse<ResultEnvelope>> {
+    let owner = crate::rpc::probe_runtime()?.context("core config owner is unavailable")?;
+    anyhow::ensure!(crate::net_rpc::request_scope(&owner)? == *scope, "core config owner changed");
+    let binding = match maintenance {
+        Some(maintenance) => Some(maintenance.auth_launch_binding(profile)?
+            .context("core config lost Paused maintenance")?),
+        None => None,
+    };
+    let mut payload = serde_json::json!({"schema_version":1,"maintenance":binding});
+    if let Some(candidate) = candidate { payload["candidate"] = candidate.clone(); }
+    if let Some(revision) = revision { payload["expected_revision"] = revision.into(); }
+    let request = RpcRequest { v: 1, id: operation.into(), method: method.into(),
+        args: vec![serde_json::to_string(&payload)?], scope: Some(scope.clone()),
+        operation_id: Some(operation.into()), idempotency_key: Some(operation.into()),
+        parent_operation_id: None, queue_wait_ms: None, lifecycle: None };
+    let http = ureq::AgentBuilder::new().redirects(0).build()
+        .post(&format!("{}/api/rpc", crate::net_rpc::rpc_base_url()));
+    // Preserve existing credentials on the first request, as the shared loopback transport does.
+    let http = match respire_client_host::credential::read_token_file(&crate::net_rpc::token_path())? {
+        Some(token) => http.set("Authorization", &format!("Bearer {token}")),
+        None => http,
+    };
+    let response: respire_protocol::RpcResponse<ResultEnvelope> =
+        http.send_json(serde_json::to_value(&request)?)?.into_json()?;
+    let response_profile = response.data_dir.as_deref().map(std::fs::canonicalize).transpose()?;
+    anyhow::ensure!(response.v == request.v && response.id == request.id
+        && response.exit >= 0 && response.ok == (response.exit == 0)
+        && response.code.as_deref() != Some("protocol_version_mismatch")
+        && response.scope.as_ref() == Some(scope) && response.pid == Some(owner.pid)
+        && response.operation_id.as_deref() == Some(operation)
+        && response.idempotency_key.as_deref() == Some(operation)
+        && response_profile.as_deref().is_none_or(|path| path == profile),
+        "core config response binding mismatch (code={:?}, error={:?})", response.code, response.error);
+    Ok(response)
+}
+
+fn core_state(response: &respire_protocol::RpcResponse<ResultEnvelope>, state: &str,
+    candidate: Option<&serde_json::Value>, revision: Option<u64>) -> Result<serde_json::Value> {
+    anyhow::ensure!(response.ok && response.exit == 0 && response.error.is_none() && response.code.is_none(),
+        "core config request rejected: {}", response.error.as_deref().unwrap_or("missing successful response"));
+    let envelope = response.envelope.as_ref().context("core config response missing")?;
+    let summary = &envelope.summary;
+    anyhow::ensure!(matches!(envelope.status, Status::Ok) && envelope.errors.is_empty()
+        && summary.as_object().is_some_and(|object| object.len() == 6)
+        && summary["state"] == state && summary["revision"].as_u64().is_some()
+        && candidate.is_none_or(|candidate| summary["candidate"] == *candidate)
+        && revision.is_none_or(|revision| summary["revision"] == revision)
+        && summary["applies"] == "next_query"
+        && summary["capabilities"] == serde_json::json!({"read_heat_contract":1,"recall_fusion_contract":1})
+        && summary["effective"]["read_heat"].is_boolean(), "core config state receipt mismatch");
+    crate::recall_fusion::validate(&summary["effective"]["recall_fusion"])?;
+    Ok(summary.clone())
+}
+
+fn original_core_response(scope: &respire_protocol::RuntimeRequestScope, operation_id: &str)
+    -> Result<respire_protocol::RpcResponse<ResultEnvelope>> {
+    let operation = respire_commands::runtime_error::OperationContext { scope: scope.clone(),
+        operation_id: operation_id.into(), idempotency_key: operation_id.into() };
+    let result = crate::net_rpc::rpc_result(&operation)?;
+    let state = &result["envelope"]["summary"];
+    anyhow::ensure!(matches!(state["state"].as_str(), Some("completed" | "failed"))
+        && state["operation_id"] == operation_id && state["scope"] == serde_json::to_value(scope)?,
+        "agent_config_outcome_unknown; original core operation has no terminal response; do not replay");
+    let response: respire_protocol::RpcResponse<ResultEnvelope> = serde_json::from_value(state["response"].clone())?;
+    anyhow::ensure!(response.v == 1 && response.id == operation_id && response.exit >= 0
+        && response.ok == (response.exit == 0) && response.scope.as_ref() == Some(scope)
+        && response.operation_id.as_deref() == Some(operation_id)
+        && response.idempotency_key.as_deref() == Some(operation_id),
+        "core original operation receipt mismatch");
+    Ok(response)
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StartupCoreConfig {
+    profile: std::path::PathBuf,
+    operation_id: String,
+    config_revision: Option<String>,
+    control: CoreConfigTransaction,
+}
+
+/// A confirmed receipt permits warm RPCs without acquiring lifecycle ownership.
+pub(crate) fn startup_core_config_ready(owner: &crate::net_rpc::Health) -> Result<bool> {
+    let (root, profile) = respire_client_host::config::control_roots()?;
+    let root = root.canonicalize()?;
+    let profile = profile.canonicalize()?;
+    anyhow::ensure!(std::path::Path::new(&owner.data_dir).canonicalize()? == profile
+        && std::path::Path::new(&owner.installation_root).canonicalize()? == root,
+        "startup core configuration owner changed");
+    let scope = crate::net_rpc::request_scope(owner)?;
+    let scope_digest = crate::autostart::hash(&serde_json::to_vec(&(&profile, &scope))?);
+    let path = root.join("runtime/autostart/core-config-applications")
+        .join(format!("{scope_digest}.json"));
+    respire_client_host::config::normalize_control_path(&path)?;
+    let saved: StartupCoreConfig = match std::fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice(&bytes)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    anyhow::ensure!(saved.profile == profile && saved.control.scope.as_ref() == Some(&scope),
+        "startup core journal differs from its owner scope");
+    let Some(response) = saved.control.response.as_ref().filter(|response| response.ok) else {
+        return Ok(false);
+    };
+    anyhow::ensure!(saved.control.apply_sent
+        && response.v == 1 && response.exit == 0
+        && response.id == saved.operation_id
+        && response.scope == saved.control.scope
+        && response.operation_id.as_deref() == Some(saved.operation_id.as_str())
+        && response.idempotency_key.as_deref() == Some(saved.operation_id.as_str()),
+        "startup core receipt operation mismatch");
+    core_state(response, "applied", Some(&saved.control.candidate), Some(1))?;
+    anyhow::ensure!(response.envelope.as_ref().context("startup core envelope missing")?.summary["effective"]
+        == saved.control.validated.as_ref().context("startup core validation missing")?["effective"],
+        "startup core application differs from validation");
+    Ok(true)
+}
+
+/// Caller holds installation takeover. Never replace an online setter's revision.
+pub(crate) fn apply_startup_core_config(owner: &crate::net_rpc::Health,
+    mut maintenance: Option<&mut super::lifecycle::Maintenance>) -> Result<()> {
+    let (root, profile) = respire_client_host::config::control_roots()?;
+    let root = root.canonicalize()?;
+    let profile = profile.canonicalize()?;
+    anyhow::ensure!(std::path::Path::new(&owner.data_dir).canonicalize()? == profile
+        && std::path::Path::new(&owner.installation_root).canonicalize()? == root,
+        "startup core configuration owner changed");
+    let scope = crate::net_rpc::request_scope(owner)?;
+    let scope_digest = crate::autostart::hash(&serde_json::to_vec(&(&profile, &scope))?);
+    let path = root.join("runtime/autostart/core-config-applications")
+        .join(format!("{scope_digest}.json"));
+    respire_client_host::config::normalize_control_path(&path)?;
+    let mut previous = match std::fs::read(&path) {
+        Ok(bytes) => Some(bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    let saved: Option<StartupCoreConfig> = previous.as_deref().map(serde_json::from_slice).transpose()?;
+    if let Some(mut saved) = saved.filter(|saved| saved.control.apply_sent) {
+        anyhow::ensure!(saved.profile == profile && saved.control.scope.as_ref() == Some(&scope),
+            "startup core journal differs from its owner scope");
+        let recovered = saved.control.response.as_ref().is_none_or(|response|
+            !response.ok && response.code.as_deref() != Some("core_config_rejected"));
+        if recovered {
+            saved.control.response = Some(original_core_response(&scope, &saved.operation_id)?);
+        }
+        let response = saved.control.response.as_ref().context("startup core receipt missing")?;
+        anyhow::ensure!(response.v == 1 && response.exit >= 0 && response.ok == (response.exit == 0)
+            && response.id == saved.operation_id
+            && response.scope == saved.control.scope
+            && response.operation_id.as_deref() == Some(saved.operation_id.as_str())
+            && response.idempotency_key.as_deref() == Some(saved.operation_id.as_str()),
+            "startup core receipt operation mismatch");
+        let rejected = !response.ok && response.code.as_deref() == Some("core_config_rejected");
+        anyhow::ensure!(response.ok || rejected,
+            "agent_config_outcome_unknown; original startup core operation is unresolved; do not replay");
+        if rejected {
+            let reason = response.error.as_deref().context("core rejection reason missing")?;
+            if recovered {
+                crate::autostart::private_write(&path, &serde_json::to_vec(&saved)?,
+                    previous.as_deref().map(crate::autostart::hash).as_deref())?;
+                anyhow::bail!("startup core operation {} was rejected: {reason}; no automatic retry",
+                    saved.operation_id);
+            }
+            let current = core_exchange(maintenance, &profile, &scope, "core_config.read",
+                &uuid::Uuid::new_v4().to_string(), None, None)?;
+            let current = core_state(&current, "current", None, None)?;
+            // A competing successful apply can explain our CAS rejection. Preserve
+            // that owner's revision and our rejected receipt; never retry this write.
+            anyhow::ensure!(current["revision"].as_u64().is_some_and(|revision| revision > 0),
+                "startup core operation {} was rejected: {reason}; no automatic retry", saved.operation_id);
+            return Ok(());
+        }
+        core_state(response, "applied", Some(&saved.control.candidate), Some(1))?;
+        anyhow::ensure!(response.envelope.as_ref().context("startup core envelope missing")?.summary["effective"]
+            == saved.control.validated.as_ref().context("startup core validation missing")?["effective"],
+            "startup core application differs from validation");
+        if recovered {
+            crate::autostart::private_write(&path, &serde_json::to_vec(&saved)?,
+                previous.as_deref().map(crate::autostart::hash).as_deref())?;
+        }
+        return Ok(());
+    }
+    let config_path = profile.join("agent.json");
+    let bytes = crate::client_config::agent_config_bytes(&config_path)?;
+    let candidate = core_candidate(&crate::client_config::parse_agent_config_bytes(bytes.as_deref())?)?;
+    let current = core_exchange(maintenance.as_deref_mut(), &profile, &scope, "core_config.read",
+        &uuid::Uuid::new_v4().to_string(), None, None)?;
+    let current = core_state(&current, "current", None, None)?;
+    // A nonzero revision belongs to an applied operation, possibly an online setter.
+    // Do not replay persisted values over it or claim its readback is our apply receipt.
+    if current["revision"].as_u64() != Some(0) { return Ok(()); }
+    let validated = core_exchange(maintenance.as_deref_mut(), &profile, &scope, "core_config.validate",
+        &uuid::Uuid::new_v4().to_string(), Some(&candidate), None)?;
+    let validated = core_state(&validated, "validated", Some(&candidate), Some(0))?;
+    let mut record = StartupCoreConfig { profile: profile.clone(),
+        operation_id: uuid::Uuid::new_v4().to_string(),
+        config_revision: bytes.as_deref().map(crate::autostart::hash),
+        control: CoreConfigTransaction { scope: Some(scope.clone()), revision: 0, candidate,
+            validated: Some(validated), apply_sent: true, rollback_sent: false, response: None } };
+    let actual = crate::client_config::agent_config_bytes(&config_path)?;
+    anyhow::ensure!(actual.as_deref().map(crate::autostart::hash) == record.config_revision,
+        "agent config changed before startup application");
+    let sent = serde_json::to_vec(&record)?;
+    crate::autostart::private_write(&path, &sent, previous.as_deref().map(crate::autostart::hash).as_deref())?;
+    previous = Some(sent);
+    let response = core_exchange(maintenance, &profile, &scope, "core_config.apply", &record.operation_id,
+        Some(&record.control.candidate), Some(0)).context(
+            "agent_config_outcome_unknown; query original startup core operation; do not replay")?;
+    record.control.response = Some(response);
+    crate::autostart::private_write(&path, &serde_json::to_vec(&record)?,
+        previous.as_deref().map(crate::autostart::hash).as_deref())?;
+    let response = record.control.response.as_ref().context("startup core response missing")?;
+    core_state(response, "applied", Some(&record.control.candidate), Some(1))?;
+    anyhow::ensure!(response.envelope.as_ref().context("startup core envelope missing")?.summary["effective"]
+        == record.control.validated.as_ref().context("startup core validation missing")?["effective"],
+        "startup core application differs from validation");
+    Ok(())
+}
+
+fn save_core_receipt(record: &mut AgentConfigMaintenance, maintenance: &mut super::lifecycle::Maintenance,
+    control: &CoreConfigTransaction, output: ResultEnvelope, outcome: AgentConfigOutcome) -> Result<()> {
+    record.receipt = Some(AgentConfigReceipt { review: record.review.clone(), outcome,
+        result: serde_json::json!({"output":output,"core_control":control}) });
+    maintenance.save_agent_config(record)
+}
+
+fn control_core_setting(record: &mut AgentConfigMaintenance, maintenance: &mut super::lifecycle::Maintenance,
+    owner: Option<&crate::net_rpc::Health>, query_only: bool) -> Result<ResultEnvelope> {
+    anyhow::ensure!(!query_only || record.sent, "core configuration query cannot publish an unsent operation");
+    use respire_client_host::lock::LibraryLock;
+    let review = record.review.clone();
+    // A verified live Runtime owns the profile's database lock for its lifetime.
+    // Host publication uses takeover + Paused admission + occupancy + config CAS;
+    // only the offline path excludes a concurrent database/startup owner here.
+    let _root = if owner.is_none() {
+        Some(LibraryLock::acquire(&review.installation_root, Duration::from_secs(15))?)
+    } else { None };
+    let _profile = if owner.is_none() && review.installation_root != review.profile {
+        Some(LibraryLock::acquire(&review.profile, Duration::from_secs(15))?)
+    } else { None };
+    host_config_preflight(&review.installation_root, &review.profile)?;
+    anyhow::ensure!(!record.sent || record.receipt.is_some(),
+        "agent_config_outcome_unknown operation_id={}; no publication receipt; do not replay", review.operation_id);
+    if !record.sent {
+        if let Some(owner) = owner { wait_core_queries(owner)?; }
+        validate_host_agent_config(&review.intent, &review.profile)?;
+        let original: serde_json::Value = review.original_config.as_deref().map(serde_json::from_str)
+            .transpose()?.unwrap_or_else(|| serde_json::json!({}));
+        let candidate = core_candidate(&review.intent.apply(&original).map_err(anyhow::Error::msg)?)?;
+        let mut control = CoreConfigTransaction { scope: owner.map(crate::net_rpc::request_scope).transpose()?,
+            revision: 0, candidate, validated: None, apply_sent: false, rollback_sent: false, response: None };
+        if let Some(scope) = control.scope.as_ref() {
+            let current = core_exchange(Some(maintenance), &review.profile, scope, "core_config.read",
+                &uuid::Uuid::new_v4().to_string(), None, None)?;
+            let current = core_state(&current, "current", None, None)?;
+            control.revision = current["revision"].as_u64().context("core revision missing")?;
+            let validated = core_exchange(Some(maintenance), &review.profile, scope, "core_config.validate",
+                &uuid::Uuid::new_v4().to_string(), Some(&control.candidate), None)?;
+            control.validated = Some(core_state(&validated, "validated", Some(&control.candidate), Some(control.revision))?);
+        }
+        let output = ResultEnvelope::new("agent-config", Status::Ok,
+            serde_json::json!({"action":"updated","key":review.intent.key,"value":review.intent.value(),
+                "core_application":{"state":"pending","reason":"runtime_not_running","applies":"next_query"}}),
+            vec![respire_commands::output::Item::new(&review.intent.key, Status::Ok, &review.intent.raw_value)]);
+        let mut preview = record.clone();
+        preview.sent = true;
+        preview.receipt = Some(AgentConfigReceipt { review: review.clone(), outcome: AgentConfigOutcome::Committed,
+            result: serde_json::json!({"output":output,"core_control":control}) });
+        maintenance.check_agent_config_record(&preview)?;
+        record.sent = true;
+        save_core_receipt(record, maintenance, &control, output.clone(), AgentConfigOutcome::Unknown)?;
+        crate::client_config::publish_agent_config(&review, ||
+            save_core_receipt(record, maintenance, &control, output.clone(), AgentConfigOutcome::Committed))?;
+    }
+    let receipt = record.receipt.as_ref().context("core host publication receipt missing")?;
+    anyhow::ensure!(receipt.review == review, "core receipt changed original intent");
+    let mut control: CoreConfigTransaction = serde_json::from_value(receipt.result["core_control"].clone())?;
+    let mut output: ResultEnvelope = serde_json::from_value(receipt.result["output"].clone())?;
+    let original: serde_json::Value = review.original_config.as_deref().map(serde_json::from_str)
+        .transpose()?.unwrap_or_else(|| serde_json::json!({}));
+    anyhow::ensure!(control.candidate == core_candidate(&review.intent.apply(&original).map_err(anyhow::Error::msg)?)?
+        && output.command == "agent-config", "core transaction differs from original host intent");
+    anyhow::ensure!(receipt.outcome == AgentConfigOutcome::RolledBack || !control.rollback_sent,
+        "agent_config_outcome_unknown; rollback has no terminal receipt; do not replay");
+    crate::client_config::verify_agent_config_receipt(receipt)?;
+    if receipt.outcome == AgentConfigOutcome::RolledBack || control.scope.is_none() { return Ok(output); }
+    let scope = control.scope.clone().context("core scope missing")?;
+    let current = crate::rpc::probe_runtime()?.context("agent_config_outcome_unknown; original core owner unavailable")?;
+    anyhow::ensure!(crate::net_rpc::request_scope(&current)? == scope,
+        "agent_config_outcome_unknown; original core owner changed; do not replay");
+    if control.response.is_none() {
+        let response = if control.apply_sent {
+            original_core_response(&scope, &review.operation_id)?
+        } else {
+            anyhow::ensure!(!query_only, "core configuration query cannot send an apply");
+            control.apply_sent = true;
+            save_core_receipt(record, maintenance, &control, output.clone(), AgentConfigOutcome::Committed)?;
+            core_exchange(Some(maintenance), &review.profile, &scope, "core_config.apply", &review.operation_id,
+                Some(&control.candidate), Some(control.revision)).context(
+                    "agent_config_outcome_unknown; query original core operation; do not replay")?
+        };
+        let response: respire_protocol::RpcResponse<ResultEnvelope> = response;
+        anyhow::ensure!(response.v == 1 && response.exit >= 0 && response.ok == (response.exit == 0)
+            && response.scope.as_ref() == Some(&scope) && response.id == review.operation_id
+            && response.operation_id.as_deref() == Some(review.operation_id.as_str())
+            && response.idempotency_key.as_deref() == Some(review.operation_id.as_str()), "core original operation receipt mismatch");
+        anyhow::ensure!(response.ok || response.code.as_deref() == Some("core_config_rejected"),
+            "agent_config_outcome_unknown; core response does not prove application or rejection; do not replay");
+        control.response = Some(response);
+        save_core_receipt(record, maintenance, &control, output.clone(), AgentConfigOutcome::Committed)?;
+    }
+    let response = control.response.clone().context("core application response missing")?;
+    if !response.ok {
+        control.rollback_sent = true;
+        save_core_receipt(record, maintenance, &control, output.clone(), AgentConfigOutcome::Committed)?;
+        output.status = Status::Fail;
+        output.summary = serde_json::json!({"action":"rolled_back","core_application":{"state":"rejected"}});
+        output.items.clear();
+        output.errors = vec![response.error.clone().context("core rejection reason missing")?];
+        crate::client_config::rollback_agent_config(&review, ||
+            save_core_receipt(record, maintenance, &control, output.clone(), AgentConfigOutcome::RolledBack))?;
+    } else {
+        let revision = control.revision.checked_add(1).context("core revision overflow")?;
+        let applied = core_state(&response, "applied", Some(&control.candidate), Some(revision))?;
+        let validated = control.validated.as_ref().context("core validation receipt missing")?;
+        anyhow::ensure!(applied["effective"] == validated["effective"], "core effective state differs from validation");
+        let current = core_exchange(Some(maintenance), &review.profile, &scope, "core_config.read",
+            &uuid::Uuid::new_v4().to_string(), None, None)?;
+        let current = core_state(&current, "current", Some(&control.candidate), Some(revision))?;
+        anyhow::ensure!(current["effective"] == applied["effective"], "core state changed after application");
+        output.summary["core_application"] = serde_json::json!({"state":"applied","applies":"next_query",
+            "scope":scope,"revision":revision,"effective":applied["effective"]});
+        save_core_receipt(record, maintenance, &control, output.clone(), AgentConfigOutcome::Committed)?;
+    }
+    crate::client_config::verify_agent_config_receipt(record.receipt.as_ref().context("core terminal receipt missing")?)?;
+    Ok(output)
+}
+
+include!("agent_config_control/host_config_transaction.rs");
+
+pub(crate) fn control_agent_config(kv: &str) -> Result<ResultEnvelope> {
+    crate::runtime_policy::require_host("agent configuration changes")?;
+    anyhow::ensure!(super::lifecycle::current_boot_token().is_none(), "agent config must own maintenance");
+    let (key, raw_value) = kv.split_once('=').ok_or_else(|| respire_client_host::input_error::InputError(
+        "format must be key=value (e.g. diary_mode=verbose)".into()))?;
+    let intent = AgentConfigIntent { key: key.into(), raw_value: raw_value.into() };
+    intent.apply(&serde_json::json!({})).map_err(|message|
+        respire_client_host::input_error::InputError(message.into()))?;
+    control_host_agent_config(Some(intent), None, None)
+}
+
+pub(crate) fn control_core_config_rpc(request_id: &str, setting: Option<&str>) -> Result<ResultEnvelope> {
+    crate::runtime_policy::require_host("core configuration RPC")?;
+    anyhow::ensure!(super::lifecycle::current_boot_token().is_none(), "agent config must own maintenance");
+    let operation = request_id.strip_prefix("desktop-").context("core config requires a desktop request UUID")?;
+    let uuid = uuid::Uuid::parse_str(operation)?;
+    anyhow::ensure!(uuid.get_version_num() == 4 && uuid.to_string() == operation,
+        "core config requires a canonical request UUID");
+    let intent = setting.map(|setting| -> Result<AgentConfigIntent> {
+        let (key, value) = setting.split_once('=').context("core setting requires key=value")?;
+        anyhow::ensure!(matches!(key.trim(), "read_heat" | "recall_fusion"), "not a core configuration setting");
+        let intent = AgentConfigIntent { key: key.into(), raw_value: value.into() };
+        intent.apply(&serde_json::json!({})).map_err(anyhow::Error::msg)?;
+        Ok(intent)
+    }).transpose()?;
+    control_host_agent_config(intent, None, Some((operation, setting.is_none())))
+}
+
+#[derive(Debug)]
+pub(crate) struct CoreConfigUnknown {
+    pub(crate) details: serde_json::Value,
+}
+
+impl std::fmt::Display for CoreConfigUnknown {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        out.write_str("agent_config_outcome_unknown; query the original core operation; do not replay")
+    }
+}
+impl std::error::Error for CoreConfigUnknown {}
+
+impl CoreConfigUnknown {
+    pub(crate) fn after_cleanup(mut details: serde_json::Value, result: Result<ResultEnvelope>,
+        cleanup: Result<()>) -> Result<ResultEnvelope> {
+        if cleanup.is_err() { details["cleanup_failed"] = true.into(); }
+        let result = match (result, cleanup) {
+            (result, Ok(())) => result,
+            (Err(error), Err(cleanup)) => Err(error.context(format!("agent config cleanup failed: {cleanup:#}"))),
+            (Ok(_), Err(cleanup)) => Err(cleanup.context("agent config cleanup failed")),
+        };
+        result.map_err(|error| error.context(Self { details }))
+    }
+}
+
+fn core_transaction_details(record: &AgentConfigMaintenance) -> Result<serde_json::Value> {
+    let control: Option<CoreConfigTransaction> = record.receipt.as_ref()
+        .map(|receipt| serde_json::from_value(receipt.result["core_control"].clone())).transpose()?;
+    Ok(serde_json::json!({"operation_id": record.review.operation_id,
+        "idempotency_key": record.review.operation_id, "source_profile": record.review.profile,
+        "scope": control.and_then(|control| control.scope), "identity": record.review.identity,
+        "kind": "core_config", "query_only": true, "replayed": false,
+        "publication_state": match record.receipt.as_ref().map(|receipt| &receipt.outcome) {
+            Some(AgentConfigOutcome::Committed) => "committed",
+            Some(AgentConfigOutcome::RolledBack) => "rolled_back",
+            _ => "unknown",
+        },
+        "result_command": "runtime core-config-result"}))
+}
+
+fn core_result_path(root: &std::path::Path, operation_id: &str) -> Result<std::path::PathBuf> {
+    uuid::Uuid::parse_str(operation_id)?;
+    let path = root.join("runtime/autostart/core-config-results").join(format!("{operation_id}.json"));
+    respire_client_host::config::normalize_control_path(&path)?;
+    Ok(path)
+}
+
+pub(crate) fn control_core_config_result(context: &respire_commands::runtime_error::OperationContext,
+    source_profile: &std::path::Path) -> Result<ResultEnvelope> {
+    crate::runtime_policy::require_host("core configuration result")?;
+    anyhow::ensure!(super::lifecycle::current_boot_token().is_none(), "agent config must own maintenance");
+    control_host_agent_config(None, Some((context, source_profile)), None)
+}

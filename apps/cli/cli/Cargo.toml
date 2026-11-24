@@ -1,0 +1,61 @@
+[package]
+name = "respire"
+version = "2.0.0-dev.11"
+edition = "2021"
+rust-version = "1.88"
+description = "respire CLI — encrypted cross-device AI memory"
+license-file = "../../../LICENSE"
+repository = "https://github.com/risense-ai/respire-cli"
+
+[features]
+default = []
+native-fault-tests = ["respire_commands/native-fault-tests"]
+# Preserve the old build option and report the launcher protocol change.
+client2-host-prototype = []
+
+[[bin]]
+name = "rsrs"
+path = "src/main.rs"
+
+[dependencies]
+respire_host_control = { path = "../crates/host-control" }
+respire_client_host = { path = "../crates/client-host", features = ["locks"] }
+respire_commands = { path = "../crates/commands" }
+respire_protocol = { path = "../crates/protocol", version = "=2.0.0-dev.16" }
+respire_spawn = { path = "../spawn" }
+respire_logging = { path = "../crates/logging" }
+anyhow = "1.0"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+clap = { version = "4.5", features = ["derive"] }
+dirs = "6.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+unicode-width = "=0.2.0"
+ureq = { version = "2.12", features = ["json", "socks-proxy"] }
+url = "2.5"
+rand = "0.8"
+rpassword = "7"
+rusqlite = { version = "0.32", features = ["bundled"] }
+sha2 = "0.10"
+hex = "0.4"
+uuid = { version = "1.0", features = ["v4", "v5"] }
+# Interactive terminal selector for inject --tui
+ratatui = "0.29"
+crossterm = "0.28"
+# Shared subtree payloads: gzip compression and base64 for text transport
+flate2 = "1.1"
+base64 = "0.22"
+
+[target.'cfg(windows)'.dependencies]
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[target.'cfg(unix)'.dependencies]
+signal-hook = "0.3"
+
+[dev-dependencies]
+httparse = "1.10"
+respire_crypto = { path = "../crates/crypto", default-features = false }
+tempfile = "3.15"
+
+[lints.rust]
+unsafe_code = "forbid"

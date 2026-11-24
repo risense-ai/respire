@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+# Real inference on native Alpine, using only this job's prepared model files.
+set -euo pipefail
+target="${1:?pass target}"
+if [ "$target" != aarch64-unknown-linux-musl ]; then exit 0; fi
+bash "$(dirname "$0")/require-native-linux-arm64.sh" "$target"
+binary="$(realpath "${2:?pass binary}")"
+models="$(realpath "${3:?pass prepared model directory}")"
+profile="${4:?pass isolated profile directory}"
+test -f "$binary"
+test -d "$models"
+test -f "$models/tokenizer.json"
+test -f "$models/onnx/model_quantized.onnx"
+# Match public CPU-container selection: explicit override, profile cache, model dir.
+cpu="${RSRS_CPU_OWNED_ORT_FILE:-}"
+if [ -z "$cpu" ]; then
+  cache="${RSRS_DATA_DIR:-$HOME/.rsrs}/models/bge-m3/onnx/model_quantized.cpu-v1.ort"
+  if [ -f "$cache" ]; then cpu="$cache"; else cpu="$models/onnx/model_quantized.cpu-v1.ort"; fi
+fi
+cpu="$(realpath "$cpu")"
+test -f "$cpu"
+echo '7ff152e912bc234f5c90e4012f99897a7b2ce180f016db2321304057756b64ff  '"$cpu" | sha256sum -c >/dev/null
+runtime="$(realpath "${5:?pass verified musl Runtime binary}")"
+runtime_sha256="${6:?pass verified Runtime digest}"
+runtime_version="${7:?pass verified Runtime version}"
+test -f "$runtime"
+test "$runtime" != "$binary"
+test "$(basename "$runtime")" = rsrs-runtime
+[[ "$runtime_sha256" =~ ^[0-9a-f]{64}$ ]]
+[[ "$runtime_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.-]+)?$ ]]
+echo "$runtime_sha256  $runtime" | sha256sum -c >/dev/null
+bundle="$(dirname "$runtime")"
+test -f "$bundle/core-runtime.json"
+test "$(basename "$bundle")" = "$runtime_version"
+test "$(basename "$(dirname "$bundle")")" = runtime
+receipt="$(dirname "$(dirname "$bundle")")/runtime.json"
+test -f "$receipt"
+test ! -L "$receipt"
+receipt="$(realpath "$receipt")"
+mkdir -p "$profile"
+profile="$(realpath "$profile")"
+docker run --rm --network none --user "$(id -u):$(id -g)" \
+  -v "$binary:/rsrs:ro" -v "$models:/models:ro" -v "$cpu:/cpu-model.ort:ro" -v "$profile:/profile" \
+  -v "$bundle:/runtime:ro" -v "$receipt:/runtime-selection.json:ro" \
+  -e RSRS_ENGINE=cpu -e RSRS_DATA_DIR=/profile -e RSRS_M3_DIR=/profile/models/bge-m3 \
+  -e RSRS_RUNTIME_TRIPLE=aarch64-unknown-linux-musl \
+  -e NATIVE_RUNTIME_SHA256="$runtime_sha256" -e NATIVE_RUNTIME_VERSION="$runtime_version" \
+  -e RSRS_NO_AUTOSYNC=1 -e RSRS_UPDATE_CHECK=0 \
+  alpine:3.23 sh -ec '
+    test "$(uname -m)" = aarch64
+    test -z "${CORE_SDK_READ_TOKEN:-}"
+    test -z "${RSRS_CORE_TEST_MODE:-}"
+    test -r /cpu-model.ort
+    test -r /models/tokenizer.json
+    test -r /models/onnx/model_quantized.onnx
+    test -r /runtime/core-runtime.json
+    echo "$NATIVE_RUNTIME_SHA256  /runtime/rsrs-runtime" | sha256sum -c >/dev/null
+    case "$(/runtime/rsrs-runtime --version)" in
+      *" $NATIVE_RUNTIME_VERSION") ;;
+      *) echo "Runtime version differs from verified installation" >&2; exit 1 ;;
+    esac
+    umask 077
+    chmod 700 /profile
+    test ! -e /profile/bin/runtime.json
+    mkdir -p "/profile/bin/runtime/$NATIVE_RUNTIME_VERSION" /profile/bin
+    cp /rsrs /profile/bin/rsrs
+    cmp /rsrs /profile/bin/rsrs
+    cp -R /runtime/. "/profile/bin/runtime/$NATIVE_RUNTIME_VERSION/"
+    cmp /runtime/rsrs-runtime "/profile/bin/runtime/$NATIVE_RUNTIME_VERSION/rsrs-runtime"
+    echo "$NATIVE_RUNTIME_SHA256  /profile/bin/runtime/$NATIVE_RUNTIME_VERSION/rsrs-runtime" | sha256sum -c >/dev/null
+    cp /runtime-selection.json /profile/bin/runtime.json
+    cmp /runtime-selection.json /profile/bin/runtime.json
+    mkdir -p /profile/models/bge-m3/onnx
+    # Keep host inputs read-only; install and staging cleanup need an owned target.
+    cp /models/tokenizer.json /profile/models/bge-m3/tokenizer.json
+    cp /models/onnx/model_quantized.onnx /profile/models/bge-m3/onnx/model_quantized.onnx
+    cmp /models/tokenizer.json /profile/models/bge-m3/tokenizer.json
+    cmp /models/onnx/model_quantized.onnx /profile/models/bge-m3/onnx/model_quantized.onnx
+    cp /cpu-model.ort /profile/models/bge-m3/onnx/model_quantized.cpu-v1.ort
+    echo "7ff152e912bc234f5c90e4012f99897a7b2ce180f016db2321304057756b64ff  /profile/models/bge-m3/onnx/model_quantized.cpu-v1.ort" | sha256sum -c >/dev/null
+    trap "status=\$?; trap - EXIT; /rsrs --json runtime stop || exit 1; exit \$status" EXIT
+    # inference.json is Runtime configuration, not a command output file.
+    /rsrs --direct model install-m3 --json > /profile/model-probe-result.json || {
+      status=$?
+      cat /profile/model-probe-result.json >&2
+      exit "$status"
+    }
+  '
+python -c 'import json,sys; r=json.load(open(sys.argv[1])); p=r["details"]["backend_load"]["evidence"]; assert r["status"] == "ok" and p["ready"] is True and p["inference_completed"] is True and p["fresh_session"] is True and p["dimensions"] == 1024 and p["selected"] == "CPU", "Alpine CPU inference was not confirmed"' "$profile/model-probe-result.json"

@@ -404,25 +404,63 @@ jobs:
     if: needs.detect-changes.outputs.cli == 'true' || needs.detect-changes.outputs.contracts == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: apps/cli
+    env:
+      RUST_TEST_THREADS: "1"
+      RSRS_CONTRACT_FIXTURES: ${{ github.workspace }}/cli-frozen-fixtures/contracts/runtime-control
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           persist-credentials: false
 
-      - name: Check CLI manifest presence
-        id: manifest
-        run: |
-          if [ -f "apps/cli/Cargo.toml" ]; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-            echo "apps/cli/Cargo.toml not imported yet (pending OpenSpec 003); skipping Rust build."
-          fi
+      # Match the frozen consumer fixtures in apps/cli/SOURCE-PROVENANCE.md.
+      - name: Checkout frozen CLI contract fixtures
+        uses: actions/checkout@v4
+        with:
+          repository: risense-ai/respire-cli
+          ref: 3a28019305839f0265a918c74178d3905b461bd0
+          path: cli-frozen-fixtures
+          sparse-checkout: /contracts/runtime-control/
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: Install pinned Rust
+        run: rustup toolchain install 1.95.0 --profile minimal
 
       - name: Check CLI workspace
-        if: steps.manifest.outputs.exists == 'true'
-        run: cargo check --manifest-path apps/cli/Cargo.toml --locked
+        run: cargo +1.95.0 check --locked --workspace --features respire/client2-host-prototype
+
+      - name: Test CLI support crates
+        run: cargo +1.95.0 test --locked --workspace --exclude respire
+
+      # The product integration suites require a separately verified Runtime installation.
+      - name: Test CLI frontend and client transport
+        run: |
+          cargo +1.95.0 test --locked -p respire --features client2-host-prototype \
+            --test capabilities --test client_only_no_writes --test control_contract_fixtures \
+            --test mcp_protocol --test runtime_help --test version_flag
+          cargo +1.95.0 test --locked -p respire --features client2-host-prototype \
+            --test net_rpc_http -- client_transport::
+          for suite in client2_host:: mcp:: host_ui::inject::tests:: shell::; do
+            cargo +1.95.0 test --locked -p respire --features client2-host-prototype --lib "$suite"
+          done
+
+      # These fixtures use disposable profiles and synthetic images, not a Runtime bundle.
+      - name: Test isolated Runtime resolution and lifecycle
+        run: |
+          for suite in rpc::runtime_resolution_tests:: autostart::lifecycle::tests::; do
+            cargo +1.95.0 test --locked -p respire --features client2-host-prototype --lib "$suite"
+          done
+
+      - name: Test account and space rejection contracts
+        shell: pwsh
+        run: |
+          python3 -B scripts/test-account-rejection-source.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & ./scripts/test-account-rejection-contract.ps1
 
   client2-ci:
     name: client2-ci
@@ -481,9 +519,13 @@ jobs:
           for name in DETECT GUARDRAILS CONTRACTS CORE RUNTIME CLI CLIENT2; do
             val="${!name}"
             echo "$name=$val"
-            if [ "$val" != "success" ] && [ "$val" != "skipped" ]; then
-              echo "::error::Gate failed because $name ended with '$val'"
-              exit 1
+            if [ "$val" = "success" ]; then
+              continue
             fi
+            if [ "$val" = "skipped" ] && [ "$name" != "DETECT" ] && [ "$name" != "GUARDRAILS" ]; then
+              continue
+            fi
+            echo "::error::Gate failed because $name ended with '$val'"
+            exit 1
           done
           echo "All triggered CI jobs passed (untouched components skipped)."
