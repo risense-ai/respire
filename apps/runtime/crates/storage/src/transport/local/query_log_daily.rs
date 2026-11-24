@@ -42,12 +42,7 @@ fn daily(db: &Connection, today: NaiveDate) -> Result<Vec<QueryLogDay>> {
     let first = today
         .checked_sub_days(Days::new(DAYS - 1))
         .context("query log date range")?;
-    let midnight = |day: NaiveDate| {
-        day.and_hms_opt(0, 0, 0)
-            .expect("midnight")
-            .and_utc()
-            .timestamp()
-    };
+    let midnight = |day: NaiveDate| day.and_time(chrono::NaiveTime::MIN).and_utc().timestamp();
     // +/- 48 hours covers every UTC offset; exact local day filtering below
     // also rules out future calendar dates. No log row limit truncates counts.
     let lower = midnight(first) - 2 * DAY_SECONDS;
