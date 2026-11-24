@@ -18,20 +18,35 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Result<Self> {
-        let temporary = tempfile::tempdir()?;
-        let profile = temporary.path().canonicalize()?;
+        let (temporary, profile) = secure_temp()?;
         let owned = owned_assets::OwnedAssets::provision(&profile, &profile)?;
         let root = owned.path().join("inactive");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            let mut builder = fs::DirBuilder::new();
+            builder.mode(0o700).create(&root)?;
+        }
+        #[cfg(windows)]
         fs::create_dir(&root)?;
         let assets = owned.acquire_ownership(Duration::ZERO)?;
         for (name, bytes) in [
-            ("weights", b"synthetic weights".as_slice()),
-            ("tokenizer", b"synthetic tokenizer".as_slice()),
+            ("model_quantized.onnx", b"synthetic weights".as_slice()),
+            ("tokenizer.json", b"synthetic tokenizer".as_slice()),
         ] {
-            fs::write(root.join(name), bytes)?;
+            let file = root.join(name);
+            fs::write(&file, bytes)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&file, fs::Permissions::from_mode(0o600))?;
+            }
         }
-        fs::copy(root.join("weights"), root.join("active-weights"))?;
-        fs::copy(root.join("tokenizer"), root.join("active-tokenizer"))?;
+        fs::copy(
+            root.join("model_quantized.onnx"),
+            root.join("active-weights"),
+        )?;
+        fs::copy(root.join("tokenizer.json"), root.join("active-tokenizer"))?;
         let ownership = LibraryLock::acquire(&profile, Duration::ZERO)?;
         let binding = Binding {
             owner: "synthetic-owner".into(),
@@ -59,7 +74,9 @@ impl Fixture {
 
     fn registry(&self) -> Result<Registry> {
         let resource = |name: &str| -> Result<profiles::Resource> {
-            let path = if self.legacy_assets && matches!(name, "weights" | "tokenizer") {
+            let path = if self.legacy_assets
+                && matches!(name, "model_quantized.onnx" | "tokenizer.json")
+            {
                 self.profile.join("models/bge-m3").join(name)
             } else {
                 self.root.join(name)
@@ -75,8 +92,8 @@ impl Fixture {
             id: "inactive".into(),
             embedding: serde_json::Value::Null,
             onnx: serde_json::Value::Null,
-            weights: Some(resource("weights")?),
-            tokenizer: Some(resource("tokenizer")?),
+            weights: Some(resource("model_quantized.onnx")?),
+            tokenizer: Some(resource("tokenizer.json")?),
         };
         Ok(Registry {
             models: [(model.id.clone(), model)].into_iter().collect(),
@@ -119,9 +136,12 @@ impl Fixture {
     }
 
     fn unchanged(&self) -> Result<()> {
-        assert_eq!(fs::read(self.root.join("weights"))?, b"synthetic weights");
         assert_eq!(
-            fs::read(self.root.join("tokenizer"))?,
+            fs::read(self.root.join("model_quantized.onnx"))?,
+            b"synthetic weights"
+        );
+        assert_eq!(
+            fs::read(self.root.join("tokenizer.json"))?,
             b"synthetic tokenizer"
         );
         assert!(!self
@@ -162,8 +182,8 @@ impl Authority for Fixture {
         anyhow::ensure!(binding == &self.binding, "scope_mismatch");
         anyhow::ensure!(
             !self.cancel_after_first_move
-                || self.root.join("weights").is_file()
-                || !self.root.join("tokenizer").is_file(),
+                || self.root.join("model_quantized.onnx").is_file()
+                || !self.root.join("tokenizer.json").is_file(),
             "operation_cancelled_after_first_move"
         );
         Ok(())
@@ -178,8 +198,8 @@ fn removes_only_registered_inactive_files_and_retains_other_assets_and_lock() ->
     assert_eq!(receipt.outcome, Outcome::Removed);
     assert_eq!(receipt.detached_files, 2);
     assert!(!receipt.active_changed);
-    assert!(!fixture.root.join("weights").exists());
-    assert!(!fixture.root.join("tokenizer").exists());
+    assert!(!fixture.root.join("model_quantized.onnx").exists());
+    assert!(!fixture.root.join("tokenizer.json").exists());
     assert_eq!(
         fs::read(fixture.root.join("other-active-model"))?,
         b"active bytes"
@@ -310,11 +330,11 @@ fn ordinary_shared_resource_and_incomplete_transaction_remain_protected() -> Res
         b"retained interrupted transaction"
     );
     assert_eq!(
-        fs::read(fixture.root.join("weights"))?,
+        fs::read(fixture.root.join("model_quantized.onnx"))?,
         b"synthetic weights"
     );
     assert_eq!(
-        fs::read(fixture.root.join("tokenizer"))?,
+        fs::read(fixture.root.join("tokenizer.json"))?,
         b"synthetic tokenizer"
     );
     Ok(())
@@ -325,13 +345,25 @@ fn legacy_assets_are_not_online_removal_candidates() -> Result<()> {
     let mut fixture = Fixture::new()?;
     let legacy = fixture.profile.join("models/bge-m3");
     fs::create_dir_all(&legacy)?;
-    fs::copy(fixture.root.join("weights"), legacy.join("weights"))?;
-    fs::copy(fixture.root.join("tokenizer"), legacy.join("tokenizer"))?;
+    fs::copy(
+        fixture.root.join("model_quantized.onnx"),
+        legacy.join("model_quantized.onnx"),
+    )?;
+    fs::copy(
+        fixture.root.join("tokenizer.json"),
+        legacy.join("tokenizer.json"),
+    )?;
     fixture.legacy_assets = true;
     let error = uninstall(&fixture, &fixture.binding, fixture.request()).unwrap_err();
     assert!(error.to_string().contains("asset_not_owned"));
-    assert_eq!(fs::read(legacy.join("weights"))?, b"synthetic weights");
-    assert_eq!(fs::read(legacy.join("tokenizer"))?, b"synthetic tokenizer");
+    assert_eq!(
+        fs::read(legacy.join("model_quantized.onnx"))?,
+        b"synthetic weights"
+    );
+    assert_eq!(
+        fs::read(legacy.join("tokenizer.json"))?,
+        b"synthetic tokenizer"
+    );
     fixture.unchanged()
 }
 

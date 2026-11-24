@@ -17,26 +17,13 @@ struct StagedFile {
     writer: Option<File>,
 }
 
-fn identity(handle: HANDLE) -> io::Result<(u32, u32, u32)> {
+pub(super) fn identity(handle: HANDLE) -> io::Result<(u32, u32, u32)> {
     let info = metadata(handle)?;
     Ok((
         info.dwVolumeSerialNumber,
         info.nFileIndexHigh,
         info.nFileIndexLow,
     ))
-}
-
-/// A pinned, regular model file. Another Windows handle may read or rename
-/// this object but may not write it while the verifier retains this handle.
-pub fn open_model_file(path: &Path) -> io::Result<File> {
-    use std::os::windows::fs::OpenOptionsExt;
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .share_mode(FILE_SHARE_READ | FILE_SHARE_DELETE)
-        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
-        .open(path)?;
-    checked_file(file.as_raw_handle(), None)?;
-    Ok(file)
 }
 
 pub fn same_model_file(left: &File, right: &File) -> io::Result<bool> {
@@ -48,6 +35,7 @@ impl ModelStage {
         let base = pinned_base_with_sharing(base, FILE_SHARE_READ | FILE_SHARE_WRITE, true)?;
         let user = CurrentUser::query()?;
         user.verify_handle(base.as_raw_handle(), false)?;
+        super::model_removal::require_no_recovery(base.as_raw_handle())?;
         let descriptor = user.descriptor()?;
         let directory = relative_open(
             base.as_raw_handle(),
@@ -131,6 +119,7 @@ impl ModelStage {
             return Err(denied("managed model namespace identity changed"));
         }
         user.verify_handle(base, false)?;
+        super::model_removal::require_no_recovery(base)?;
         let directory = self.directory.as_raw_handle();
         checked_directory(directory)?;
         user.verify_handle(directory, true)?;

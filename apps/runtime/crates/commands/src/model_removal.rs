@@ -4,11 +4,33 @@ mod owned_assets;
 mod removal_plan;
 #[cfg(test)]
 use removal_plan::uninstall;
+
+#[cfg(test)]
+fn secure_temp() -> Result<(tempfile::TempDir, PathBuf)> {
+    let directory = tempfile::tempdir()?;
+    #[cfg(windows)]
+    {
+        let system = PathBuf::from(std::env::var_os("SystemRoot").context("Windows system path")?);
+        let output = std::process::Command::new(system.join(r"System32\WindowsPowerShell\v1.0\powershell.exe"))
+            .args(["-NoProfile", "-NonInteractive", "-Command",
+                "$ErrorActionPreference='Stop'; $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User; $acl=New-Object Security.AccessControl.DirectorySecurity; $acl.SetOwner($sid); $acl.SetAccessRuleProtection($true,$false); $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($sid,'FullControl','ContainerInherit,ObjectInherit','None','Allow')); [System.IO.Directory]::SetAccessControl($env:RESPIRE_STAGE_TEST_TEMP,$acl)"])
+            .env("RESPIRE_STAGE_TEST_TEMP", directory.path())
+            .output()?;
+        anyhow::ensure!(
+            output.status.success(),
+            "synthetic stage DACL setup failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let root = directory.path().canonicalize()?;
+    Ok((directory, root))
+}
 pub(crate) use removal_plan::{PendingRemoval, VerifiedRemoval};
 pub(crate) mod serving;
 
 use anyhow::{Context, Result};
 use respire_app::{core_sdk::profiles, embedding::Registry, lock::LibraryLock};
+use respire_spawn::owner_credential::{ModelRemovalRoot, RemovalMetadata};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -18,22 +40,13 @@ use std::{
     path::{Path, PathBuf},
 };
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Binding {
     pub owner: String,
     pub canonical_profile: PathBuf,
-    #[serde(serialize_with = "serialize_scope_uuid")]
     pub instance: uuid::Uuid,
     pub generation: u64,
-    #[serde(serialize_with = "serialize_scope_uuid")]
     pub vault_epoch: uuid::Uuid,
-}
-
-fn serialize_scope_uuid<S: serde::Serializer>(
-    value: &uuid::Uuid,
-    serializer: S,
-) -> Result<S::Ok, S::Error> {
-    serializer.collect_str(value)
 }
 
 #[derive(Deserialize)]
@@ -295,37 +308,35 @@ fn verify_file(
 struct Journal<'a> {
     model_id: &'a str,
     phase: &'a str,
-    binding: &'a Binding,
-    files: Vec<(&'a Path, u64, &'a str)>,
+    files: Vec<(&'a str, u64, &'a str)>,
 }
 
 fn transact(
-    root: &Path,
-    binding: &Binding,
+    root: &ModelRemovalRoot,
     model: &str,
     files: Vec<OwnedFile>,
     check: impl Fn() -> Result<()>,
 ) -> Result<Receipt> {
     use std::io::Write;
-    // A retained directory is an explicit recovery barrier, never an auto-retry.
-    let stage = root.join(".runtime-model-removal-v1");
-    fs::create_dir(&stage).context("removal_recovery_required_or_stage_unavailable")?;
-    let journal = stage.join("journal.json");
+    // The quarantine itself is the recovery barrier across process restart.
+    // It and every write are rooted in the checked owner namespace.
+    let mut stage = root
+        .create_quarantine()
+        .context("removal_recovery_required_or_stage_unavailable")?;
     let prepare = (|| -> Result<()> {
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&journal)?;
-        file.write_all(&serde_json::to_vec(&Journal {
+        let pins = files
+            .iter()
+            .map(|file| Ok((file.leaf()?, file.pin.size, file.pin.sha256.as_str())))
+            .collect::<Result<Vec<_>>>()?;
+        let mut journal = stage.create_metadata(RemovalMetadata::Journal)?;
+        journal.write_all(&serde_json::to_vec(&Journal {
             model_id: model,
             phase: "prepared",
-            binding,
-            files: files
-                .iter()
-                .map(|f| (f.pin.path.as_path(), f.pin.size, f.pin.sha256.as_str()))
-                .collect(),
+            files: pins,
         })?)?;
-        file.sync_all()?;
+        journal.sync_all()?;
+        drop(journal);
+        stage.sync()?;
         Ok(())
     })();
     if let Err(error) = prepare {
@@ -333,69 +344,67 @@ fn transact(
             error.context("removal_recovery_required: preparation failed; assets unchanged")
         );
     }
-    let mut moved = Vec::new();
+    let mut attempted = Vec::new();
     let attempt = (|| -> Result<()> {
         for (index, owned) in files.iter().enumerate() {
-            let path = &owned.pin.path;
             check()?;
-            regular_owned_path(root, path)?;
-            owned.still_names(path)?;
-            let destination = stage.join(index.to_string());
-            fs::rename(path, &destination)?;
-            moved.push((path.clone(), destination.clone()));
-            owned.still_names(&destination)?;
+            owned.unchanged()?;
+            // Include this slot if an OS error follows its actual rename.
+            // Rollback also accepts the exact file already at its source.
+            attempted.push(index);
+            stage.move_from_model(owned.leaf()?, &owned.file, index)?;
         }
         check()?;
-        // Publish a complete marker atomically. Any retained stage after a
-        // restart requires recovery; marker existence alone is not authority.
-        let mut marker = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(stage.join("commit.tmp"))?;
+        let mut marker = stage.create_metadata(RemovalMetadata::CommitTemp)?;
         marker.write_all(model.as_bytes())?;
         marker.sync_all()?;
         drop(marker);
-        fs::rename(stage.join("commit.tmp"), stage.join("committed"))?;
+        check()?;
+        stage.publish_marker()?;
         Ok(())
     })();
     if let Err(error) = attempt {
-        for (original, staged) in moved.iter().rev() {
-            anyhow::ensure!(
-                fs::symlink_metadata(original)
-                    .err()
-                    .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound),
-                "removal_recovery_required: rollback destination occupied; {error:#}"
-            );
-            fs::rename(staged, original).with_context(|| {
-                format!("removal_recovery_required: rollback failed; {error:#}")
-            })?;
+        for index in attempted.iter().rev().copied() {
+            let owned = &files[index];
+            stage
+                .restore_to_model(owned.leaf()?, &owned.file, index)
+                .with_context(|| {
+                    format!("removal_recovery_required: rollback failed; {error:#}")
+                })?;
         }
         for owned in &files {
             owned
-                .still_names(&owned.pin.path)
+                .still_names(root)
                 .context("removal_recovery_required: restored asset identity unverified")?;
         }
-        // A failed marker write may have created an incomplete marker.
-        match fs::remove_file(stage.join("commit.tmp")) {
-            Ok(()) => (),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
-            Err(e) => return Err(e).context("removal_recovery_required: rollback cleanup failed"),
-        }
-        fs::remove_file(&journal)
+        stage
+            .delete_metadata(RemovalMetadata::CommitTemp)
+            .context("removal_recovery_required: rollback cleanup failed")?;
+        stage
+            .sync()
+            .context("removal_recovery_required: rollback state not durable")?;
+        stage
+            .delete_metadata(RemovalMetadata::Journal)
             .context("removal_recovery_required: rollback journal retained")?;
-        fs::remove_dir(&stage).context("removal_recovery_required: rollback stage retained")?;
+        stage
+            .finish()
+            .context("removal_recovery_required: rollback stage retained")?;
         return Err(error.context("removal_rejected: assets restored"));
     }
-    drop(files);
+
+    let detached_files = files.len();
     let mut deleted_files = 0;
     let cleanup = (|| -> Result<()> {
-        for (_, path) in &moved {
-            fs::remove_file(path)?;
+        // After the commit rename, a cleanup failure cannot undo removal.
+        stage.sync()?;
+        for (index, owned) in files.iter().enumerate() {
+            stage.delete_detached(&owned.file, index)?;
             deleted_files += 1;
         }
-        fs::remove_file(stage.join("committed"))?;
-        fs::remove_file(&journal)?;
-        fs::remove_dir(&stage)?;
+        drop(files);
+        stage.delete_metadata(RemovalMetadata::Committed)?;
+        stage.delete_metadata(RemovalMetadata::Journal)?;
+        stage.finish()?;
         Ok(())
     })();
     Ok(Receipt {
@@ -406,7 +415,7 @@ fn transact(
             Outcome::CleanupPending
         },
         active_changed: false,
-        detached_files: moved.len(),
+        detached_files,
         deleted_files,
         cleanup_error: cleanup.err().map(|error| format!("{error:#}")),
     })

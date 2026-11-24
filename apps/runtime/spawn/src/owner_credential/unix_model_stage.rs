@@ -35,20 +35,6 @@ fn leaf(name: &str) -> io::Result<CString> {
     CString::new(name).map_err(|_| denied())
 }
 
-/// Open the final leaf without following a symbolic link.
-pub fn open_model_file(path: &Path) -> io::Result<File> {
-    use std::os::unix::fs::OpenOptionsExt;
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
-        .open(path)?;
-    let info = file.metadata()?;
-    if !info.is_file() || info.nlink() != 1 {
-        return Err(denied());
-    }
-    Ok(file)
-}
-
 pub fn same_model_file(left: &File, right: &File) -> io::Result<bool> {
     Ok(identity_tuple(left)? == identity_tuple(right)?)
 }
@@ -59,6 +45,7 @@ impl ModelStage {
         let base = open_base(base)?;
         let base_id = Identity::from_metadata(&base.metadata()?);
         let parent = base.as_raw_fd();
+        super::model_removal::require_no_recovery(parent)?;
         // SAFETY: parent is retained, name is a validated single leaf.
         if unsafe { libc::mkdirat(parent, name.as_ptr(), 0o700) } != 0 {
             return Err(io::Error::last_os_error());
@@ -148,6 +135,7 @@ impl ModelStage {
         }
         self.revalidate_pair()?;
         let parent = self.base.as_raw_fd();
+        super::model_removal::require_no_recovery(parent)?;
         let old = checked_old_destination(parent, &dest)?;
         verify()?;
         if let Some((_held, id)) = old {

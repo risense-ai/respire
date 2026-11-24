@@ -3,20 +3,25 @@
 //! that both names still identify the exact files vetted by the verifier.
 use super::*;
 use anyhow::ensure;
-use respire_spawn::owner_credential::{open_model_file, same_model_file};
+use respire_spawn::owner_credential::same_model_file;
 
 pub(crate) struct PendingRemoval {
     binding: Binding,
     request: Request,
-    root: PathBuf,
+    platform: ModelRemovalRoot,
     files: Vec<OwnedFile>,
 }
 
 pub(crate) struct VerifiedRemoval(PendingRemoval);
 
 impl OwnedFile {
-    fn open(pin: ManagedPin) -> Result<Self> {
-        let file = open_model_file(&pin.path)?;
+    fn open(root: &ModelRemovalRoot, pin: ManagedPin) -> Result<Self> {
+        let leaf = pin
+            .path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .context("invalid managed asset leaf")?;
+        let file = root.open_model_asset(leaf)?;
         let metadata = file.metadata()?;
         ensure!(metadata.len() == pin.size, "asset_identity_changed");
         Ok(Self {
@@ -26,7 +31,7 @@ impl OwnedFile {
         })
     }
 
-    fn unchanged(&self) -> Result<()> {
+    pub(super) fn unchanged(&self) -> Result<()> {
         let metadata = self.file.metadata()?;
         ensure!(
             metadata.len() == self.pin.size && metadata.modified()? == self.modified,
@@ -35,14 +40,22 @@ impl OwnedFile {
         Ok(())
     }
 
-    pub(super) fn still_names(&self, path: &Path) -> Result<()> {
+    pub(super) fn still_names(&self, root: &ModelRemovalRoot) -> Result<()> {
         self.unchanged()?;
-        let current = open_model_file(path)?;
+        let current = root.open_model_asset(self.leaf()?)?;
         ensure!(
             same_model_file(&self.file, &current)?,
             "asset_identity_changed"
         );
         Ok(())
+    }
+
+    pub(super) fn leaf(&self) -> Result<&str> {
+        self.pin
+            .path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .context("invalid managed asset leaf")
     }
 }
 
@@ -52,18 +65,19 @@ impl PendingRemoval {
         binding: &Binding,
         request: Request,
     ) -> Result<Self> {
-        let (root, files) = with_inventory(authority, binding, &request, |root, pins| {
+        let (platform, files) = with_inventory(authority, binding, &request, |root, pins| {
+            let platform = ModelRemovalRoot::open(root, &request.model_id)?;
             let files = pins
                 .into_iter()
-                .map(OwnedFile::open)
+                .map(|pin| OwnedFile::open(&platform, pin))
                 .collect::<Result<Vec<_>>>()?;
             authority.check(binding)?;
-            Ok((root.to_path_buf(), files))
+            Ok((platform, files))
         })?;
         Ok(Self {
             binding: binding.clone(),
             request,
-            root,
+            platform,
             files,
         })
     }
@@ -88,21 +102,19 @@ impl VerifiedRemoval {
         let PendingRemoval {
             binding,
             request,
-            root,
+            platform,
             files,
         } = self.0;
         ensure!(&binding == current, "model_scope_changed");
         with_inventory(authority, current, &request, |current_root, pins| {
-            ensure!(
-                root == current_root && pins.len() == files.len(),
-                "asset_identity_changed"
-            );
+            platform.reauthorize(current_root)?;
+            ensure!(pins.len() == files.len(), "asset_identity_changed");
             for (pin, file) in pins.iter().zip(&files) {
                 ensure!(pin == &file.pin, "asset_identity_changed");
-                file.still_names(&pin.path)?;
+                file.still_names(&platform)?;
             }
             authority.check(current)?;
-            transact(current_root, current, &request.model_id, files, || {
+            transact(&platform, &request.model_id, files, || {
                 authority.check(current)
             })
         })

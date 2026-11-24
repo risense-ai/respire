@@ -177,30 +177,10 @@ impl SealedPair {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model_removal::secure_temp;
     use std::{io::Read, time::Duration};
 
     const FIXTURE_MODEL: &str = "bge-small-zh-v1.5";
-
-    fn secure_temp() -> Result<(tempfile::TempDir, PathBuf)> {
-        let directory = tempfile::tempdir()?;
-        #[cfg(windows)]
-        {
-            let system =
-                PathBuf::from(std::env::var_os("SystemRoot").context("Windows system path")?);
-            let output = std::process::Command::new(system.join(r"System32\WindowsPowerShell\v1.0\powershell.exe"))
-                .args(["-NoProfile", "-NonInteractive", "-Command",
-                    "$ErrorActionPreference='Stop'; $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User; $acl=New-Object Security.AccessControl.DirectorySecurity; $acl.SetOwner($sid); $acl.SetAccessRuleProtection($true,$false); $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($sid,'FullControl','ContainerInherit,ObjectInherit','None','Allow')); [System.IO.Directory]::SetAccessControl($env:RESPIRE_STAGE_TEST_TEMP,$acl)"])
-                .env("RESPIRE_STAGE_TEST_TEMP", directory.path())
-                .output()?;
-            ensure!(
-                output.status.success(),
-                "synthetic stage DACL setup failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-        let root = directory.path().canonicalize()?;
-        Ok((directory, root))
-    }
 
     fn owner(profile: &Path) -> Binding {
         Binding {
@@ -306,6 +286,41 @@ mod tests {
             .is_err());
         assert!(!duplicate_path.exists());
         assert_eq!(destination.read_dir()?.count(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn pending_removal_recovery_blocks_new_and_already_sealed_publication() -> Result<()> {
+        let (_directory, root) = secure_temp()?;
+        let assets = OwnedAssets::provision(&root, &root)?;
+        let original = owner(&root);
+        let sealed = synthetic_pair(&assets, &original, true)?.seal()?;
+        let lease = assets.acquire_ownership(Duration::ZERO)?;
+        let recovery = assets.0.join(".runtime-model-removal-v1");
+        std::fs::create_dir(&recovery)?;
+        std::fs::write(
+            recovery.join("journal.json"),
+            b"isolated pending transaction",
+        )?;
+        assert!(assets
+            .prepare_builtin_pair(&lease, &original, FIXTURE_MODEL)
+            .is_err());
+        assert!(sealed
+            .commit(&assets, &lease, &original, || Ok(()))
+            .is_err());
+        assert!(!assets.model_path(FIXTURE_MODEL)?.exists());
+        assert_eq!(
+            std::fs::read(recovery.join("journal.json"))?,
+            b"isolated pending transaction"
+        );
+        assert!(assets.0.read_dir()?.all(|entry| {
+            entry.is_ok_and(|entry| {
+                !entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".incoming-")
+            })
+        }));
         Ok(())
     }
 
