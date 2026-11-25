@@ -82,23 +82,36 @@ async fn health() -> V1Result<Response> {
             "Runtime unavailable",
         ));
     };
-    let mut capabilities = Vec::new();
-    if operations {
-        capabilities.push("sse.operations.v1");
-    }
-    if scoped_auth {
-        capabilities.push("auth.handshake.v1");
-    }
     let payload = serde_json::json!({
         "status": status,
         "instance_id": instance_id,
-        "capabilities": capabilities
+        "capabilities": health_capabilities(status, scoped_auth, operations)
     });
     Ok((
         [(http::header::CONTENT_TYPE, "application/json")],
         payload.to_string(),
     )
         .into_response())
+}
+
+fn health_capabilities(
+    status: &str,
+    scoped_auth: bool,
+    dispatch_and_scope_live: bool,
+) -> Vec<&'static str> {
+    if status != "ready" {
+        return Vec::new();
+    }
+    let mut flags = Vec::new();
+    if dispatch_and_scope_live {
+        flags.extend(["sse.operations.v1", "model.catalog.v2"]);
+    }
+    if scoped_auth {
+        flags.push("auth.handshake.v1");
+    }
+    // Active-assets has a separate authenticated client migration; managed
+    // download must not promise eligibility beyond the managed CPU lane.
+    flags
 }
 
 async fn not_found() -> Problem {

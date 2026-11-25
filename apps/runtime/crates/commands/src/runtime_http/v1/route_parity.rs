@@ -155,10 +155,40 @@ fn real_router_health_and_problem_wire_shapes() -> anyhow::Result<()> {
                 ("DELETE", "/v1/operations/fixture-id"),
                 ("GET", "/v1/operations/fixture-id/events"),
                 ("POST", "/v1/sync/trigger"),
+                ("GET", "/v1/models/catalog"),
             ] {
                 check_problem(read_fixture(bound, method, path).await?, 401, "unauthorized");
             }
             server.abort();
             Ok(())
         })
+}
+
+#[test]
+fn health_catalog_flag_tracks_ready_verified_dispatch_without_broad_claims() {
+    use super::health_capabilities;
+    assert!(health_capabilities("starting", true, true).is_empty());
+    assert!(health_capabilities("degraded", true, true).is_empty());
+    assert!(health_capabilities("ready", false, false).is_empty());
+    assert_eq!(
+        health_capabilities("ready", true, false),
+        ["auth.handshake.v1"]
+    );
+    assert_eq!(
+        health_capabilities("ready", false, true),
+        ["sse.operations.v1", "model.catalog.v2"]
+    );
+    let ready = health_capabilities("ready", true, true);
+    assert_eq!(
+        ready,
+        ["sse.operations.v1", "model.catalog.v2", "auth.handshake.v1"]
+    );
+    for withheld in [
+        "openapi.v1",
+        "host.transactions.v1",
+        "model.active_assets",
+        "model.managed_download",
+    ] {
+        assert!(!ready.contains(&withheld));
+    }
 }
