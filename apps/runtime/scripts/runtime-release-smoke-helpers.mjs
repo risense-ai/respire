@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import {createCipheriv, createHash, hkdfSync, randomBytes} from 'node:crypto';
+import {realpathSync} from 'node:fs';
 import {win32} from 'node:path';
 
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -19,6 +20,11 @@ function normalizedPath(value, platform = process.platform) {
   if (value.startsWith('\\\\?\\UNC\\')) value = '\\\\' + value.slice(8);
   else if (value.startsWith('\\\\?\\') && /^[A-Za-z]:\\/.test(value.slice(4))) value = value.slice(4);
   return win32.normalize(value);
+}
+function nativeRealpath(path) {
+  // Rust receipts can use verbatim Windows paths that Node's JS walker cannot resolve.
+  if (process.platform !== 'win32') return realpathSync(path);
+  return normalizedPath(realpathSync.native(normalizedPath(path)));
 }
 function assertSamePath(actual, expected, platform = process.platform) {
   assert.equal(normalizedPath(actual, platform), normalizedPath(expected, platform));
@@ -105,4 +111,4 @@ function assertBadConfigResponse(reply, request, health) {
   assert.ok(typeof reply.error === 'string' && reply.error.length > 0);
 }
 
-export {archiveArgs, archiveTool, assertBadConfigResponse, assertDrained, assertModelResponse, assertNativeIntel, assertProtocol, assertSamePath, digest, modelRequest, normalizedPath, safePath, syntheticSession};
+export {archiveArgs, archiveTool, assertBadConfigResponse, assertDrained, assertModelResponse, assertNativeIntel, assertProtocol, assertSamePath, digest, modelRequest, nativeRealpath, normalizedPath, safePath, syntheticSession};

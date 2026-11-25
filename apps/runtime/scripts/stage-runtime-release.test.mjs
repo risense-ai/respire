@@ -2,19 +2,21 @@ import assert from 'node:assert/strict';
 import {test} from 'node:test';
 import {createHash} from 'node:crypto';
 import {execFileSync} from 'node:child_process';
-import {copyFileSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, unlinkSync, utimesSync, writeFileSync} from 'node:fs';
+import {copyFileSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, unlinkSync, utimesSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
-import {dirname, join} from 'node:path';
+import {dirname, join, win32} from 'node:path';
 import {gunzipSync} from 'node:zlib';
 import {stageRuntime} from './stage-runtime-release.mjs';
-import {archiveTool} from './runtime-release-smoke-helpers.mjs';
+import {stageRuntimeCargo} from './stage-runtime-cargo.mjs';
+import {archiveTool, nativeRealpath} from './runtime-release-smoke-helpers.mjs';
 
 const hash = value => createHash('sha256').update(value).digest('hex');
 const v = '2.0.0-dev.31';
 const target = 'x86_64-pc-windows-msvc';
 function fixture(t) {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), 'runtime-stage-test-')));
+  const root = nativeRealpath(mkdtempSync(join(tmpdir(), 'runtime-stage-test-')));
   t.after(() => rmSync(root, {recursive: true, force: true}));
+  if (process.platform === 'win32') assert.equal(nativeRealpath(win32.toNamespacedPath(root)), root);
   function file(name, content) {
     const path = join(root, name);
     mkdirSync(dirname(path), {recursive: true});
@@ -95,4 +97,40 @@ test('a byte-copied Cargo image passes without accepting a hardlinked input', as
   const staged = join(batch.directory, 'rsrs-runtime-' + target + '.exe');
   assert.deepEqual(readFileSync(staged), readFileSync(cargoDeps));
   assert.equal(lstatSync(staged).nlink, 1);
+});
+
+test('Cargo invocation adapter normalizes the hardlinked image and rejects ambiguous logs', async t => {
+  const {args, binary, resource} = fixture(t);
+  const targetDir = join(args.root, 'target');
+  const profile = join(targetDir, target, 'release');
+  const out = join(profile, 'build', 'respire_core_sdk-a', 'out');
+  mkdirSync(out, {recursive: true});
+  const executable = join(profile, 'rsrs-runtime.exe');
+  linkSync(binary, executable);
+  copyFileSync(resource, join(profile, 'DirectML.dll'));
+  copyFileSync(args.buildReceipt, join(out, 'source-build.json'));
+  const log = join(args.root, 'cargo.jsonl');
+  const artifact = {reason: 'compiler-artifact', target: {name: 'rsrs-runtime', kind: ['bin']}, executable};
+  const script = {reason: 'build-script-executed', out_dir: out};
+  const done = {reason: 'build-finished', success: true};
+  const writeLog = (...events) => writeFileSync(log, events.map(value => JSON.stringify(value)).join('\r\n'));
+  const pack = () => stageRuntimeCargo({...args, targetDir, cargoLog: log});
+  writeLog(script, artifact, done);
+  const result = await pack();
+  const staged = join(result.directory, 'rsrs-runtime-' + target + '.exe');
+  assert.deepEqual(readFileSync(staged), readFileSync(executable));
+  assert.equal(lstatSync(executable).nlink, 2);
+  assert.equal(lstatSync(staged).nlink, 1);
+
+  writeLog(script, script, artifact, done);
+  await assert.rejects(pack(), /sole Core receipt/);
+  writeLog(script, {...artifact, executable: binary}, done);
+  await assert.rejects(pack(), /sole Runtime image/);
+  writeLog(script, artifact, {...done, success: false});
+  await assert.rejects(pack(), /successful Cargo build/);
+  writeLog(script, artifact, done);
+  writeFileSync(join(profile, 'DirectML.dll'), 'tampered');
+  await assert.rejects(pack(), /original checksum/);
+  assert.equal(readdirSync(args.root).filter(name => name.startsWith('runtime-build-')).length, 1);
+  assert(!readdirSync(args.root).some(name => name.startsWith('runtime-cargo-image-')));
 });

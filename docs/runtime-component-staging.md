@@ -29,3 +29,24 @@ tag creation, or network calls are made. Batch preparation does not replace
 same-run build provenance, target-specific dependency inspection, or the
 existing native hosted release smoke. Supply the exact three batch files as the
 smoke's `release-assets` and its usual `RUNTIME_TARGET`/`RUNTIME_VERSION`.
+
+## Automating the Cargo staging handoff
+
+In a native build job with its reviewed target-specific provider setup, use a
+fresh absolute Cargo target directory and capture the structured stdout from
+the **same** successful release invocation:
+
+```sh
+cargo +1.95.0 build --release --locked --manifest-path apps/runtime/Cargo.toml \
+  -p respire_runtime --bin rsrs-runtime --target "$TARGET" \
+  --target-dir "$CARGO_TARGET_DIR" --message-format=json-render-diagnostics > "$CARGO_LOG"
+node apps/runtime/scripts/stage-runtime-cargo.mjs "$COMPONENT_TAG" "$SOURCE_SHA" \
+  "$TARGET" "$CARGO_TARGET_DIR" "$CARGO_LOG" "$OUTPUT_PARENT"
+```
+
+The adapter resolves the unique selected-target image and source receipt from
+that Cargo invocation, makes byte-verified copies, and runs the same strict
+stager above. Keep the tracked Runtime manifest and lockfile at the requested
+release version; do not rewrite them from dispatch input. The log is not
+an attestation. The job still owns native runner/target selection, trusted
+provider setup, a same-run provenance envelope, and packaged Runtime smoke.
