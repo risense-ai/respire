@@ -38,16 +38,15 @@ type runtimeOfflineKeygenRecord struct {
 	StoreReady   bool                `json:"store_ready"`
 }
 
-func (m *Manager) desktopOfflineKeygen(ctx context.Context, id string, query bool) (raw json.RawMessage, recovery string, err error) {
+func (m *Manager) recoverLegacyOfflineKeygen(ctx context.Context, id string) (raw json.RawMessage, recovery string, err error) {
 	ctx, cancel := context.WithTimeout(ctx, 90*time.Second)
 	defer cancel()
 	op := strings.TrimPrefix(id, "desktop-")
 	if !hostOperationID.MatchString(op) || m.ClientVersion == "" {
 		return nil, "", errors.New(i18n.Messagea29f712bcbeb6a56)
 	}
-	uncertain := query
 	defer func() {
-		if err != nil && uncertain {
+		if err != nil {
 			err = &unconfirmedError{id: id, cause: err}
 		}
 	}()
@@ -69,9 +68,6 @@ func (m *Manager) desktopOfflineKeygen(ctx context.Context, id string, query boo
 	activePath := filepath.Join(directory, offlineKeygenFile)
 	receiptPath := filepath.Join(directory, "offline-keygen-result-"+op+".json")
 	markerArchive := filepath.Join(directory, "maintenance.keygen-"+op+".json")
-	if err := os.Mkdir(directory, 0700); err != nil && !errors.Is(err, os.ErrExist) {
-		return nil, "", err
-	}
 	if err := checkRuntimeAccountDirectory(directory); err != nil {
 		return nil, "", err
 	}
@@ -92,131 +88,24 @@ func (m *Manager) desktopOfflineKeygen(ctx context.Context, id string, query boo
 		ImageDigest: info.SHA256, Original: runtimeAuthIdentity{Kind: "absent"},
 	}
 	store := nativeRuntimeCredentialStore(ctx)
-	if query {
-		data, err := readCredentialConfig(receiptPath, runtimeMaintenanceLimit)
-		if err == nil {
-			committed, err := record.readOriginal(data)
-			if err != nil || committed.Stage != "committed" {
-				return nil, "", errors.New(i18n.Messageaf356698ad4061b8)
-			}
-			if err := committed.verifySession(); err != nil {
-				return nil, "", err
-			}
-			if err := committed.verifyRetiredMarker(markerArchive); err != nil {
-				return nil, "", err
-			}
-			return offlineKeygenEnvelope(committed)
-		}
-		if !errors.Is(err, os.ErrNotExist) {
-			return nil, "", err
-		}
-		return m.queryOfflineKeygen(ctx, record, activePath, markerPath, markerArchive, receiptPath, store)
-	}
-
-	if err := requireUninitializedKeygenProfile(profile); err != nil {
-		return nil, "", err
-	}
-	for _, name := range []string{offlineKeygenFile, "maintenance.json", "account-active.json", "key-control.json", "space-client2.json"} {
-		if err := requireAbsentRuntimeAccountFile(filepath.Join(directory, name)); err != nil {
-			return nil, "", err
-		}
-	}
-	// A registered supervisor continues to own starts and stops for its library.
-	registration, err := readCredentialConfig(filepath.Join(directory, "registration.json"), runtimeMaintenanceLimit)
+	data, err := readCredentialConfig(receiptPath, runtimeMaintenanceLimit)
 	if err == nil {
-		var state struct {
-			Enabled  *bool `json:"enabled"`
-			Stopped  *bool `json:"manually_stopped"`
-			Retained *bool `json:"maintenance"`
+		committed, err := record.readOriginal(data)
+		if err != nil || committed.Stage != "committed" {
+			return nil, "", errors.New(i18n.Messageaf356698ad4061b8)
 		}
-		if json.Unmarshal(registration, &state) != nil || state.Enabled == nil || *state.Enabled ||
-			state.Stopped == nil || *state.Stopped || state.Retained == nil || *state.Retained {
-			return nil, "", errors.New(i18n.Message44582ddbfe67bfa3)
-		}
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return nil, "", err
-	}
-	record.Coordinator, err = runtimeRegistrationCoordinator(root, registration)
-	if err != nil {
-		return nil, "", err
-	}
-	health, _, err := m.Health(ctx)
-	if err == nil {
-		if health.ManagedID != "" || !samePath(health.DataDir, profile) || health.ImageSHA256 != info.SHA256 ||
-			health.AccountID != controlDigest([]byte(profile)) || health.StoreReady {
-			return nil, "", errors.New(i18n.Messagee66d018483ae57be)
-		}
-		if err := m.verifySelectedHealth(health, info); err != nil {
+		if err := committed.verifySession(); err != nil {
 			return nil, "", err
 		}
-		if err := m.stopDetached(ctx, health); err != nil {
+		if err := committed.verifyRetiredMarker(markerArchive); err != nil {
 			return nil, "", err
 		}
-	} else if !IsUnavailable(err) {
+		return offlineKeygenEnvelope(committed)
+	}
+	if !errors.Is(err, os.ErrNotExist) {
 		return nil, "", err
 	}
-	material, err := newRuntimeVaultMaterial(op)
-	if err != nil {
-		return nil, "", err
-	}
-	slot := "super:" + material.Account
-	present, err := store.readSlot(material.Backend, "rsrs", slot, true)
-	if err != nil {
-		return nil, "", err
-	}
-	if present != nil {
-		return nil, "", errors.New(i18n.Message0d900adf03c00eaa)
-	}
-	record.Token, err = controlUUID()
-	if err != nil {
-		return nil, "", err
-	}
-	birth, err := hostControlBirth(ctx)
-	if err != nil {
-		return nil, "", err
-	}
-	marker, err := json.Marshal(runtimeMaintenanceMarker{Schema: 1, ID: record.Coordinator, Token: record.Token,
-		Phase: "Paused", ExpectedProfile: profile, ExpectedVersion: "client2-" + m.ClientVersion, OwnerPID: os.Getpid(), OwnerBirth: birth})
-	if err != nil {
-		return nil, "", err
-	}
-	record.Stage, record.MarkerDigest = "sent", controlDigest(marker)
-	record.Material, err = json.Marshal(map[string]any{
-		"vault_version": 4, "auth_operation_id": op, "keyring_account": material.Account, "keyring_backend": material.Backend,
-		"kdf_salt": material.Salt, "wrapped_urk": material.Wrapped, "urk_nonce": material.Nonce,
-	})
-	if err != nil {
-		return nil, "", err
-	}
-	var data []byte
-	if err := m.withStoppedKeygenLibrary(ctx, record, func() error {
-		if err := requireUninitializedKeygenProfile(profile); err != nil {
-			return err
-		}
-		uncertain = true
-		var err error
-		data, err = record.save(activePath, nil)
-		if err != nil {
-			return err
-		}
-		return writeRuntimeAccountRecord(markerPath, marker, nil)
-	}); err != nil {
-		return nil, "", err
-	}
-	// Keep the original fence and owned slot if confirmation is lost.
-	if err := store.preserve("rsrs", slot, material.Super); err != nil {
-		return nil, "", err
-	}
-	digest, err := m.exchangeOfflineKeygen(ctx, record, marker, material, record.Original, "control.auth.keygen")
-	if err != nil {
-		return nil, "", err
-	}
-	record.Session = &digest
-	if err := m.finishOfflineKeygen(ctx, record, data, activePath, markerPath, markerArchive, receiptPath); err != nil {
-		return nil, "", err
-	}
-	raw, _, err = offlineKeygenEnvelope(record)
-	return raw, material.Super, err
+	return m.queryOfflineKeygen(ctx, record, activePath, markerPath, markerArchive, receiptPath, store)
 }
 
 func (m *Manager) verifyOfflineKeygenRuntime(info InstalledRuntime) error {

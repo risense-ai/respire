@@ -302,7 +302,15 @@ func (m *Manager) readRuntimeLoginRecovery(ctx context.Context, owner HealthInfo
 	return nil
 }
 
-func (m *Manager) exchangeRuntimeControl(ctx context.Context, image string, port uint64, grant any, request runtimeControlRequest) (reply rpcResponse, err error) {
+func (m *Manager) exchangeRuntimeControl(ctx context.Context, image string, port uint64, grant any, request runtimeControlRequest) (rpcResponse, error) {
+	return m.exchangeRuntimeControlMode(ctx, image, port, grant, request, runtimeControlLegacy)
+}
+
+func (m *Manager) exchangeRuntimeControlMode(ctx context.Context, image string, port uint64, grant any, request runtimeControlRequest, mode runtimeControlMode) (reply rpcResponse, err error) {
+	flag, err := mode.flag(request)
+	if err != nil {
+		return reply, err
+	}
 	frames := make([]byte, 0, 2*(4+controlFrameLimit))
 	defer func() { clear(frames) }()
 	for _, value := range []any{grant, request} {
@@ -318,7 +326,7 @@ func (m *Manager) exchangeRuntimeControl(ctx context.Context, image string, port
 		frames = append(frames, raw...)
 		clear(raw)
 	}
-	cmd := exec.CommandContext(ctx, image, "--host-control-internal")
+	cmd := exec.CommandContext(ctx, image, flag)
 	cmd.Dir = filepath.Dir(image)
 	configureCommand(cmd)
 	for _, variable := range os.Environ() {
