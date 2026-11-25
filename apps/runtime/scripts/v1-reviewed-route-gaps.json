@@ -1,0 +1,13 @@
+[
+  "DELETE /v1/spaces/{spaceId} deleteSpace",
+  "GET /v1/backups/export exportBackup",
+  "GET /v1/spaces listSpaces",
+  "GET /v1/spaces/{spaceId} getSpace",
+  "PATCH /v1/spaces/{spaceId} updateSpace",
+  "POST /v1/backups/import importBackup",
+  "POST /v1/host/transactions/login executeLoginTransaction",
+  "POST /v1/host/transactions/logout executeLogoutTransaction",
+  "POST /v1/organize/split splitOrganizeNode",
+  "POST /v1/spaces createSpace",
+  "POST /v1/spaces/{spaceId}/members inviteSpaceMember"
+]

@@ -32,3 +32,19 @@ by ASCII escapes for the same two Unicode glyphs rather than adding a
 production JavaScript allowance.
 
 Run focused checker tests with `node --test scripts/check-zero-cjk.test.mjs`.
+
+
+### Required independent review for roster changes
+
+The exact-line check does not infer which text is legitimate localization.
+A PR that adds or changes a roster entry must stay unmerged until the
+repository maintainer has evidence from a reviewer independent of the author.
+The reviewer must inspect the exact candidate head, compare changed entries
+against the target branch, and check the corresponding CJK lines in source.
+Only genuine locale data or intentionally multilingual fixtures qualify;
+implementation prose and comments do not. A new or relocated exception
+needs the same check. Removing stale entries does not add an allowance.
+Record the reviewed head and the paths in the PR's review evidence. If
+the head changes, re-review the affected entries. A green CI result alone
+is not independent approval; this repository procedure does not assume
+CODEOWNERS or branch-rule settings which have not been verified.

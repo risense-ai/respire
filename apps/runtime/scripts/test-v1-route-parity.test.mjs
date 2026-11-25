@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
-import {canonicalTuples, compare, runtimeRows} from './test-v1-route-parity.mjs';
+import {canonicalTuples, checkGapShrink, compare, parseGapRoster, runtimeRows} from './test-v1-route-parity.mjs';
 
 const route = {method: 'GET', path: '/v1/memories/{memoryId}', operation_id: 'readMemory'};
 const expected = ['GET /v1/memories/{memoryId} readMemory'];
@@ -54,7 +54,7 @@ test('reviewed gaps must match exactly and shrink when a route is bound', () => 
     "POST /v1/spaces/{spaceId}/members inviteSpaceMember"
   ];
   const canonical = [...expected, ...gaps];
-  const options = {ratchet: true};
+  const options = {acknowledged: gaps};
   assert.deepEqual(compare(canonical, [route], options), {registered: 1, canonical: 12, missing: 11});
   assert.throws(() => compare(canonical, [route]), /missing:/);
   assert.throws(() => compare(canonical, [], options), /missing: GET .*memories/);
@@ -62,4 +62,16 @@ test('reviewed gaps must match exactly and shrink when a route is bound', () => 
   assert.throws(() => compare(canonical, [route, added], options), /remove stale reviewed gap/);
   assert.throws(() => compare(canonical.slice(0, -1), [route], options), /remove stale reviewed gap/);
   assert.throws(() => compare(canonical, [route, {...added, operation_id: 'listOtherSpaces'}], options), /unexpected:/);
+});
+
+
+test('trusted predecessor prevents adding or exchanging exact debt tuples', () => {
+  const old = ['GET /v1/spaces listSpaces', 'POST /v1/spaces createSpace'];
+  assert.doesNotThrow(() => checkGapShrink(old, [old[1]]));
+  const regression = 'GET /v1/health getHealth';
+  assert.throws(() => checkGapShrink(old, [old[1], regression]), /cannot add reviewed route gaps/);
+  const wire = (rows) => Buffer.from(JSON.stringify(rows, null, 2) + '\n');
+  assert.deepEqual(parseGapRoster(wire(old)), old);
+  assert.throws(() => parseGapRoster(wire([old[0], old[0]])), /duplicate/);
+  assert.throws(() => parseGapRoster(wire([...old].reverse())), /noncanonical/);
 });

@@ -403,6 +403,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Install Rust
@@ -419,6 +420,7 @@ jobs:
       - name: Build and link Runtime with Core from this checkout
         shell: bash
         env:
+          ROUTE_GAP_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
           TARGET: ${{ matrix.target }}
           RUSTUP_TOOLCHAIN: "1.95.0"
         run: |
@@ -433,7 +435,11 @@ jobs:
           # Existing storage and migration tests opt into synthetic Core inference.
           RSRS_CORE_TEST_MODE=1 cargo test --manifest-path apps/runtime/Cargo.toml --locked --workspace --lib --tests --bins
           node --test apps/runtime/scripts/test-v1-route-parity.test.mjs
-          RSRS_CORE_TEST_MODE=1 node apps/runtime/scripts/test-v1-route-parity.mjs --reviewed-gap-ratchet
+          route_gap_base="$ROUTE_GAP_BASE"
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            route_gap_base=$(git rev-parse HEAD^)
+          fi
+          RSRS_CORE_TEST_MODE=1 node apps/runtime/scripts/test-v1-route-parity.mjs --reviewed-gap-ratchet --base "$route_gap_base"
 
   cli-ci:
     name: cli-ci
