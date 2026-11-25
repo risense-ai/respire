@@ -52,6 +52,8 @@ pub use unix::{
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
+pub use windows::model_namespace::provision_model_namespace;
+#[cfg(windows)]
 pub use windows::model_removal::ModelRemovalRoot;
 #[cfg(windows)]
 pub use windows::model_stage::{same_model_file, ModelStage};

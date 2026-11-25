@@ -15,11 +15,11 @@ use windows_sys::Win32::{
             ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
             GetSecurityInfo, SE_FILE_OBJECT,
         },
-        CreateWellKnownSid, EqualSid, GetAce, GetSecurityDescriptorControl, GetTokenInformation,
-        IsValidAcl, IsValidSecurityDescriptor, IsValidSid, TokenUser, WinBuiltinAdministratorsSid,
-        WinLocalSystemSid, ACCESS_ALLOWED_ACE, ACE_HEADER, DACL_SECURITY_INFORMATION,
-        OWNER_SECURITY_INFORMATION, PSID, SE_DACL_PROTECTED, TOKEN_QUERY, TOKEN_USER,
-        WELL_KNOWN_SID_TYPE,
+        CheckTokenMembership, CreateWellKnownSid, EqualSid, GetAce, GetSecurityDescriptorControl,
+        GetTokenInformation, IsValidAcl, IsValidSecurityDescriptor, IsValidSid, TokenElevation,
+        TokenOwner, TokenUser, WinBuiltinAdministratorsSid, WinLocalSystemSid, ACCESS_ALLOWED_ACE,
+        ACE_HEADER, DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, PSID, SE_DACL_PROTECTED,
+        TOKEN_ELEVATION, TOKEN_OWNER, TOKEN_QUERY, TOKEN_USER, WELL_KNOWN_SID_TYPE,
     },
     Storage::FileSystem::{FILE_ALL_ACCESS, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ},
     System::Threading::{GetCurrentProcess, OpenProcessToken},
@@ -74,9 +74,18 @@ pub(super) struct CurrentUser {
     // TokenUser embeds a pointer into its own checked, aligned OS buffer.
     _storage: Vec<usize>,
     sid: PSID,
+    managed_admin_default: bool,
 }
 impl CurrentUser {
     pub(super) fn query() -> io::Result<Self> {
+        Self::query_with_managed_base(false)
+    }
+
+    pub(super) fn query_managed() -> io::Result<Self> {
+        Self::query_with_managed_base(true)
+    }
+
+    fn query_with_managed_base(managed: bool) -> io::Result<Self> {
         let mut raw = null_mut();
         // SAFETY: Current process pseudo handle, and an output HANDLE.
         win(unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut raw) })?;
@@ -104,10 +113,20 @@ impl CurrentUser {
         Ok(Self {
             _storage: storage,
             sid,
+            // No alias when any native evidence is unavailable.
+            managed_admin_default: managed && elevated_admin_owner(&token).unwrap_or(false),
         })
     }
 
     pub(super) fn descriptor(&self) -> io::Result<Descriptor> {
+        self.owner_descriptor("")
+    }
+
+    pub(super) fn managed_directory_descriptor(&self) -> io::Result<Descriptor> {
+        self.owner_descriptor("OICI")
+    }
+
+    fn owner_descriptor(&self, inheritance: &str) -> io::Result<Descriptor> {
         let mut raw = null_mut();
         // SAFETY: Valid SID retained by CurrentUser; conversion allocates a bounded SID string.
         win(unsafe { ConvertSidToStringSidW(self.sid, &mut raw) })?;
@@ -121,33 +140,76 @@ impl CurrentUser {
             .map_err(|_| denied("invalid Windows owner SID"))?;
         // O sets the actual owner, D:P disables inherited access. Only the
         // current native SID receives an ACE; children get descriptors afresh.
-        let sddl = wide(OsStr::new(&format!("O:{sid}D:P(A;;FA;;;{sid})")))?;
+        let sddl = wide(OsStr::new(&format!(
+            "O:{sid}D:P(A;{inheritance};FA;;;{sid})"
+        )))?;
         Descriptor::from_wide(&sddl)
     }
 
     pub(super) fn verify_handle(&self, handle: HANDLE, private: bool) -> io::Result<()> {
-        let mut result = null_mut();
-        // SAFETY: Handle is still owned by caller. Returned descriptor owns ACL and SID.
-        let status = unsafe {
-            GetSecurityInfo(
-                handle,
-                SE_FILE_OBJECT,
-                OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
-                null_mut(),
-                null_mut(),
-                null_mut(),
-                null_mut(),
-                &mut result,
-            )
-        };
-        let descriptor = Descriptor(Local(result));
-        if status != 0 {
-            return Err(Error::from_raw_os_error(status as i32));
-        }
-        self.verify_descriptor(&descriptor, private)
+        self.verify_handle_as(handle, private.then_some(0), false)
     }
 
-    fn verify_descriptor(&self, descriptor: &Descriptor, private: bool) -> io::Result<()> {
+    pub(super) fn verify_managed_base(&self, handle: HANDLE) -> io::Result<()> {
+        self.verify_handle_as(handle, None, self.managed_admin_default)
+    }
+
+    pub(super) fn verify_new_managed_directory(&self, handle: HANDLE) -> io::Result<()> {
+        // CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE; no inherited ACE.
+        self.verify_handle_as(handle, Some(3), false)
+    }
+
+    fn verify_handle_as(
+        &self,
+        handle: HANDLE,
+        owner_only_flags: Option<u8>,
+        managed_admin_default: bool,
+    ) -> io::Result<()> {
+        let descriptor = descriptor_from_handle(handle)?;
+        self.verify_descriptor(&descriptor, owner_only_flags, managed_admin_default)
+    }
+
+    #[cfg(test)]
+    pub(super) fn verify_inherited_model_ace(&self, handle: HANDLE) -> io::Result<()> {
+        use windows_sys::Win32::Security::{GetSecurityDescriptorDacl, INHERITED_ACE};
+        let descriptor = descriptor_from_handle(handle)?;
+        let mut found = 0;
+        let mut acl = null_mut();
+        let mut ignored = 0;
+        win(unsafe {
+            GetSecurityDescriptorDacl(descriptor.0 .0, &mut found, &mut acl, &mut ignored)
+        })?;
+        check(
+            found != 0
+                && !acl.is_null()
+                && unsafe { IsValidAcl(acl) } != 0
+                && unsafe { (*acl).AceCount } == 1,
+            "expected one inherited model ACE",
+        )?;
+        let mut entry = null_mut();
+        win(unsafe { GetAce(acl, 0, &mut entry) })?;
+        let header = unsafe { &*entry.cast::<ACE_HEADER>() };
+        check(
+            header.AceType == ALLOW_ACE
+                && u32::from(header.AceFlags) & INHERITED_ACE != 0
+                && usize::from(header.AceSize) >= std::mem::size_of::<ACCESS_ALLOWED_ACE>(),
+            "model ACE did not inherit an allow rule",
+        )?;
+        let allow = unsafe { &*entry.cast::<ACCESS_ALLOWED_ACE>() };
+        let account = std::ptr::from_ref(&allow.SidStart).cast_mut().cast();
+        check(
+            allow.Mask == PRIVATE_RIGHTS && same(self.sid, account),
+            "inherited model ACE is not full access for TokenUser",
+        )
+    }
+
+    fn verify_descriptor(
+        &self,
+        descriptor: &Descriptor,
+        owner_only_flags: Option<u8>,
+        managed_admin_default: bool,
+    ) -> io::Result<()> {
+        let private = owner_only_flags.is_some();
         use windows_sys::Win32::Security::{GetSecurityDescriptorDacl, GetSecurityDescriptorOwner};
         let sd = descriptor.0 .0;
         check(
@@ -157,8 +219,14 @@ impl CurrentUser {
         let mut owner = null_mut();
         let mut ignored = 0;
         win(unsafe { GetSecurityDescriptorOwner(sd, &mut owner, &mut ignored) })?;
+        let admins = KnownSid::new(WinBuiltinAdministratorsSid)?;
         check(
-            same(self.sid, owner),
+            owner_matches(
+                same(self.sid, owner),
+                private,
+                managed_admin_default,
+                same(admins.ptr(), owner),
+            ),
             "Windows credential or directory has a different owner",
         )?;
         let mut control = 0;
@@ -178,7 +246,6 @@ impl CurrentUser {
             "Windows credential has no valid discretionary ACL",
         )?;
         let system = KnownSid::new(WinLocalSystemSid)?;
-        let admins = KnownSid::new(WinBuiltinAdministratorsSid)?;
         let count = unsafe { (*acl).AceCount };
         if private {
             check(count == 1, "Windows credential ACL is not owner-only")?;
@@ -206,9 +273,11 @@ impl CurrentUser {
                 "Windows credential ACL SID exceeds its ACE",
             )?;
             let account = sid.cast();
-            if private {
+            if let Some(expected_flags) = owner_only_flags {
                 check(
-                    header.AceFlags == 0 && same(self.sid, account) && allow.Mask == PRIVATE_RIGHTS,
+                    header.AceFlags == expected_flags
+                        && same(self.sid, account)
+                        && allow.Mask == PRIVATE_RIGHTS,
                     "Windows credential ACL is not protected owner-only access",
                 )?;
             } else {
@@ -225,6 +294,94 @@ impl CurrentUser {
         }
         Ok(())
     }
+}
+
+fn descriptor_from_handle(handle: HANDLE) -> io::Result<Descriptor> {
+    let mut result = null_mut();
+    // SAFETY: The handle is owned by the caller. The returned descriptor owns its ACL and SID.
+    let status = unsafe {
+        GetSecurityInfo(
+            handle,
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+            null_mut(),
+            null_mut(),
+            null_mut(),
+            null_mut(),
+            &mut result,
+        )
+    };
+    let descriptor = Descriptor(Local(result));
+    if status != 0 {
+        return Err(Error::from_raw_os_error(status as i32));
+    }
+    Ok(descriptor)
+}
+
+fn owner_matches(
+    current_user: bool,
+    strict: bool,
+    elevated_default_admin: bool,
+    admin: bool,
+) -> bool {
+    current_user || (!strict && elevated_default_admin && admin)
+}
+
+fn elevated_admin_owner(token: &OwnedHandle) -> io::Result<bool> {
+    let mut elevation = TOKEN_ELEVATION::default();
+    let mut len = 0;
+    // SAFETY: Fixed native result in an aligned, initialized value.
+    win(unsafe {
+        GetTokenInformation(
+            token.as_raw_handle(),
+            TokenElevation,
+            std::ptr::from_mut(&mut elevation).cast(),
+            std::mem::size_of::<TOKEN_ELEVATION>() as u32,
+            &mut len,
+        )
+    })?;
+    if len as usize != std::mem::size_of::<TOKEN_ELEVATION>() || elevation.TokenIsElevated == 0 {
+        return Ok(false);
+    }
+    let first =
+        unsafe { GetTokenInformation(token.as_raw_handle(), TokenOwner, null_mut(), 0, &mut len) };
+    let head = std::mem::size_of::<TOKEN_OWNER>();
+    check(
+        first == 0
+            && Error::last_os_error().raw_os_error() == Some(ERROR_INSUFFICIENT_BUFFER as i32)
+            && (head + 8..=4096).contains(&(len as usize)),
+        "cannot query Windows default token owner",
+    )?;
+    let mut storage = vec![0usize; (len as usize).div_ceil(std::mem::size_of::<usize>())];
+    let ptr = storage.as_mut_ptr();
+    let capacity = storage.len() * std::mem::size_of::<usize>();
+    win(unsafe {
+        GetTokenInformation(token.as_raw_handle(), TokenOwner, ptr.cast(), len, &mut len)
+    })?;
+    check(
+        (head + 8..=capacity).contains(&(len as usize)),
+        "invalid Windows default token owner length",
+    )?;
+    let owner = unsafe { (*ptr.cast::<TOKEN_OWNER>()).Owner };
+    // Check the whole SID is inside the native token buffer before using it.
+    let Some(offset) = (owner as usize)
+        .checked_sub(ptr as usize)
+        .filter(|offset| *offset >= head && *offset <= len as usize - 8)
+    else {
+        return Ok(false);
+    };
+    let count = unsafe { *ptr.cast::<u8>().add(offset + 1) } as usize;
+    if 8 + 4 * count > len as usize - offset {
+        return Ok(false);
+    }
+    let admins = KnownSid::new(WinBuiltinAdministratorsSid)?;
+    if !same(admins.ptr(), owner) {
+        return Ok(false);
+    }
+    let mut enabled = 0;
+    // NULL checks effective membership, not a group present only as deny-only.
+    win(unsafe { CheckTokenMembership(null_mut(), admins.ptr(), &mut enabled) })?;
+    Ok(enabled != 0)
 }
 
 fn same(a: PSID, b: PSID) -> bool {
@@ -270,15 +427,43 @@ mod tests {
     #[test]
     fn acl_denies_everyone_wrong_owner_and_inheritance() -> io::Result<()> {
         let user = CurrentUser::query()?;
-        user.verify_descriptor(&user.descriptor()?, true)?;
+        user.verify_descriptor(&user.descriptor()?, Some(0), false)?;
         for s in [
             "O:SYD:P(A;;FA;;;SY)",
             "O:SYD:P(A;;FA;;;WD)",
             "O:SYD:(A;;FA;;;SY)",
         ] {
             let descriptor = Descriptor::from_wide(&wide(OsStr::new(s))?)?;
-            assert!(user.verify_descriptor(&descriptor, true).is_err());
+            assert!(user.verify_descriptor(&descriptor, Some(0), false).is_err());
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod managed_owner_policy_tests {
+    use super::*;
+
+    #[test]
+    fn modeled_legacy_owner_keeps_all_existing_acl_rules() -> io::Result<()> {
+        let user = CurrentUser::query()?;
+        let legacy = Descriptor::from_wide(&wide(OsStr::new("O:BAD:P(A;;FA;;;BA)"))?)?;
+        let other_writes =
+            Descriptor::from_wide(&wide(OsStr::new("O:BAD:P(A;;FA;;;BA)(A;;FA;;;WD)"))?)?;
+        assert!(user.verify_descriptor(&legacy, None, false).is_err());
+        user.verify_descriptor(&legacy, None, true)?;
+        assert!(user.verify_descriptor(&legacy, Some(0), true).is_err());
+        assert!(user.verify_descriptor(&other_writes, None, true).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn only_actual_elevated_admin_owner_is_eligible_for_a_managed_base() {
+        assert!(owner_matches(true, false, false, false));
+        assert!(owner_matches(true, true, false, false));
+        assert!(owner_matches(false, false, true, true));
+        assert!(!owner_matches(false, false, false, true));
+        assert!(!owner_matches(false, false, true, false));
+        assert!(!owner_matches(false, true, true, true));
     }
 }

@@ -27,7 +27,14 @@ impl OwnedAssets {
         let root = embedding::runtime_owned_namespace(installation, profile)?;
         let runtime = installation.join("runtime");
         let parent = runtime.join("model-assets-v1");
+        #[cfg(windows)]
+        if create {
+            let key = root.file_name().and_then(std::ffi::OsStr::to_str)
+                .ok_or_else(|| anyhow::anyhow!("invalid managed profile key"))?;
+            respire_spawn::owner_credential::provision_model_namespace(installation, key)?;
+        }
         for directory in [&runtime, &parent, &root] {
+            #[cfg(not(windows))]
             if create {
                 match fs::create_dir(directory) {
                     Ok(()) => (),

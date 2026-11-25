@@ -33,8 +33,8 @@ pub fn same_model_file(left: &File, right: &File) -> io::Result<bool> {
 impl ModelStage {
     pub fn create(base: &Path, name: &str) -> io::Result<Self> {
         let base = pinned_base_with_sharing(base, FILE_SHARE_READ | FILE_SHARE_WRITE, true)?;
-        let user = CurrentUser::query()?;
-        user.verify_handle(base.as_raw_handle(), false)?;
+        let user = CurrentUser::query_managed()?;
+        user.verify_managed_base(base.as_raw_handle())?;
         super::model_removal::require_no_recovery(base.as_raw_handle())?;
         let descriptor = user.descriptor()?;
         let directory = relative_open(
@@ -107,13 +107,13 @@ impl ModelStage {
         destination: &str,
         verify: impl FnOnce() -> io::Result<()>,
     ) -> io::Result<()> {
-        let user = CurrentUser::query()?;
+        let user = CurrentUser::query_managed()?;
         let current_base = pinned_base_with_sharing(base, SHARE_ALL, true)?;
         let base = self.base.as_raw_handle();
         if identity(base)? != identity(current_base.as_raw_handle())? {
             return Err(denied("managed model namespace identity changed"));
         }
-        user.verify_handle(base, false)?;
+        user.verify_managed_base(base)?;
         super::model_removal::require_no_recovery(base)?;
         let directory = self.directory.as_raw_handle();
         checked_directory(directory)?;
