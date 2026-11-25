@@ -20,12 +20,22 @@ enum ControlEvent {
     ParentRevoked,
 }
 
+mod cold_keygen;
+
 pub(crate) fn run() -> Result<i32> {
+    run_mode(false)
+}
+
+pub(crate) fn run_cold_keygen() -> Result<i32> {
+    run_mode(true)
+}
+
+fn run_mode(cold: bool) -> Result<i32> {
     let progress = Arc::new(Mutex::new(response("")));
     let worker_progress = Arc::clone(&progress);
     let (sent, received) = mpsc::sync_channel(1);
     std::thread::Builder::new().name("control-operation".into()).spawn(move || {
-        let response = execute(&worker_progress, &sent);
+        let response = execute(&worker_progress, &sent, cold);
         let _ = sent.send(ControlEvent::Finished(response));
     })?;
     // Operation lifetime follows the host authorization, not elapsed wall time.
@@ -61,10 +71,14 @@ pub(crate) fn run() -> Result<i32> {
     Ok(response.exit)
 }
 
-fn execute(progress: &Mutex<RpcResponse<ResultEnvelope>>, events: &mpsc::SyncSender<ControlEvent>) -> RpcResponse<ResultEnvelope> {
+fn execute(progress: &Mutex<RpcResponse<ResultEnvelope>>, events: &mpsc::SyncSender<ControlEvent>, cold: bool) -> RpcResponse<ResultEnvelope> {
     let mut response = response("");
     let mut control_ready = false;
-    let result = receive_and_execute(&mut response, &mut control_ready, progress, events);
+    let result = if cold {
+        cold_keygen::execute(&mut response, &mut control_ready, progress, events)
+    } else {
+        receive_and_execute(&mut response, &mut control_ready, progress, events)
+    };
     if let Err((code, message)) = result {
         response.code = Some(code.to_owned());
         let diagnostic = response.error.take().unwrap_or_else(|| message.to_owned());

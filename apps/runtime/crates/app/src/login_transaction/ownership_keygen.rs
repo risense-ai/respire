@@ -9,15 +9,28 @@ pub struct AuthOwnership {
 
 impl AuthOwnership {
     pub fn acquire(root: &Path, profile: &Path) -> Result<Self> {
+        Self::acquire_inner(root, profile, false)
+    }
+
+    pub fn try_acquire(root: &Path, profile: &Path) -> Result<Self> {
+        Self::acquire_inner(root, profile, true)
+    }
+
+    fn acquire_inner(root: &Path, profile: &Path, immediate: bool) -> Result<Self> {
         let root = root.canonicalize()?;
         let profile = profile.canonicalize()?;
         ensure!(root == crate::service::main_data_dir().canonicalize()?
             && profile == crate::service::data_dir().canonicalize()?, "auth profile changed");
         let wait = std::time::Duration::from_secs(1);
-        let root_lock = crate::lock::LibraryLock::acquire(&root, wait)?;
+        let lock = |directory: &Path| if immediate {
+            crate::lock::LibraryLock::try_acquire(directory)
+        } else {
+            crate::lock::LibraryLock::acquire(directory, wait)
+        };
+        let root_lock = lock(&root)?;
         let profile_lock = if root == profile { None }
-            else { Some(crate::lock::LibraryLock::acquire(&profile, wait)?) };
-        let journal_lock = auth_journal_lock()?;
+            else { Some(lock(&profile)?) };
+        let journal_lock = auth_journal_lock_with_wait(if immediate { std::time::Duration::ZERO } else { wait })?;
         Ok(Self { root, profile, _root_lock: root_lock, _profile_lock: profile_lock, _journal_lock: journal_lock })
     }
 
@@ -239,6 +252,17 @@ pub fn control_keygen(
     idempotency_key: &str, force: bool, query_only: bool,
     material: Option<&respire_protocol::HostAuthKeygenMaterial>,
 ) -> Result<HostAuthResult> {
+    let fingerprint = keygen_fingerprint(&ownership.root, &ownership.profile, force)?;
+    control_keygen_with_fingerprint(ownership, identity, operation_id, idempotency_key,
+        force, query_only, material, fingerprint)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn control_keygen_with_fingerprint(
+    ownership: &AuthOwnership, identity: &HostAuthIdentity, operation_id: &str,
+    idempotency_key: &str, force: bool, query_only: bool,
+    material: Option<&respire_protocol::HostAuthKeygenMaterial>, fingerprint: String,
+) -> Result<HostAuthResult> {
     crate::service::require_profile_change_host()?;
     ensure!(query_only || material.is_some(), "keygen mutation requires host-provided key material");
     canonical_operation_id(operation_id)?;
@@ -252,7 +276,6 @@ pub fn control_keygen(
         "recover the owned auth transaction before executing or querying it");
     ensure!(journal.active.is_none(), "interrupted login must be recovered before auth control");
     verify_locked_auth_identity(&ownership.root, &ownership.profile, identity)?;
-    let fingerprint = keygen_fingerprint(&ownership.root, &ownership.profile, force)?;
     if let Some(record) = journal.operations.iter().find(|record|
         record.operation_id == operation_id || (record.root == ownership.root && record.idempotency_key == idempotency_key)) {
         ensure!(record.operation_id == operation_id && record.idempotency_key == idempotency_key

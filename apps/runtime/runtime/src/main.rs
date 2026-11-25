@@ -128,6 +128,13 @@ fn run(boot_token: Option<String>) -> Result<i32> {
         );
         return model_control::run();
     }
+    if std::env::args().nth(1).as_deref() == Some("--host-cold-keygen-internal") {
+        anyhow::ensure!(
+            boot_token.is_none() && std::env::args_os().count() == 2,
+            "private cold keygen accepts no boot token or public runtime arguments"
+        );
+        return host_control::run_cold_keygen();
+    }
     if std::env::args().nth(1).as_deref() == Some("--host-control-internal") {
         anyhow::ensure!(
             boot_token.is_none() && std::env::args_os().count() == 2,
