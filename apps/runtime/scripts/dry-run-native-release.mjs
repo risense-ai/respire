@@ -69,9 +69,9 @@ if (platform === 'linux') {
   run('bash', ['apps/runtime/scripts/prepare-gnu-ort.sh', target, ort], {stdio: 'inherit', env: cleanLoaderEnv});
   ortArchiveSha256 = await hashFile(join(ort, 'onnxruntime.nupkg'));
   // CI may use an absolute build directory to probe debug binaries. Release
-  // images must resolve the shipped SONAME beside the executable instead.
+  // images use the Runtime build.rs sibling lookup; do not add another RPATH.
   Object.assign(buildEnv, {ORT_LIB_PATH: ort, ORT_SKIP_DOWNLOAD: '1', ORT_PREFER_DYNAMIC_LINK: '1',
-    RUSTFLAGS: '-C target-feature=-crt-static -C embed-bitcode=no -C link-arg=-Wl,-rpath,$ORIGIN'});
+    RUSTFLAGS: '-C target-feature=-crt-static -C embed-bitcode=no'});
   delete buildEnv.CARGO_ENCODED_RUSTFLAGS;
 }
 
