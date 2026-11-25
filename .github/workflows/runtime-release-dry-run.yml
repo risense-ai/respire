@@ -1,4 +1,4 @@
-name: Runtime native release dry run
+name: Component native release dry run
 
 on:
   workflow_dispatch:
@@ -9,41 +9,53 @@ on:
       - '.github/workflows/runtime-release-dry-run.yml'
       - 'apps/core/**'
       - 'apps/runtime/**'
-      - 'scripts/component-release-plan.mjs'
+      - 'apps/cli/**'
+      - 'apps/client2/**'
+      - 'packages/runtime-sdk-go/**'
+      - 'scripts/*component*release*.mjs'
 
 permissions:
   contents: read
 
+env:
+  PYTHONUTF8: '1'
+
 concurrency:
-  group: runtime-release-dry-run-${{ github.event.pull_request.number || github.ref }}
+  group: component-release-dry-run-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
-  native:
-    name: ${{ matrix.lane }}
+  eligible:
     if: >-
       github.repository == 'risense-ai/respire' &&
       ((github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
       (github.event_name == 'pull_request' &&
       github.event.pull_request.head.repo.full_name == github.repository &&
       contains(github.event.pull_request.labels.*.name, 'native-release-dry-run')))
+    runs-on: ubuntu-22.04
+    timeout-minutes: 2
+    steps:
+      - run: echo 'Read-only same-repository dry run'
+
+  native:
+    name: Runtime / ${{ matrix.lane }}
+    needs: eligible
     strategy:
       fail-fast: false
       matrix:
         include:
-          - lane: windows-x64
-            runner: windows-2025
-            target: x86_64-pc-windows-msvc
-            image: rsrs-runtime-x86_64-pc-windows-msvc.exe
-          - lane: linux-gnu-x64
-            runner: ubuntu-22.04
-            target: x86_64-unknown-linux-gnu
-            image: rsrs-runtime-x86_64-unknown-linux-gnu
+          - {lane: windows-x64, runner: windows-2025, node_arch: x64, target: x86_64-pc-windows-msvc, image: rsrs-runtime-x86_64-pc-windows-msvc.exe}
+          - {lane: windows-arm64, runner: windows-11-arm, node_arch: arm64, target: aarch64-pc-windows-msvc, image: rsrs-runtime-aarch64-pc-windows-msvc.exe}
+          - {lane: linux-gnu-x64, runner: ubuntu-22.04, node_arch: x64, target: x86_64-unknown-linux-gnu, image: rsrs-runtime-x86_64-unknown-linux-gnu}
+          - {lane: linux-gnu-arm64, runner: ubuntu-22.04-arm, node_arch: arm64, target: aarch64-unknown-linux-gnu, image: rsrs-runtime-aarch64-unknown-linux-gnu}
+          # Native macOS Intel and both Runtime musl profiles still need supported ORT inputs.
+          - {lane: macos-arm64, runner: macos-15, node_arch: arm64, target: aarch64-apple-darwin, image: rsrs-runtime-aarch64-apple-darwin}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 50
     env:
       RUNTIME_COMPONENT_TAG: runtime-v2.0.0-dev.31
       RUNTIME_DRY_RUN_LANE: ${{ matrix.lane }}
+      RUST_HOST: ${{ matrix.target }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -52,8 +64,12 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+          architecture: ${{ matrix.node_arch }}
       - name: Install pinned native Rust
-        run: rustup toolchain install 1.95.0 --profile minimal
+        shell: bash
+        run: |
+          rustup set default-host "$RUST_HOST"
+          rustup toolchain install 1.95.0 --profile minimal
       - name: Build, stage and smoke the reviewed Runtime source
         run: node apps/runtime/scripts/dry-run-native-release.mjs
       - name: Keep the source-bound coverage envelope
@@ -75,3 +91,390 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           retention-days: 3
+
+  cli:
+    name: CLI / ${{ matrix.target }}
+    needs: eligible
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {runner: windows-2025, node_arch: x64, host: x86_64-pc-windows-msvc, target: x86_64-pc-windows-msvc, suffix: '.exe'}
+          - {runner: windows-11-arm, node_arch: arm64, host: aarch64-pc-windows-msvc, target: aarch64-pc-windows-msvc, suffix: '.exe'}
+          - {runner: ubuntu-22.04, node_arch: x64, host: x86_64-unknown-linux-gnu, target: x86_64-unknown-linux-gnu, suffix: ''}
+          - {runner: ubuntu-22.04-arm, node_arch: arm64, host: aarch64-unknown-linux-gnu, target: aarch64-unknown-linux-gnu, suffix: ''}
+          - {runner: ubuntu-22.04, node_arch: x64, host: x86_64-unknown-linux-gnu, target: x86_64-unknown-linux-musl, suffix: ''}
+          - {runner: ubuntu-22.04-arm, node_arch: arm64, host: aarch64-unknown-linux-gnu, target: aarch64-unknown-linux-musl, suffix: ''}
+          - {runner: macos-15-intel, node_arch: x64, host: x86_64-apple-darwin, target: x86_64-apple-darwin, suffix: ''}
+          - {runner: macos-15, node_arch: arm64, host: aarch64-apple-darwin, target: aarch64-apple-darwin, suffix: ''}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 50
+    defaults:
+      run:
+        shell: bash
+        working-directory: apps/cli
+    env:
+      NATIVE_ARCH: ${{ matrix.node_arch }}
+      RUST_HOST: ${{ matrix.host }}
+      CLI_TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          architecture: ${{ matrix.node_arch }}
+      - name: Install pinned native Rust
+        shell: bash
+        run: |
+          rustup set default-host "$RUST_HOST"
+          rustup toolchain install 1.95.0 --profile minimal
+      - name: Build and verify the actual CLI executable
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          node -e 'const a = require("node:assert/strict"); a.equal(process.arch, process.env.NATIVE_ARCH); a.equal(process.env.RUNNER_ARCH.toLowerCase(), process.arch);'
+          test "$(rustc +1.95.0 -vV | tr -d '\r' | sed -n 's/^host: //p')" = "$RUST_HOST"
+          if [[ "$RUNNER_OS" == macOS && "$NATIVE_ARCH" == x64 ]]; then
+            test "$(uname -m)" = x86_64
+            test "$(sysctl -n hw.optional.arm64 2>/dev/null || true)" != 1
+            test "$(sysctl -n sysctl.proc_translated 2>/dev/null || true)" != 1
+          fi
+          if [[ "$CLI_TARGET" == *-linux-musl ]]; then
+            bash scripts/build-linux-musl.sh "$CLI_TARGET"
+          else
+            cargo +1.95.0 build --release --locked -p respire --bin rsrs --target "$CLI_TARGET" --target-dir target/ci
+          fi
+          node npm/scripts/stage-artifacts.mjs "$CLI_TARGET"
+      - name: Retain exact CLI binary and producer receipt
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-${{ matrix.target }}-native-payload-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            apps/cli/dist/rsrs-${{ matrix.target }}${{ matrix.suffix }}
+            apps/cli/dist/cli-build-${{ matrix.target }}.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 2
+
+  npm-dry-run:
+    name: CLI / no-publish packing and byte assembly
+    needs: cli
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    env:
+      CLI_PRODUCER_RUN_ID: ${{ github.run_id }}
+      CLI_PRODUCER_ATTEMPT: ${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Download only this run and attempt's CLI binary pairs
+        uses: actions/download-artifact@v4
+        with:
+          pattern: cli-*-native-payload-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cli-native
+          merge-multiple: true
+      - name: Produce nine real npm tarballs without publishing
+        working-directory: apps/cli
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          node npm/scripts/assemble-artifacts.mjs "$RUNNER_TEMP/cli-native" "$RUNNER_TEMP/cli-bins"
+          node npm/scripts/pack.mjs --root "$RUNNER_TEMP/cli-bins"
+          node npm/scripts/verify-packages.mjs "$RUNNER_TEMP/cli-native" --export-packs "$RUNNER_TEMP/cli-packs"
+          mkdir "$RUNNER_TEMP/cli-npm"
+          cp "$RUNNER_TEMP/cli-packs/"*.tgz "$RUNNER_TEMP/cli-npm/"
+      - name: Verify complete CLI payload and assemble both namespaces locally
+        run: |
+          set -euo pipefail
+          version="$(node -p 'require("./apps/cli/npm/artifact-manifest.json").cliVersion')"
+          node scripts/assemble-component-ci.mjs "cli-v$version" "$RUNNER_TEMP/cli-native" "$RUNNER_TEMP/cli-npm" "$RUNNER_TEMP/cli-assembly"
+      - name: Keep CLI packaging and local assembly evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-assembly-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/cli-assembly/component-release-receipt.json
+            ${{ runner.temp }}/cli-packs/source-version.json
+            ${{ runner.temp }}/cli-packs/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 7
+
+  desktop:
+    name: Client2 / build ${{ matrix.platform }}-${{ matrix.arch }}
+    needs: eligible
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {platform: windows, arch: amd64, node_arch: x64, runner: windows-2025}
+          - {platform: windows, arch: arm64, node_arch: arm64, runner: windows-11-arm}
+          - {platform: darwin, arch: amd64, node_arch: x64, runner: macos-15-intel}
+          - {platform: darwin, arch: arm64, node_arch: arm64, runner: macos-15}
+          - {platform: linux, arch: amd64, node_arch: x64, runner: ubuntu-22.04}
+          - {platform: linux, arch: arm64, node_arch: arm64, runner: ubuntu-22.04-arm}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    env:
+      CANDIDATE_VERSION: '2.0.0-dev.13'
+      CLIENT2_PLATFORM: ${{ matrix.platform }}
+      CLIENT2_ARCH: ${{ matrix.arch }}
+      NATIVE_ARCH: ${{ matrix.node_arch }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          architecture: ${{ matrix.node_arch }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: apps/client2/go.mod
+          architecture: ${{ matrix.node_arch }}
+          cache-dependency-path: |
+            apps/client2/go.sum
+            packages/runtime-sdk-go/go.sum
+      - name: Require exact checkout and native desktop toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          node --input-type=commonjs <<'NODE'
+          const a = require('node:assert/strict');
+          const e = process.env;
+          a.equal(process.arch, e.NATIVE_ARCH);
+          a.equal(process.arch, e.RUNNER_ARCH.toLowerCase());
+          a.equal(process.platform, e.CLIENT2_PLATFORM === 'windows' ? 'win32' : e.CLIENT2_PLATFORM);
+          const source = require('node:fs').readFileSync('apps/client2/main.go', 'utf8');
+          a.equal(/^var version = "([^"]+)"\r?$/m.exec(source)?.[1], e.CANDIDATE_VERSION);
+          NODE
+          test "$(go env GOHOSTARCH | tr -d '\r')" = "$CLIENT2_ARCH"
+          test "$(go env GOHOSTOS | tr -d '\r')" = "$CLIENT2_PLATFORM"
+          if [[ "$CLIENT2_PLATFORM" == darwin && "$NATIVE_ARCH" == x64 ]]; then
+            test "$(uname -m)" = x86_64
+            test "$(sysctl -n hw.optional.arm64 2>/dev/null || true)" != 1
+            test "$(sysctl -n sysctl.proc_translated 2>/dev/null || true)" != 1
+          fi
+      - name: Install native Linux desktop build dependencies
+        if: matrix.platform == 'linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libgtk-3-dev libwebkit2gtk-4.1-dev libx11-dev fontconfig
+      - name: Generate canonical Runtime Go SDK
+        working-directory: packages/runtime-sdk-go
+        run: go generate ./...
+      - name: Build Windows executable and installer
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        working-directory: apps/client2
+        run: |
+          ./scripts/build.ps1 -Version $env:CANDIDATE_VERSION -Arch $env:CLIENT2_ARCH
+          choco install innosetup -y --no-progress
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./scripts/build-installer.ps1 -Version $env:CANDIDATE_VERSION -Arch $env:CLIENT2_ARCH
+      - name: Build Unix archive and native Apple ARM64 DMG
+        if: matrix.platform != 'windows'
+        shell: bash
+        working-directory: apps/client2
+        run: |
+          set -euo pipefail
+          bash scripts/build.sh "$CANDIDATE_VERSION" "$CLIENT2_ARCH"
+          if [[ "$CLIENT2_PLATFORM-$CLIENT2_ARCH" == darwin-arm64 ]]; then
+            bash scripts/build-dmg.sh
+          fi
+      - name: Keep native package bytes for this run and attempt
+        uses: actions/upload-artifact@v4
+        with:
+          name: client2-${{ matrix.platform }}-${{ matrix.arch }}-native-payload-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            apps/client2/dist/respire-${{ matrix.platform }}-${{ matrix.arch }}.*
+            apps/client2/dist/respire-${{ matrix.platform }}-${{ matrix.arch }}-setup.exe
+            apps/client2/dist/SHA256SUMS
+            apps/client2/dist/LICENSE.txt
+            apps/client2/dist/THIRD_PARTY_NOTICES.txt
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 2
+
+  desktop-candidate:
+    name: Client2 / bind all nine exact package bytes
+    needs: desktop
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    env:
+      CANDIDATE_VERSION: '2.0.0-dev.13'
+      CANDIDATE_SOURCE: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Download only this run and attempt's six Client2 payloads
+        uses: actions/download-artifact@v4
+        with:
+          pattern: client2-*-native-payload-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/client2-native
+      - name: Assemble exact package set without publishing
+        working-directory: apps/client2
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SOURCE"
+          native="$RUNNER_TEMP/client2-native"
+          candidate="$RUNNER_TEMP/client2-candidate"
+          mkdir "$candidate"
+          test "$(find "$native" -mindepth 1 -maxdepth 1 -type d | wc -l)" -eq 6
+          for target in windows-amd64 windows-arm64 darwin-amd64 darwin-arm64 linux-amd64 linux-arm64; do
+            input="$native/client2-$target-native-payload-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+            case "$target" in
+              windows-*) names=("respire-$target.exe" "respire-$target-setup.exe");;
+              darwin-amd64) names=("respire-$target.zip");;
+              darwin-arm64) names=("respire-$target.zip" "respire-$target.dmg");;
+              linux-*) names=("respire-$target.tar.gz");;
+            esac
+            test "$(find "$input" -mindepth 1 -maxdepth 1 | wc -l)" -eq "$((${#names[@]} + 3))"
+            cmp "$input/LICENSE.txt" LICENSE
+            cmp "$input/THIRD_PARTY_NOTICES.txt" internal/desktop/frontend/notices.txt
+            for name in "${names[@]}"; do
+              test -f "$input/$name" && test ! -L "$input/$name"
+              test ! -e "$candidate/$name"
+              cp "$input/$name" "$candidate/"
+            done
+            diff -u <(LC_ALL=C sort "$input/SHA256SUMS") <(cd "$input" && sha256sum -- "${names[@]}" | LC_ALL=C sort)
+          done
+          cp LICENSE "$candidate/LICENSE.txt"
+          cp internal/desktop/frontend/notices.txt "$candidate/THIRD_PARTY_NOTICES.txt"
+          (cd "$candidate" && sha256sum respire-* > SHA256SUMS)
+          printf 'Client2 %s native packaging dry run for source %s. This is not a release.\n' "$CANDIDATE_VERSION" "$CANDIDATE_SOURCE" > "$candidate/release-notes.md"
+          python scripts/update-manifest.py "v$CANDIDATE_VERSION" "$candidate" "$candidate/release-notes.md" "$candidate/client-updates.json" 6
+          python scripts/desktop-candidate.py manifest --root "$candidate"
+      - name: Keep source-bound Client2 candidate for six native checks
+        uses: actions/upload-artifact@v4
+        with:
+          name: client2-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/client2-candidate/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 2
+
+  desktop-package-check:
+    name: Client2 / smoke ${{ matrix.target }}
+    needs: desktop-candidate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {target: windows-amd64, node_arch: x64, runner: windows-2025}
+          - {target: windows-arm64, node_arch: arm64, runner: windows-11-arm}
+          - {target: darwin-amd64, node_arch: x64, runner: macos-15-intel}
+          - {target: darwin-arm64, node_arch: arm64, runner: macos-15}
+          - {target: linux-amd64, node_arch: x64, runner: ubuntu-22.04}
+          - {target: linux-arm64, node_arch: arm64, runner: ubuntu-22.04-arm}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    env:
+      CANDIDATE_VERSION: '2.0.0-dev.13'
+      CANDIDATE_SOURCE: ${{ github.sha }}
+      CLIENT2_TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          architecture: ${{ matrix.node_arch }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          architecture: ${{ matrix.node_arch }}
+      - name: Install native Linux desktop smoke dependencies
+        if: startsWith(matrix.target, 'linux-')
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libgtk-3-dev libwebkit2gtk-4.1-dev libx11-dev fontconfig
+      - name: Download source-bound candidate from this run and attempt
+        uses: actions/download-artifact@v4
+        with:
+          name: client2-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/client2-candidate
+      - name: Check native products before recording receipt
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SOURCE"
+          candidate="$RUNNER_TEMP/client2-candidate"
+          node apps/client2/scripts/check-native-desktop-package.mjs "$candidate" "$CLIENT2_TARGET" "$CANDIDATE_VERSION"
+          python apps/client2/scripts/desktop-candidate.py receipt --root "$candidate" \
+            --target "$CLIENT2_TARGET" --receipts "$RUNNER_TEMP/client2-checks"
+      - name: Keep exact Client2 native receipt
+        uses: actions/upload-artifact@v4
+        with:
+          name: client2-${{ matrix.target }}-native-receipt-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/client2-checks/${{ matrix.target }}.json
+          if-no-files-found: error
+          retention-days: 7
+
+  desktop-assembly:
+    name: Client2 / seal receipts and assemble both namespaces locally
+    needs: desktop-package-check
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    env:
+      CANDIDATE_VERSION: '2.0.0-dev.13'
+      CANDIDATE_SOURCE: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/download-artifact@v4
+        with:
+          name: client2-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/client2-candidate
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: client2-*-native-receipt-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/client2-checks
+          merge-multiple: true
+      - name: Seal six native checks and verify exact deployable bytes locally
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SOURCE"
+          candidate="$RUNNER_TEMP/client2-candidate"
+          payload="$RUNNER_TEMP/client2-payload"
+          python apps/client2/scripts/desktop-candidate.py seal --root "$candidate" --receipts "$RUNNER_TEMP/client2-checks"
+          mkdir "$payload"
+          for file in "$candidate"/*; do
+            case "$(basename "$file")" in
+              candidate.json|package-checks.json) ;;
+              *) cp "$file" "$payload/";;
+            esac
+          done
+          node scripts/assemble-component-ci.mjs "client2-v$CANDIDATE_VERSION" "$payload" - "$RUNNER_TEMP/client2-assembly"
+      - name: Keep Client2 native and local assembly evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: client2-assembly-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/client2-candidate/candidate.json
+            ${{ runner.temp }}/client2-candidate/package-checks.json
+            ${{ runner.temp }}/client2-assembly/component-release-receipt.json
+          if-no-files-found: error
+          retention-days: 7
