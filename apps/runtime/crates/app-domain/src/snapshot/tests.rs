@@ -166,6 +166,8 @@
         Ok(())
     }
 include!("tests/backup_integrity.rs");
+#[cfg(target_os = "linux")]
+include!("tests/archive_offline_boundary.rs");
 include!("tests/rollback.rs");
 include!("tests/interruption.rs");
 include!("tests/corruption.rs");
