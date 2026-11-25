@@ -254,12 +254,27 @@ impl RuntimeLibrary<'_> {
         Ok(Some(entry))
     }
 
+    pub fn create_device_space_memory(
+        &self, store: &crate::transport::local::LocalStore, entry: &crate::MemoryEntry,
+        admit: impl FnOnce() -> bool,
+    ) -> Result<()> {
+        self.commit_memory_if(store, entry, &entry.user, None, admit)
+    }
+
     fn commit_memory(&self, store: &crate::transport::local::LocalStore,
         entry: &crate::MemoryEntry, storage_user: &str, previous: Option<&str>) -> Result<()>
     {
+        self.commit_memory_if(store, entry, storage_user, previous, || true)
+    }
+
+    fn commit_memory_if(&self, store: &crate::transport::local::LocalStore,
+        entry: &crate::MemoryEntry, storage_user: &str, previous: Option<&str>,
+        admit: impl FnOnce() -> bool,
+    ) -> Result<()> {
         crate::metadata_gate::ensure_write(store, entry)?;
         crate::metadata_gate::ensure_sources(self.0, store, entry)?;
         let sealed = crate::MemoryEngine::seal_for_indexing(self.0, entry, storage_user)?;
+        anyhow::ensure!(admit(), "memory commit was not admitted");
         anyhow::ensure!(store.put_checked(&sealed, previous)?, "memory write was not committed");
         Ok(())
     }

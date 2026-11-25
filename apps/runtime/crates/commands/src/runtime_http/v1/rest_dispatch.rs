@@ -15,7 +15,8 @@ use super::{owner_control, transport, transport::RestScope, Problem, V1Result};
 
 #[path = "device_space_publication.rs"]
 mod device_space_publication;
-use device_space_publication::{await_publication, Admission, COMMIT_WAIT};
+pub(super) use device_space_publication::Admission;
+use device_space_publication::{await_publication, COMMIT_WAIT};
 
 struct AbandonPreparation {
     admission: Arc<Admission>,
@@ -37,6 +38,25 @@ where
     T: Send + 'static,
     F: for<'a> FnOnce(&LibraryContext<'a>, &Admission) -> V1Result<T> + Send + 'static,
 {
+    submit_publication(scope, run, device_space_publication::outcome_unknown).await
+}
+
+pub(super) async fn submit_device_space_memory<T, F>(scope: RestScope, run: F) -> V1Result<T>
+where
+    T: Send + 'static,
+    F: for<'a> FnOnce(&LibraryContext<'a>, &Admission) -> V1Result<T> + Send + 'static,
+{
+    submit_publication(scope, run, || Problem::new(
+        StatusCode::CONFLICT, "memory_create_outcome_unknown",
+        "Memory creation outcome is unknown; do not retry automatically",
+    )).await
+}
+
+async fn submit_publication<T, F>(scope: RestScope, run: F, unknown: fn() -> Problem) -> V1Result<T>
+where
+    T: Send + 'static,
+    F: for<'a> FnOnce(&LibraryContext<'a>, &Admission) -> V1Result<T> + Send + 'static,
+{
     let deadline = Instant::now() + REQUEST_WAIT;
     let cancelled = Arc::new(AtomicBool::new(false));
     let admission = Arc::new(Admission::default());
@@ -48,7 +68,7 @@ where
     let receiver = enqueue(scope, Access::Write, deadline, cancelled, move |ctx| {
         run(ctx, &worker)
     })?;
-    await_publication(&admission, receiver, deadline, COMMIT_WAIT).await
+    await_publication(&admission, receiver, deadline, COMMIT_WAIT, unknown).await
 }
 
 const REQUEST_WAIT: Duration = Duration::from_secs(2);

@@ -34,6 +34,20 @@ impl LibraryLock {
         Ok(Self { _conn: conn })
     }
 
+    /// A published local space already has a lock database; never create or
+    /// follow a replacement path while resolving explicit device-space work.
+    pub(super) fn try_acquire_device_space(dir: &Path) -> Result<Self> {
+        use rusqlite::OpenFlags;
+        let conn = Connection::open_with_flags(
+            dir.join("lock.db"),
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX
+                | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )?;
+        conn.busy_timeout(Duration::ZERO)?;
+        conn.execute_batch("BEGIN EXCLUSIVE;")?;
+        Ok(Self { _conn: conn })
+    }
+
     /// Take the library lock and hold it until this object (this process) ends.
     /// While occupied, print wait messages on stderr (do not pollute json stdout)
     /// and retry every 300ms. Give up after max_wait so a stuck holder cannot block forever.
@@ -79,6 +93,25 @@ impl LibraryLock {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn device_space_lock_requires_an_existing_regular_database() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let path = root.path().join("lock.db");
+        assert!(LibraryLock::try_acquire_device_space(root.path()).is_err());
+        assert!(!path.exists());
+        std::fs::create_dir(&path)?;
+        assert!(LibraryLock::try_acquire_device_space(root.path()).is_err());
+        assert!(path.is_dir());
+
+        let other = tempfile::tempdir()?;
+        let ordinary = LibraryLock::try_acquire(other.path())?;
+        assert!(LibraryLock::try_acquire_device_space(other.path()).is_err());
+        drop(ordinary);
+        let scoped = LibraryLock::try_acquire_device_space(other.path())?;
+        assert!(scoped.protects(other.path())?);
+        Ok(())
+    }
 
     #[test]
     fn legacy_exclusive_transaction_and_runtime_ownership_exclude_each_other() -> Result<()> {
