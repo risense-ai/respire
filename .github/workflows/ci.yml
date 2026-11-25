@@ -135,6 +135,14 @@ jobs:
           node --test scripts/check-line-ratchet.test.mjs
           node scripts/check-line-ratchet.mjs --base "$base"
 
+          rustup toolchain install 1.95.0 --profile minimal
+          export CARGO_TARGET_DIR="$RUNNER_TEMP/respire-panic-guard"
+          cargo +1.95.0 test --locked --manifest-path scripts/rust-panic-guard/Cargo.toml
+          cargo +1.95.0 build --locked --manifest-path scripts/rust-panic-guard/Cargo.toml
+          export RESPIRE_RUST_PANIC_PARSER="$CARGO_TARGET_DIR/debug/respire-rust-panic-guard"
+          node --test scripts/check-rust-panic.test.mjs
+          node scripts/check-rust-panic.mjs --base "$base" --head "$(git rev-parse HEAD)" --parser "$RESPIRE_RUST_PANIC_PARSER"
+
   contract-check:
     name: contract-check
     needs: detect-changes
