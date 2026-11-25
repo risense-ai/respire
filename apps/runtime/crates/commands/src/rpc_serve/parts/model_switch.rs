@@ -10,12 +10,15 @@ pub(crate) struct ModelSwitchReservation {
     _admission: AdmissionGuard,
 }
 
+static DETACHED_MODEL_READS: AtomicBool = AtomicBool::new(false);
+
 pub(crate) fn model_switch_running() -> bool {
     PROFILE_SWITCH_RUNNING.load(Ordering::Acquire)
 }
 
 impl Drop for ModelSwitchReservation {
     fn drop(&mut self) {
+        DETACHED_MODEL_READS.store(false, Ordering::Release);
         PROFILE_SWITCH_RUNNING.store(false, Ordering::Release);
     }
 }
@@ -44,6 +47,10 @@ impl ModelSwitchReservation {
             operation,
             _admission: admission,
         }))
+    }
+
+    pub(crate) fn keep_incumbent_recall_live(&self, active: bool) {
+        DETACHED_MODEL_READS.store(active, Ordering::Release);
     }
 
     pub(crate) fn enter(&self) {

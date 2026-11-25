@@ -50,8 +50,8 @@ pub fn execute<T: DeserializeOwned>(operation: &str, mut payload: Value) -> Resu
     let selection = crate::profiles::current()?;
     if let Some(selection) = selection.as_ref().filter(|s| s.backend_profile.backend == "host_transport") {
         let mut transport = |request: &Value| crate::profiles::transport(request, selection);
-        execute_inner(operation, &mut payload, Some(&mut transport))
-    } else { execute_inner(operation, &mut payload, None) }
+        execute_inner(operation, &mut payload, Some(&mut transport), true)
+    } else { execute_inner(operation, &mut payload, None, true) }
 }
 
 pub fn execute_with_transport<T: DeserializeOwned>(operation: &str, mut payload: Value,
@@ -62,7 +62,7 @@ pub fn execute_with_transport<T: DeserializeOwned>(operation: &str, mut payload:
             crate::profiles::transport(request, selection.as_ref().context("embedding selection missing")?)
         } else { transport(request) }
     };
-    execute_inner(operation, &mut payload, Some(&mut combined))
+    execute_inner(operation, &mut payload, Some(&mut combined), true)
 }
 
 // The parent still submits one request with one worker deadline. Bound only
@@ -127,8 +127,15 @@ fn execute_index_batches(payload: &mut Value,
     })
 }
 
+/// Native candidate preparation returns opaque bytes, not an installed
+/// artifact locator and not a write to foreground index storage.
+pub(crate) fn prepare_candidate(mut payload: Value) -> Result<Value> {
+    anyhow::ensure!(!crate::worker::enabled(), "candidate preparation requires isolated worker");
+    execute_inner("prepare", &mut payload, None, false)
+}
+
 fn execute_inner<T: DeserializeOwned>(operation: &str, payload: &mut Value,
-    transport: Option<&mut dyn FnMut(&Value) -> Result<Value>>) -> Result<T> {
+    transport: Option<&mut dyn FnMut(&Value) -> Result<Value>>, persist_prepare: bool) -> Result<T> {
     let selected = crate::profiles::current()?;
     if let Some(selection) = selected.as_ref() {
         if !matches!(operation,"memory_evidence_evaluate" | "memory_metadata_validate" | "classify_business") && payload.get("config").is_none() && payload["model"].as_str() == Some(&selection.model) {
@@ -192,7 +199,7 @@ fn execute_inner<T: DeserializeOwned>(operation: &str, payload: &mut Value,
             None => core.call(operation, payload)?,
         };
         if reset { crate::host::reset_model_cache()?; }
-        if operation == "prepare" { crate::host::persist_prepared(&mut result)?; }
+        if operation == "prepare" && persist_prepare { crate::host::persist_prepared(&mut result)?; }
         serde_json::from_value(result).context("invalid Core business response")
     })
 }

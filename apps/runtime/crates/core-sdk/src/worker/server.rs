@@ -19,6 +19,8 @@ mod index_scope_tests;
 /// Hidden binary entry. No App, profile migration, store, or LibraryLock is opened.
 pub fn run() -> Result<()> {
     crate::bge::m3_model_dir()?;
+    let candidate = std::env::var_os("RESPIRE_PRIVATE_CORE_CANDIDATE").as_deref()
+        == Some(std::ffi::OsStr::new("1"));
     let output = Arc::new(Mutex::new(crate::ffi::worker_stdout()?));
     let callbacks: CallbackMap = Arc::new(Mutex::new(HashMap::new()));
     let (ordinary_tx, ordinary_rx) = mpsc::channel::<Value>();
@@ -48,7 +50,10 @@ pub fn run() -> Result<()> {
                     break;
                 };
                 let id = frame["id"].as_u64().unwrap_or(u64::MAX);
-                let root = frame.get_mut("index_root").map(Value::take).unwrap_or(Value::Null);
+                let root = frame
+                    .get_mut("index_root")
+                    .map(Value::take)
+                    .unwrap_or(Value::Null);
                 let result = with_frame_index_root(root, || -> Result<Value> {
                     let operation_value = frame["operation"].take();
                     let operation = operation_value
@@ -97,8 +102,29 @@ pub fn run() -> Result<()> {
                         .cloned()
                         .map(serde_json::from_value::<crate::profiles::Selection>)
                         .transpose()?;
+                    let transport_enabled = frame["transport"].as_bool() == Some(true);
+                    if operation == "candidate_prepare_v1" {
+                        let selection = selection
+                            .filter(|s| {
+                                s.engine == crate::onnx::Engine::Cpu
+                                    && s.backend_profile.backend == "onnx"
+                                    && s.backend_profile.native.is_none()
+                            })
+                            .context(
+                                "candidate preparation requires an explicit local CPU selection",
+                            )?;
+                        anyhow::ensure!(
+                            candidate
+                                && !transport_enabled
+                                && payload["model"].as_str() == Some(selection.model.as_str()),
+                            "candidate preparation not available on this worker"
+                        );
+                        return crate::profiles::scoped(selection, || {
+                            crate::business::prepare_candidate(payload)
+                        });
+                    }
                     let execute = || -> Result<Value> {
-                        if frame["transport"].as_bool() == Some(true) {
+                        if transport_enabled {
                             crate::business::execute_with_transport::<Value>(
                                 operation,
                                 payload,
@@ -121,7 +147,12 @@ pub fn run() -> Result<()> {
                 };
                 let response = ResponseFrame { id, body };
                 if let Ok(mut output) = output.lock() {
-                    if write_frame(&mut *output, &response).is_err() {
+                    let delivery = if candidate {
+                        write_candidate_frame(&mut *output, &response)
+                    } else {
+                        write_frame(&mut *output, &response)
+                    };
+                    if delivery.is_err() {
                         break;
                     }
                 }
@@ -162,7 +193,11 @@ pub fn run() -> Result<()> {
         })?;
     let mut input = std::io::stdin();
     loop {
-        let frame = read_frame(&mut input)?;
+        let frame = if candidate {
+            read_frame_bounded(&mut input, CANDIDATE_FRAME_LIMIT)?
+        } else {
+            read_frame(&mut input)?
+        };
         let id = frame["id"]
             .as_u64()
             .context("Core worker request ID missing")?;

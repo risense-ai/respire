@@ -185,6 +185,31 @@ pub fn update(phase: &str, item: &str, done: u64, total: Option<u64>) -> Result<
     Ok(())
 }
 
+pub(crate) fn switch_checkpoint(task_id: &str, phase: Option<(&str, &str, u64)>) -> Result<()> {
+    let mut slot = CURRENT.lock().map_err(|_| anyhow!("model progress lock poisoned"))?;
+    let progress = slot.as_mut().filter(|progress| progress.id == task_id)
+        .ok_or_else(|| anyhow!("model operation no longer admitted"))?;
+    check_progress(progress)?;
+    if let Some((stage, item, done)) = phase {
+        if progress.phase != stage || progress.done != done {
+            progress.updated = Instant::now();
+        }
+        progress.phase = stage.to_owned();
+        progress.item = item.to_owned();
+        progress.done = done;
+    }
+    Ok(())
+}
+
+pub(crate) fn in_model_operation<T>(action: impl FnOnce() -> T) -> T {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) { TRACKED.set(self.0); }
+    }
+    let _restore = Restore(TRACKED.replace(true));
+    action()
+}
+
 pub fn check() -> Result<()> {
     if TRACKED.get() {
         let slot = CURRENT

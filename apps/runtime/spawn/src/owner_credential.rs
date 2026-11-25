@@ -122,3 +122,10 @@ fn validate_migration_leaf(name: &str) -> io::Result<()> {
 
 #[cfg(windows)]
 pub use windows::restore_stage::PrivateRestoreStage;
+
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+mod model_job;
+#[cfg(windows)]
+pub use windows::model_job::ModelJobRoot;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub use unix::model_job::ModelJobRoot;

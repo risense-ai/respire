@@ -31,6 +31,8 @@ mod conflict_metadata;
 pub use conflict_metadata::{ConflictMetadata, ConflictMetadataState};
 mod grants;
 mod retrieval;
+mod model_switch_source;
+pub use model_switch_source::{ModelSwitchArtifact, ModelSwitchRead, ModelSwitchSourceStamp, ModelSwitchSourceTooLarge, MODEL_SWITCH_MAX_PROMOTION_BYTES, MODEL_SWITCH_MAX_PROMOTION_ROWS, MODEL_SWITCH_MAX_PROMOTION_ROW_BYTES};
 mod resident;
 pub use resident::MemorySourceChanged;
 mod related;

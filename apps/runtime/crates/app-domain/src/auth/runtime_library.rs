@@ -40,6 +40,12 @@ pub fn with_runtime_library<T>(
 pub struct ModelSwitchVault(SessionKeys);
 
 impl RuntimeLibrary<'_> {
+    /// Decrypt one prepared candidate input under the live Runtime vault.
+    /// This returns no key or session context to the isolate.
+    pub fn open_model_switch_row(&self, stored: &crate::StoredMemory) -> Result<crate::MemoryEntry> {
+        crate::MemoryEngine::open(self.0, stored)
+    }
+
     pub fn model_switch_vault(&self) -> ModelSwitchVault {
         ModelSwitchVault(self.0.clone())
     }
