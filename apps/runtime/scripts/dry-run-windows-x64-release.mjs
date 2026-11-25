@@ -2,17 +2,18 @@ import assert from 'node:assert/strict';
 import {execFileSync} from 'node:child_process';
 import {createHash} from 'node:crypto';
 import {constants, closeSync, copyFileSync, createReadStream, mkdirSync, mkdtempSync, openSync,
-  readFileSync, readdirSync, realpathSync, writeFileSync} from 'node:fs';
+  readFileSync, readdirSync, writeFileSync} from 'node:fs';
 import {dirname, isAbsolute, join, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {parseComponentTag} from '../../../scripts/component-release-plan.mjs';
 import {stageRuntimeCargo} from './stage-runtime-cargo.mjs';
+import {nativeRealpath} from './runtime-release-smoke-helpers.mjs';
 
 const target = 'x86_64-pc-windows-msvc';
 const image = `rsrs-runtime-${target}.exe`;
 const archive = `rsrs-runtime-${target}.tar.gz`;
 const reportName = `runtime-build-${target}.json`;
-const root = realpathSync.native(resolve(dirname(fileURLToPath(import.meta.url)), '../../..'));
+const root = nativeRealpath(resolve(dirname(fileURLToPath(import.meta.url)), '../../..'));
 const env = process.env;
 assert.equal(env.GITHUB_ACTIONS, 'true', 'Requires GitHub Actions');
 assert.match(env.GITHUB_WORKFLOW_SHA ?? '', /^[0-9a-f]{40}$/);
@@ -43,7 +44,7 @@ assert.equal(/^version = "([^"]+)"/m.exec(manifest)?.[1], version, 'Dispatch tag
 assert.equal(/\[\[package\]\]\r?\nname = "respire_runtime"\r?\nversion = "([^"]+)"/.exec(lock)?.[1], version,
   'Dispatch tag differs from checked-in Runtime lockfile');
 
-const work = mkdtempSync(join(realpathSync.native(env.RUNNER_TEMP), 'runtime-release-windows-x64-'));
+const work = mkdtempSync(join(nativeRealpath(env.RUNNER_TEMP), 'runtime-release-windows-x64-'));
 const targetDir = join(work, 'cargo-target'), cargoLog = join(work, 'cargo.jsonl');
 mkdirSync(targetDir);
 const descriptor = openSync(cargoLog, 'wx');

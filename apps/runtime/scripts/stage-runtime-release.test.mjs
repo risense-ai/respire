@@ -2,20 +2,21 @@ import assert from 'node:assert/strict';
 import {test} from 'node:test';
 import {createHash} from 'node:crypto';
 import {execFileSync} from 'node:child_process';
-import {copyFileSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, unlinkSync, utimesSync, writeFileSync} from 'node:fs';
+import {copyFileSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, unlinkSync, utimesSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
-import {dirname, join} from 'node:path';
+import {dirname, join, win32} from 'node:path';
 import {gunzipSync} from 'node:zlib';
 import {stageRuntime} from './stage-runtime-release.mjs';
 import {stageRuntimeCargo} from './stage-runtime-cargo.mjs';
-import {archiveTool} from './runtime-release-smoke-helpers.mjs';
+import {archiveTool, nativeRealpath} from './runtime-release-smoke-helpers.mjs';
 
 const hash = value => createHash('sha256').update(value).digest('hex');
 const v = '2.0.0-dev.31';
 const target = 'x86_64-pc-windows-msvc';
 function fixture(t) {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), 'runtime-stage-test-')));
+  const root = nativeRealpath(mkdtempSync(join(tmpdir(), 'runtime-stage-test-')));
   t.after(() => rmSync(root, {recursive: true, force: true}));
+  if (process.platform === 'win32') assert.equal(nativeRealpath(win32.toNamespacedPath(root)), root);
   function file(name, content) {
     const path = join(root, name);
     mkdirSync(dirname(path), {recursive: true});

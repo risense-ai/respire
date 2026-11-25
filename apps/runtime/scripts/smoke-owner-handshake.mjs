@@ -4,14 +4,14 @@ import assert from 'node:assert/strict';
 import {execFileSync, spawn} from 'node:child_process';
 import {createHash, createHmac, randomBytes} from 'node:crypto';
 import {constants, createReadStream, existsSync, fstatSync, lstatSync, mkdirSync,
-  mkdtempSync, openSync, closeSync, readSync, readFileSync, realpathSync, rmSync,
+  mkdtempSync, openSync, closeSync, readSync, readFileSync, rmSync,
   writeFileSync} from 'node:fs';
 import {createServer} from 'node:net';
 import {tmpdir} from 'node:os';
 import {basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep, win32} from 'node:path';
 import {setTimeout as delay} from 'node:timers/promises';
 import {fileURLToPath} from 'node:url';
-import {assertDrained, assertProtocol, assertSamePath, digest, normalizedPath, syntheticSession}
+import {assertDrained, assertProtocol, assertSamePath, digest, nativeRealpath, syntheticSession}
   from './runtime-release-smoke-helpers.mjs';
 import {runRuntimeMcpProbe} from './runtime-mcp-probe.mjs';
 
@@ -76,11 +76,9 @@ async function binaryDigest(file) {
 }
 
 function canonicalPath(path, stage = 'fixture path') {
-  if (process.platform !== 'win32') return realpathSync(path);
+  if (process.platform !== 'win32') return nativeRealpath(path);
   try {
-    // Rust emits verbatim drive paths in Runtime receipts. In Node 22, the
-    // JavaScript walker can lstat a drive-relative root; use the OS resolver.
-    return normalizedPath(realpathSync.native(normalizedPath(path)));
+    return nativeRealpath(path);
   } catch (error) {
     throw new Error('Windows path canonicalization failed at ' + stage + ' (' + error.code + ')');
   }
