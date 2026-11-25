@@ -14,6 +14,8 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+mod install_http;
+
 const FRAME: u64 = 4096;
 const IDENTITY_FRAME: u64 = 64 * 1024;
 
@@ -32,6 +34,11 @@ struct Request {
 enum Operation<'a> {
     Remove,
     Install(&'a mut dyn Read),
+}
+
+enum NativeReply {
+    Remove(ureq::Response),
+    Install(u16, Value),
 }
 
 pub(crate) fn run() -> Result<i32> {
@@ -77,7 +84,8 @@ fn run_scoped(request: Request, operation: Operation<'_>) -> Result<i32> {
         .timeout_connect(Duration::from_secs(2))
         .timeout(Duration::from_secs(155))
         .build();
-    let base = net_rpc::rpc_base_url();
+    let port = net_rpc::rpc_port();
+    let base = format!("http://{}:{port}", net_rpc::DEFAULT_RPC_HOST);
     let endpoint = rpc_worker::endpoint_path();
     let published = super::startup_identity::read_private_file(&endpoint)?
         .context("Runtime endpoint receipt is unavailable")?;
@@ -111,7 +119,7 @@ fn run_scoped(request: Request, operation: Operation<'_>) -> Result<i32> {
             == respire_app::service::main_data_dir().canonicalize()?
             && Path::new(&observed.data_dir).canonicalize()?
                 == respire_app::service::data_dir().canonicalize()?
-            && net_rpc::pid_listening_on(net_rpc::rpc_port()) == Some(request.pid)
+            && net_rpc::pid_listening_on(port) == Some(request.pid)
             && net_rpc::instance_is_running(&observed)?,
         "Runtime model listener or profile changed"
     );
@@ -135,11 +143,20 @@ fn run_scoped(request: Request, operation: Operation<'_>) -> Result<i32> {
     )
     .context("Runtime model proof unavailable")?;
     drop(record);
-    let result = match operation {
-        Operation::Remove => agent
-            .post(&format!("{base}/api/runtime/private-model/remove"))
-            .set("x-respire-model-proof", proof.as_str())
-            .send_json(json!({"schema_version": 1, "model_id": request.model_id})),
+    const UNCONFIRMED: &str =
+        "Runtime model operation outcome is unconfirmed; do not retry automatically";
+    let reply = match operation {
+        Operation::Remove => {
+            let result = agent
+                .post(&format!("{base}/api/runtime/private-model/remove"))
+                .set("x-respire-model-proof", proof.as_str())
+                .send_json(json!({"schema_version": 1, "model_id": request.model_id}));
+            let response = match result {
+                Ok(value) | Err(ureq::Error::Status(_, value)) => value,
+                Err(_) => anyhow::bail!(UNCONFIRMED),
+            };
+            NativeReply::Remove(response)
+        }
         Operation::Install(input) => {
             let mut catalog = respire_app::embedding::builtin_registry()?;
             let profile = catalog
@@ -154,32 +171,25 @@ fn run_scoped(request: Request, operation: Operation<'_>) -> Result<i32> {
             let length = weights
                 .checked_add(tokenizer)
                 .context("invalid model transfer length")?;
-            agent
-                .post(&format!("{base}/api/runtime/private-model/install"))
-                .timeout(Duration::from_secs(200))
-                .set("x-respire-model-proof", proof.as_str())
-                .set("x-respire-model-id", &request.model_id)
-                .set("Content-Type", "application/octet-stream")
-                .set("Content-Length", &length.to_string())
-                .send(input.take(length))
+            let (status, body) =
+                install_http::install(port, proof.as_str(), &request.model_id, length, input)
+                    .map_err(|_| anyhow::anyhow!(UNCONFIRMED))?;
+            NativeReply::Install(status, body)
         }
-    };
-    let response = match result {
-        Ok(value) => value,
-        Err(ureq::Error::Status(_, value)) => value,
-        Err(_) => anyhow::bail!(
-            "Runtime model operation outcome is unconfirmed; do not retry automatically"
-        ),
     };
     ensure!(
         super::startup_identity::read_private_file(&endpoint)?.as_deref()
             == Some(published.as_slice())
-            && net_rpc::pid_listening_on(net_rpc::rpc_port()) == Some(request.pid)
+            && net_rpc::pid_listening_on(port) == Some(request.pid)
             && net_rpc::instance_is_running(&observed)?,
-        "Runtime model operation outcome is unconfirmed; do not retry automatically"
+        UNCONFIRMED
     );
-    let status = response.status();
-    let body: Value = read_json(response.into_reader(), FRAME)?;
+    let (status, body) = match reply {
+        NativeReply::Remove(response) => {
+            (response.status(), read_json(response.into_reader(), FRAME)?)
+        }
+        NativeReply::Install(status, body) => (status, body),
+    };
     serde_json::to_writer(
         std::io::stdout().lock(),
         &json!({"http_status": status, "body": body}),
