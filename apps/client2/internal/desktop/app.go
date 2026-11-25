@@ -1,0 +1,351 @@
+package desktop
+
+import "respire-client2/internal/i18n"
+
+import (
+	"context"
+	"embed"
+	"errors"
+	"fmt"
+	"io/fs"
+	"log"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/wailsapp/wails/v3/pkg/application"
+	"github.com/wailsapp/wails/v3/pkg/events"
+	"github.com/wailsapp/wails/v3/pkg/services/notifications"
+	"github.com/wailsapp/wails/v3/pkg/updater"
+	"respire-client2/internal/host"
+)
+
+var version string
+
+//go:embed frontend/*
+var frontend embed.FS
+
+//go:embed build/icon.png
+var icon []byte
+
+//go:embed build/icon-light.png
+var lightIcon []byte
+
+type desktop struct {
+	app           *application.App
+	window        *application.WebviewWindow
+	panel         *application.WebviewWindow
+	m             *host.Manager
+	mu            sync.Mutex
+	updateMu      sync.Mutex
+	clientVersion string
+	clientNotes   string
+	clientSource  string
+	clientError   string
+	updateCancel  context.CancelFunc
+	closing       chan struct{}
+	restarting    bool
+	tray          *application.SystemTray
+	notifier      *notifications.NotificationService
+	native        nativeAppearance
+	resolvedTheme string
+}
+
+func Run(m *host.Manager, buildVersion string) {
+	version = buildVersion
+	f, err := os.OpenFile(filepath.Join(m.Root, "client.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer f.Close()
+	log.SetOutput(f)
+	d := &desktop{m: m, closing: make(chan struct{})}
+	defer d.native.close()
+	files, err := fs.Sub(frontend, "frontend")
+	if err != nil {
+		log.Fatal(err)
+	}
+	static := http.FileServer(http.FS(files))
+	notifier := notifications.New()
+	// RSRS_INSTANCE_ID lets an isolated test instance (fresh RSRS_DATA_DIR
+	// and RSRS_RPC_PORT) run next to the installed client instead of just
+	// focusing it.
+	uniqueID := "ai.risense.respire.client2"
+	if suffix := os.Getenv("RSRS_INSTANCE_ID"); suffix != "" {
+		clean := strings.Map(func(r rune) rune {
+			if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' ||
+				r >= '0' && r <= '9' || r == '.' || r == '-' || r == '_' {
+				return r
+			}
+			return -1
+		}, suffix)
+		if clean != "" {
+			uniqueID += "." + clean
+		}
+	}
+	// A named test instance must not replace the installed app's shell entries.
+	if uniqueID == "ai.risense.respire.client2" {
+		go ensureShellIdentity()
+	}
+	singleInstance := &application.SingleInstanceOptions{UniqueID: uniqueID, OnSecondInstanceLaunch: func(application.SecondInstanceData) {
+		if d.window != nil {
+			d.window.Show()
+			d.window.Focus()
+		}
+	}}
+	d.app = application.New(application.Options{
+		Name: "Respire", Description: "Respire Runtime desktop client", Icon: lightIcon,
+		Assets: application.AssetOptions{Handler: d.handler(static)},
+		Services: []application.Service{
+			application.NewService(notifier),
+		},
+		Windows:        application.WindowsOptions{DisableQuitOnLastWindowClosed: true, WebviewUserDataPath: filepath.Join(m.Root, "webview2")},
+		Linux:          application.LinuxOptions{DisableQuitOnLastWindowClosed: true, ApplicationID: "ai.risense.respire.client2"},
+		SingleInstance: singleInstance,
+		OnShutdown:     func() { close(d.closing); d.app.Updater.StopPeriodicCheck() },
+		ErrorHandler:   func(err error) { log.Printf("desktop: %v", err) },
+	})
+	m.OpenBrowser = d.app.Browser.OpenURL
+	if err = d.initUpdater(); err != nil {
+		log.Fatal(err)
+	}
+	// Set the initial canvas through options; WebView2 may not exist in startup events.
+	background := application.NewRGB(248, 246, 242)
+	theme := m.Preferences().Theme
+	if theme == "dark" || theme == "system" && d.app.Env.IsDarkMode() {
+		background = application.NewRGB(36, 37, 31)
+	}
+	// Native window frame: the OS provides the title bar and its controls.
+	d.window = d.app.Window.NewWithOptions(application.WebviewWindowOptions{Name: "main", Title: "Respire", Width: 1180, Height: 800, MinWidth: 800, MinHeight: 600, URL: "/workspace.html", Hidden: hasArg("--tray"), DefaultContextMenuDisabled: true, BackgroundColour: background})
+	// Tray quick panel: a frameless popup anchored to the tray icon; it hides
+	// itself on focus loss so a tray click toggles it like a flyout.
+	d.panel = d.app.Window.NewWithOptions(application.WebviewWindowOptions{
+		Name: "quickpanel", Title: "Respire", Width: 360, Height: 540,
+		URL: "/quickpanel.html", Hidden: true, Frameless: true, AlwaysOnTop: true,
+		DisableResize: true, HideOnFocusLost: true, HideOnEscape: true,
+		DefaultContextMenuDisabled: true,
+		Windows:                    application.WindowsWindow{HiddenOnTaskbar: true},
+		BackgroundColour:           background,
+	})
+	// WebView2 can miss a bounds update while the flyout window is hidden
+	// (it hides on focus loss, and content-sized height changes land while
+	// hidden). A same-size SetWindowPos raises no WM_SIZE, so the stale
+	// smaller webview would leave a permanent strip of window background
+	// below the page. Nudge the height once on every show to re-sync.
+	d.panel.OnWindowEvent(events.Common.WindowShow, func(*application.WindowEvent) {
+		if width, height := d.panel.Size(); height > 0 {
+			d.panel.SetSize(width, height+1)
+			d.panel.SetSize(width, height)
+		}
+	})
+	d.notifier = notifier
+	d.app.Event.On(updater.EventUpdateReady, func(*application.CustomEvent) {
+		d.updateNotification()
+	})
+	d.app.Event.On(updater.EventError, func(event *application.CustomEvent) {
+		if info, ok := event.Data.(updater.ErrorInfo); ok {
+			d.updateFailureNotification(info.Message)
+		}
+	})
+	d.window.RegisterHook(events.Common.WindowClosing, func(e *application.WindowEvent) { e.Cancel(); d.window.Hide() })
+	d.window.OnWindowEvent(events.Common.WindowShow, func(*application.WindowEvent) { d.applyAppearance() })
+	tray := d.app.SystemTray.New()
+	d.tray = tray
+	tray.SetIcon(lightIcon)
+	tray.SetTooltip(i18n.Message65a1eae4003b6450)
+	menu := d.app.NewMenu()
+	menu.Add(i18n.Message4cb24309b4bbda43).OnClick(func(*application.Context) { d.window.Show(); d.window.Focus() })
+	menu.Add(i18n.Message4f5556b67eb3a11e).OnClick(func(*application.Context) { go d.task(i18n.Message4f5556b67eb3a11e, m.Start) })
+	menu.Add(i18n.Messagee71856e1449d90ff).OnClick(func(*application.Context) {
+		go d.task(i18n.Messagee71856e1449d90ff, func() error { return m.Stop(false) })
+	})
+	menu.Add(i18n.Messageedfd72b34b782b9a).OnClick(func(*application.Context) { d.window.Show(); go d.checkClient(false) })
+	menu.AddSeparator()
+	menu.Add(i18n.Message97de2f726109e41f).OnClick(func(*application.Context) { d.app.Quit() })
+	tray.SetMenu(menu)
+	// With an attached window and a menu, tray defaults apply: left click
+	// toggles the quick panel next to the icon, right click opens the menu.
+	tray.AttachWindow(d.panel)
+	tray.WindowOffset(8)
+	// Double click jumps straight to the main window, panel tucked away.
+	tray.OnDoubleClick(func() {
+		if d.panel != nil {
+			d.panel.Hide()
+		}
+		d.window.Show()
+		d.window.Focus()
+	})
+	d.app.Event.OnApplicationEvent(events.Common.ApplicationStarted, func(*application.ApplicationEvent) { d.applyAppearance(); go d.background() })
+	d.app.Event.OnApplicationEvent(events.Common.ThemeChanged, func(*application.ApplicationEvent) { d.applyAppearance() })
+	if err = d.app.Run(); err != nil {
+		log.Print(err)
+	}
+}
+
+func (d *desktop) notifySystem(title, body string) {
+	if d.notifier == nil {
+		return
+	}
+	go func() {
+		// ThreadID must stay unset: wails renders it as a <header> without the
+		// schema-required arguments attribute, and Windows then drops the body
+		// and shows the title alone.
+		if err := d.notifier.SendNotification(notifications.NotificationOptions{
+			ID: "respire-update-" + fmt.Sprint(time.Now().UnixNano()), Title: title, Body: body,
+			InterruptionLevel: notifications.InterruptionLevelActive,
+		}); err != nil {
+			log.Printf("system notification: %v", err)
+		}
+	}()
+}
+
+func (d *desktop) updateNotification() {
+	if d.m.Preferences().Language == "zh" {
+		d.notifySystem(i18n.Messageb990e63183932fc8, i18n.Message872d0d5a651da5a6)
+		return
+	}
+	d.notifySystem("Respire update ready", "The new version is downloaded. Restart from Updates to apply it.")
+}
+
+func (d *desktop) updateFailureNotification(message string) {
+	if d.m.Preferences().Language == "zh" {
+		d.notifySystem(i18n.Messagec6a42283bb79e30d, message)
+		return
+	}
+	d.notifySystem("Respire update failed", message)
+}
+
+func hasArg(arg string) bool {
+	for _, a := range os.Args[1:] {
+		if a == arg {
+			return true
+		}
+	}
+	return false
+}
+
+func (d *desktop) task(stage string, action func() error) error {
+	err := d.m.RunTask(stage, action)
+	if err != nil {
+		log.Printf("%s: %v", stage, err)
+	}
+	return err
+}
+
+func (d *desktop) restartClient() error {
+	if blocked := d.clientRestartBlocked(); blocked != nil {
+		return blocked
+	}
+	d.mu.Lock()
+	d.restarting = true
+	d.mu.Unlock()
+	err := d.app.Updater.Restart(context.Background())
+	if err != nil {
+		d.mu.Lock()
+		d.restarting = false
+		d.mu.Unlock()
+	}
+	return err
+}
+
+// updateInterval resolves the configured check cadence; unknown values fall
+// back to the historical six-hour default.
+func updateInterval(value string) time.Duration {
+	switch value {
+	case "5m":
+		return 5 * time.Minute
+	case "30m":
+		return 30 * time.Minute
+	case "1h":
+		return time.Hour
+	case "24h":
+		return 24 * time.Hour
+	default:
+		return 6 * time.Hour
+	}
+}
+
+func startRuntimeForStartup(ctx context.Context, m interface {
+	InstallRuntime(bool, bool) error
+	PrepareRuntimeForStartup(context.Context) error
+}) error {
+	if err := m.PrepareRuntimeForStartup(ctx); !errors.Is(err, host.ErrRuntimeNotInstalled) {
+		return err
+	}
+	if err := m.InstallRuntime(false, false); err != nil {
+		return err
+	}
+	return m.PrepareRuntimeForStartup(ctx)
+}
+
+func (d *desktop) background() {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		select {
+		case <-d.closing:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	go func() {
+		if err := d.m.UpdateInstalledCLI(ctx); err != nil {
+			log.Printf(i18n.Messagefb97d994bbde850d, err)
+		}
+	}()
+	go func() {
+		d.task(i18n.Message204df59e6c37d96a, func() error {
+			prefs := d.m.Preferences()
+			if !prefs.AutoRuntime {
+				return nil
+			}
+			return startRuntimeForStartup(ctx, d.m)
+		})
+	}()
+	// Client and Runtime update on their own cadences (update page); a staged
+	// client update re-checks every minute so it applies once operations end.
+	var lastClient, lastRuntime time.Time
+	timer := time.NewTimer(10 * time.Second)
+	defer timer.Stop()
+	for {
+		select {
+		case <-d.closing:
+			return
+		case <-timer.C:
+		}
+		now := time.Now()
+		prefs := d.m.Preferences()
+		if prefs.ClientAutoUpdate {
+			if d.app.Updater.State() == updater.StateReady {
+				if prefs.ClientAutoRestart && now.Sub(lastClient) >= time.Minute {
+					lastClient = now
+					if d.canRestartClient() {
+						if err := d.restartClient(); err != nil {
+							log.Printf("client update restart: %v", err)
+						}
+					}
+				}
+			} else if lastClient.IsZero() || now.Sub(lastClient) >= updateInterval(prefs.ClientUpdateInterval) {
+				lastClient = now
+				if err := d.checkClient(true); err != nil {
+					log.Printf("client update: %v", err)
+				}
+			}
+		}
+		if prefs.RuntimeAutoUpdate &&
+			(lastRuntime.IsZero() || now.Sub(lastRuntime) >= updateInterval(prefs.RuntimeUpdateInterval)) {
+			lastRuntime = now
+			if err := d.m.InstallRuntime(true, prefs.RuntimeAutoRestart); err != nil {
+				log.Printf(i18n.Message7be6a4634aa8e6e0, err)
+			}
+		}
+		delay := 30 * time.Second
+		if d.app.Updater.State() == updater.StateReady {
+			delay = time.Minute
+		}
+		timer.Reset(delay)
+	}
+}

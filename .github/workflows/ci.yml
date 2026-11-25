@@ -489,13 +489,42 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version-file: apps/client2/go.mod
+          cache-dependency-path: |
+            apps/client2/go.sum
+            packages/runtime-sdk-go/go.sum
 
-      - name: Run Client2 Go vet and tests
+      - name: Setup Node
+        if: steps.manifest.outputs.exists == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install Linux desktop dependencies
+        if: steps.manifest.outputs.exists == 'true'
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libgtk-3-dev libwebkit2gtk-4.1-dev libx11-dev fontconfig
+
+      - name: Generate the canonical Runtime Go SDK
+        if: steps.manifest.outputs.exists == 'true'
+        working-directory: packages/runtime-sdk-go
+        run: go generate ./...
+
+      - name: Verify Client2 Go dependencies and tests
+        if: steps.manifest.outputs.exists == 'true'
+        working-directory: apps/client2
+        env:
+          CGO_ENABLED: '1'
+        run: |
+          go mod tidy -diff
+          go vet -tags production,gtk3 ./...
+          go test -tags production,gtk3 ./...
+
+      - name: Run Client2 frontend regressions
         if: steps.manifest.outputs.exists == 'true'
         working-directory: apps/client2
         run: |
-          go vet ./...
-          go test ./...
+          node scripts/test-account-session-state.cjs
+          node scripts/test-client-refresh.cjs
+          node scripts/test-settings-proxy.cjs
 
   ci-gate:
     name: ci-gate

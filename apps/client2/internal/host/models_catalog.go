@@ -1,0 +1,305 @@
+package host
+
+import "respire-client2/internal/i18n"
+
+// Pinned embedding model catalog. m3 keeps the CLI's legacy variant table and
+// directory resolution; the profile models download into models/<id> and
+// register through the runtime's embedding-profile registry (model.configure),
+// then activate with model.switch. Sizes and SHA-256 mirror the pinned HF
+// revisions so activation can verify resources without re-downloading.
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"path/filepath"
+	"time"
+)
+
+type modelDefinition struct {
+	ID          string
+	Label       string
+	Repo        string
+	Revision    string
+	Dimensions  int
+	MaxTokens   int
+	QueryPrefix string
+	// Granite exports a single pinned ONNX file with no token_type_ids input.
+	GraniteWeightsPath string
+	PadTokenID         int
+	Tokenizer          modelFileSpec
+	// Variants in display order; profile models activate quantized.
+	Variants []modelVariantFile
+	// Hashes keyed by variant name.
+	Hashes map[string]string
+	// Legacy models use the CLI variant table (model.apply-engine) and the
+	// bge-m3 directory resolution; profile models use the profile registry.
+	Legacy bool
+}
+
+var modelCatalog = []modelDefinition{
+	{
+		ID: "granite-311m-r2", Label: i18n.Messagef3f81b431585bcc7,
+		Repo: "ibm-granite/granite-embedding-311m-multilingual-r2", Revision: "44399559930365213510b1ee2eb15ded83374f0e",
+		Dimensions: 768, MaxTokens: 32768, GraniteWeightsPath: "onnx/model_quint8_avx2.onnx",
+		Tokenizer: modelFileSpec{rel: "tokenizer.json", sha256: "0087c868b33bad550a78a08d19798cfd7f713cde4f020803b8f51f405503e15f", size: 33384821},
+		Variants:  []modelVariantFile{{"quantized", 313421909}},
+		Hashes:    map[string]string{"quantized": "f1fdd44e7e1ac51f12ab7957c7bd092e064d596c288513bf9d326842f669edee"},
+	},
+	{
+		ID: "granite-97m-r2", Label: i18n.Message34266d29aed50583,
+		Repo: "ibm-granite/granite-embedding-97m-multilingual-r2", Revision: "835ad14087e140460703cf0fae09f97d469d65c2",
+		Dimensions: 384, MaxTokens: 32768, GraniteWeightsPath: "onnx/model.onnx", PadTokenID: 179935,
+		Tokenizer: modelFileSpec{rel: "tokenizer.json", sha256: "4f2842d568e2724370aec203652a42ac783c7937f8347a1a2cc7506d71f1582f", size: 25301672},
+		Variants:  []modelVariantFile{{"standard", 390004608}},
+		Hashes:    map[string]string{"standard": "68e592b160673d30250824c1116bc6ab33f70efb22b97c9e1d7ce1e69c1c9d70"},
+	},
+	{
+		ID: "m3", Label: i18n.Messagea0e7ed5e45bbad7e,
+		Repo: "Xenova/bge-m3", Revision: modelRevision,
+		Dimensions: 1024, MaxTokens: 512, Legacy: true,
+		Tokenizer: modelFileSpecs["tokenizer"],
+		Variants:  modelVariantFiles,
+		Hashes: map[string]string{
+			"quantized": "0826f8c1ab9edf1801db86c61919d4d108e8bfc0b809ec823ad366882ff0b77d",
+			"fp16":      "4f1a646a3d4f39985589e9991a717044ede8278617fe55e3d246838bc05055e9",
+			"int8":      "a206e10e995aa2a833924bcd725ba5dd6c3425cd34bac3cf2b5677cd2a1c51d6",
+			"uint8":     "3222211565d0d5da2fe89e0c40856ed879e5c5dd3369fbbe685213469498e811",
+			"q4":        "4f6d9786712f8dbf00efbb08ffd819395ef05d860249e852b4efc16022f753a6",
+			"q4f16":     "8305fdfa48b5702ecb4a6d84c1a52a4d1cb27d69880ff7f69d1a93d795864f25",
+		},
+	},
+	{
+		ID: "bge-base-zh-v1.5", Label: i18n.Messagedd25263c4916820a,
+		Repo: "Xenova/bge-base-zh-v1.5", Revision: "71e50dc531959f9e04ebf190ea25b00261a0a186",
+		Dimensions: 768, MaxTokens: 512,
+		QueryPrefix: i18n.Message9ce5caa4213d4b09,
+		Tokenizer:   modelFileSpec{rel: "tokenizer.json", sha256: "7dfbf1966ebf99d471c3796e9b457329d2b2182b817e144f1e904b957745c839", size: 439124},
+		Variants: []modelVariantFile{
+			{"quantized", 102868746},
+			{"fp16", 203679052},
+			{"int8", 102407793},
+			{"uint8", 102407824},
+			{"q4", 120342974},
+			{"q4f16", 81549931},
+		},
+		Hashes: map[string]string{
+			"quantized": "b665f3bba56c3119bc76ba131ebcc544d720a7408cb11581bdf354aaa0198d43",
+			"fp16":      "9ed3f10ed06aafe0320567019d18fdec255339350525a33ae18f85f4def288f0",
+			"int8":      "c11bdcfad37eaf53e43362885cbe5fad1b44d5b704da753a04f8c0b2f7768064",
+			"uint8":     "5e2f9e9f07472751e0a5a0b21bcfa49cb0ac1eaab094784a3f30425a8bcc1d80",
+			"q4":        "dab1bb68aaf39bbfa4ef7d218091174f01cd25781a07f36c654a2e3037d4376a",
+			"q4f16":     "8278a219a9ae056860dcde7ce8241bee057a6ab0243454c85facf4d6e8325777",
+		},
+	},
+	{
+		ID: "bge-m3-distill-8l", Label: i18n.Message35a63fde55f8c5b7,
+		Repo: "xnohat/bge-m3-distill-8l", Revision: "bbf72a07734915b3fa813cadc46f11414d2b4c25",
+		Dimensions: 1024, MaxTokens: 512,
+		Tokenizer: modelFileSpec{rel: "tokenizer.json", sha256: "e4f7e21bec3fb0044ca0bb2d50eb5d4d8c596273c422baef84466d2c73748b9c", size: 17083053},
+		Variants: []modelVariantFile{
+			{"quantized", 366226833},
+			{"fp16", 730630097},
+			{"int8", 366226833},
+			{"uint8", 366226833},
+			{"q4", 1121229266},
+			{"q4f16", 585933772},
+		},
+		Hashes: map[string]string{
+			"quantized": "05e237aa057bc3f21cfeb48651a768f9ae8001907132b29fc27ae58aae27a052",
+			"fp16":      "34a8df87404689e366c8bdfab6b094efedf4be3c1ae8f1125cbe02ec65425aa0",
+			"int8":      "05e237aa057bc3f21cfeb48651a768f9ae8001907132b29fc27ae58aae27a052",
+			"uint8":     "f961325ab451ff54528c48710975790465055f40b13dcb715399f0083e0f1e2d",
+			"q4":        "d0cc972bcbc78b0df07ea8913293987be9a783304aa70c5620103fc4313a8f9c",
+			"q4f16":     "6f995eae32f9afd8ebee450569ced024c965ecad478e910c752b992fa53fc85e",
+		},
+	},
+}
+
+func modelDefinitionByID(id string) (modelDefinition, error) {
+	for _, definition := range modelCatalog {
+		if definition.ID == id {
+			return definition, nil
+		}
+	}
+	return modelDefinition{}, errors.New(i18n.Message5cfcb7bc92afad64 + id)
+}
+
+// ProfileDir is the on-disk weight directory for profile models; the runtime
+// profile points at these files (model.configure resources).
+func (m *Manager) ProfileDir(model string) string {
+	return filepath.Join(m.DataRoot, "models", model)
+}
+
+func (definition modelDefinition) weightPath(variant string) string {
+	if definition.GraniteWeightsPath != "" {
+		return filepath.FromSlash(definition.GraniteWeightsPath)
+	}
+	return variantFileName(variant)
+}
+
+// modelFileSpecFor returns the download spec for one variant of a model.
+func (definition modelDefinition) modelFileSpecFor(variant string) (modelFileSpec, error) {
+	hash, ok := definition.Hashes[variant]
+	if !ok {
+		return modelFileSpec{}, errors.New(i18n.Messagef81dd9a5fc1b2073 + variant)
+	}
+	for _, candidate := range definition.Variants {
+		if candidate.Name == variant {
+			return modelFileSpec{rel: definition.weightPath(variant), sha256: hash, size: candidate.Size}, nil
+		}
+	}
+	return modelFileSpec{}, errors.New(i18n.Messagef81dd9a5fc1b2073 + variant)
+}
+
+// ConfigurePayload builds the model.configure argument for a profile model.
+func (definition modelDefinition) ConfigurePayload(variant, weightsPath string) (string, error) {
+	if definition.Legacy {
+		return "", errors.New(i18n.Messagea00936d07ac2a7d3)
+	}
+	weights, err := definition.modelFileSpecFor(variant)
+	if err != nil {
+		return "", err
+	}
+	onnx := map[string]string{
+		"input_ids": "input_ids", "attention_mask": "attention_mask", "output": "last_hidden_state",
+	}
+	if definition.GraniteWeightsPath == "" {
+		onnx["token_type_ids"] = "token_type_ids"
+	}
+	payload := map[string]any{
+		"model_profile": map[string]any{
+			"id": definition.ID,
+			"embedding": map[string]any{
+				"model_id":          definition.Repo,
+				"revision":          definition.Revision,
+				"dimensions":        definition.Dimensions,
+				"max_tokens":        definition.MaxTokens,
+				"pooling":           "cls",
+				"normalize":         true,
+				"query_prefix":      definition.QueryPrefix,
+				"document_prefix":   "",
+				"pad_token_id":      definition.PadTokenID,
+				"pad_to_max_tokens": false,
+			},
+			"onnx": onnx,
+			"weights": map[string]any{
+				"path": weightsPath, "size": weights.size, "sha256": weights.sha256,
+			},
+			"tokenizer": map[string]any{
+				"path": filepath.Join(filepath.Dir(weightsPath), "..", "tokenizer.json"), "size": definition.Tokenizer.size, "sha256": definition.Tokenizer.sha256,
+			},
+		},
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	return string(encoded), nil
+}
+
+// runtimeRPC calls the resident runtime loopback /api/rpc with the v:1
+// envelope the host RPC documents (model.catalog / configure / switch / ...).
+func (m *Manager) runtimeRPC(ctx context.Context, method string, args []string) (json.RawMessage, error) {
+	if args == nil {
+		args = []string{}
+	}
+	body := map[string]any{
+		"v":      1,
+		"id":     fmt.Sprintf("client2-model-%d", time.Now().UnixNano()),
+		"method": method,
+		"args":   args,
+	}
+	raw, err := m.legacyRPCRequest(ctx, body)
+	if err != nil {
+		return nil, err
+	}
+	var reply struct {
+		OK       bool            `json:"ok"`
+		Exit     *int            `json:"exit"`
+		Envelope json.RawMessage `json:"envelope"`
+		Errors   []string        `json:"errors"`
+	}
+	if err := json.Unmarshal(raw, &reply); err != nil {
+		return nil, fmt.Errorf(i18n.Message1159c2b08a1760fe, err)
+	}
+	if !reply.OK {
+		message := i18n.Messagedb4136989bd8b201
+		if len(reply.Errors) > 0 {
+			message = reply.Errors[0]
+		}
+		return nil, errors.New(message)
+	}
+	if len(reply.Envelope) == 0 {
+		return json.RawMessage("{}"), nil
+	}
+	var envelope struct {
+		Status string   `json:"status"`
+		Errors []string `json:"errors"`
+	}
+	_ = json.Unmarshal(reply.Envelope, &envelope)
+	if envelope.Status == "fail" {
+		message := i18n.Messagee4501161a6d3b24c
+		if len(envelope.Errors) > 0 {
+			message = envelope.Errors[0]
+		}
+		return nil, errors.New(message)
+	}
+	return reply.Envelope, nil
+}
+
+// ModelCatalogRPC reports the registry plus the active selection and any
+// pending switch task.
+func (m *Manager) ModelCatalogRPC(ctx context.Context) (json.RawMessage, error) {
+	return m.runtimeRPC(ctx, "model.catalog", nil)
+}
+
+// ModelConfigure registers a profile model's resources with the runtime.
+func (m *Manager) ModelConfigure(ctx context.Context, model, variant string) error {
+	definition, err := modelDefinitionByID(model)
+	if err != nil {
+		return err
+	}
+	if variant == "" {
+		variant = definition.Variants[0].Name
+	}
+	payload, err := definition.ConfigurePayload(variant, filepath.Join(m.ProfileDir(model), definition.weightPath(variant)))
+	if err != nil {
+		return err
+	}
+	_, err = m.runtimeRPC(ctx, "model.configure", []string{payload})
+	return err
+}
+
+// ModelSwitch activates a model profile with the chosen engine.
+func (m *Manager) ModelSwitch(ctx context.Context, model, engine, variant string) error {
+	definition, err := modelDefinitionByID(model)
+	if err != nil {
+		return err
+	}
+	if variant == "" {
+		variant = definition.Variants[0].Name
+	}
+	if _, err := definition.modelFileSpecFor(variant); err != nil {
+		return err
+	}
+	choice := map[string]any{
+		"model": model, "backend": "onnx", "engine": engine, "variant": variant,
+	}
+	if definition.GraniteWeightsPath != "" {
+		// Runtime takes the exact weights path from the registered profile.
+		delete(choice, "variant")
+	}
+	selection, err := json.Marshal(choice)
+	if err != nil {
+		return err
+	}
+	_, err = m.runtimeRPC(ctx, "model.switch", []string{string(selection)})
+	return err
+}
+
+// ModelProgress reports the pending switch task and active selection.
+func (m *Manager) ModelProgress(ctx context.Context) (json.RawMessage, error) {
+	return m.runtimeRPC(ctx, "model.progress", nil)
+}

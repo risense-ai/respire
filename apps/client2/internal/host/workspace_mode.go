@@ -1,0 +1,121 @@
+package host
+
+import "respire-client2/internal/i18n"
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+type workspaceModeChange struct {
+	key, raw, mode string
+	value          any
+}
+
+func isWorkspaceModeSetting(key string) bool {
+	return key == "workspace_mode" || key == "readonly" || key == "memory_off"
+}
+
+func (m *Manager) SetWorkspaceMode(ctx context.Context, mode string) error {
+	_, err := m.setDesktopWorkspaceMode(ctx, "workspace_mode="+mode)
+	return err
+}
+
+func (m *Manager) setDesktopWorkspaceMode(ctx context.Context, setting string) (json.RawMessage, error) {
+	key, raw, ok := strings.Cut(setting, "=")
+	change := workspaceModeChange{key: strings.TrimSpace(key), raw: raw}
+	if !ok || !isWorkspaceModeSetting(change.key) {
+		return nil, errors.New(i18n.Message2efd2997f4773c08)
+	}
+	if json.Unmarshal([]byte(raw), &change.value) != nil {
+		change.value = raw
+	}
+	switch change.key {
+	case "workspace_mode":
+		change.mode, _ = change.value.(string)
+	case "readonly", "memory_off":
+		on, ok := change.value.(bool)
+		if !ok {
+			return nil, errors.New(i18n.Messagef8f7dd0d9535c865)
+		}
+		switch {
+		case !on:
+			change.mode = "normal"
+		case change.key == "readonly":
+			change.mode = "readonly"
+		default:
+			change.mode = "off"
+		}
+	}
+	switch change.mode {
+	case "normal", "readonly", "off":
+		return m.changeDeviceConfig(ctx, deviceConfigIntent{}, &change, configTargetDefault)
+	default:
+		return nil, errors.New(i18n.Messagedf0661bfe7991388)
+	}
+}
+
+// Match the Rust host writer's recovery fences. Team access stays in agent.json.
+func (c workspaceModeChange) check(root, profile string) (bool, error) {
+	blocker := filepath.Join(profile, ".snapshot-maintenance.json")
+	if _, err := os.Lstat(blocker); err == nil {
+		return false, errors.New(i18n.Messagebd7e4f18cc4213e8)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return false, err
+	}
+	for _, journal := range []struct {
+		path    string
+		version int
+	}{{filepath.Join(root, ".login-recovery.json"), 2}, {filepath.Join(profile, ".snapshot-recovery.json"), 1}} {
+		info, err := os.Lstat(journal.path)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return false, err
+		}
+		if !info.Mode().IsRegular() {
+			return false, fmt.Errorf(i18n.Message6266bb70231892c0, filepath.Base(journal.path))
+		}
+		raw, err := os.ReadFile(journal.path)
+		if err != nil {
+			return false, err
+		}
+		var record struct {
+			Schema int             `json:"schema_version"`
+			Active json.RawMessage `json:"active"`
+			Phase  string          `json:"phase"`
+		}
+		err = json.Unmarshal(raw, &record)
+		clear(raw)
+		if err != nil || record.Schema != journal.version || journal.version == 2 && string(record.Active) != "null" ||
+			journal.version == 1 && record.Phase != "verified" && record.Phase != "released" && record.Phase != "rolled_back" {
+			return false, fmt.Errorf(i18n.Message9d2fb8210f01e0b8, filepath.Base(journal.path))
+		}
+	}
+	agent, err := readAgentSettingsObject(filepath.Join(profile, "agent.json"))
+	if err != nil {
+		return false, err
+	}
+	team, _ := agent["readonly_team"].(bool)
+	if team && c.key == "readonly" && c.mode == "normal" {
+		return false, errors.New(i18n.Messaged73423e12c5af029)
+	}
+	return team, nil
+}
+
+func (c workspaceModeChange) result(teamReadonly, applied, storeReady bool) (json.RawMessage, error) {
+	effective := c.mode
+	if teamReadonly && effective == "normal" {
+		effective = "readonly"
+	}
+	return json.Marshal(map[string]any{"command": "agent-config", "status": "ok", "summary": map[string]any{
+		"action": "updated", "key": c.key, "value": c.value, "workspace_mode": effective,
+		"runtime_applied": applied, "store_ready": storeReady,
+	}, "items": []map[string]string{{"name": c.key, "status": "ok", "value": c.raw}}})
+}

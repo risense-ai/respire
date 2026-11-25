@@ -1,0 +1,96 @@
+package main
+
+import "respire-client2/internal/i18n"
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"log"
+	"os"
+	"time"
+
+	"github.com/wailsapp/wails/v3/pkg/updater"
+	"respire-client2/internal/desktop"
+	"respire-client2/internal/host"
+)
+
+var version = "2.0.0-dev.13"
+
+func main() {
+	updater.HandleHelperMode()
+	if len(os.Args) > 1 && os.Args[1] == "--version" {
+		json.NewEncoder(os.Stdout).Encode(map[string]string{"version": version, "platform": host.Platform()})
+		return
+	}
+	var m *host.Manager
+	var err error
+	if len(os.Args) > 2 && os.Args[1] == "--headless" && os.Args[2] == "prepare-cli" {
+		m, err = host.NewCLIInstaller()
+	} else {
+		m, err = host.New()
+	}
+	if err != nil {
+		log.Fatal(err)
+	}
+	m.ClientVersion = version
+	if len(os.Args) > 1 && os.Args[1] == "--headless" {
+		headless(m)
+		return
+	}
+	desktop.Run(m, version)
+	if err := exitDesktopProcess(); err != nil {
+		panic(err)
+	}
+}
+
+func headless(m *host.Manager) {
+	var result any
+	var err error
+	action := "status"
+	if len(os.Args) > 2 {
+		action = os.Args[2]
+	}
+	switch action {
+	case "fonts":
+		result, err = desktop.SystemFonts()
+	case "status":
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		_, result, err = m.Health(ctx)
+	case "start":
+		err = m.RunTask(i18n.Message4f5556b67eb3a11e, m.Start)
+	case "stop":
+		err = m.RunTask(i18n.Messagee71856e1449d90ff, func() error { return m.Stop(false) })
+	case "install-runtime":
+		err = m.RunTask(i18n.Messagebc30f1287b395595, func() error {
+			return m.InstallRuntime(false, false)
+		})
+	case "prepare-cli":
+		err = m.InstallCLI(context.Background())
+	case "runtime-release":
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_, result, err = m.LatestRuntime(ctx)
+	case "rpc-status":
+		result, err = m.RPC("status")
+	case "proxy":
+		result = m.ProxyInfo()
+	case "bootstrap-status":
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		result = m.BootstrapStatus(ctx)
+	default:
+		err = errors.New("supported actions: status, start, stop, install-runtime, runtime-release, rpc-status, proxy, fonts, bootstrap-status")
+	}
+	output := map[string]any{"ok": err == nil, "result": result, "task": m.TaskSnapshot()}
+	if err != nil {
+		output["error"] = err.Error()
+	}
+	if encodeErr := json.NewEncoder(os.Stdout).Encode(output); encodeErr != nil {
+		os.Exit(1)
+	}
+	if err != nil {
+		os.Exit(1)
+	}
+}
