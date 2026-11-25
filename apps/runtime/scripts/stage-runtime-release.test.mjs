@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import {test} from 'node:test';
 import {createHash} from 'node:crypto';
 import {execFileSync} from 'node:child_process';
-import {mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, utimesSync, writeFileSync} from 'node:fs';
+import {copyFileSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, unlinkSync, utimesSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {dirname, join} from 'node:path';
 import {gunzipSync} from 'node:zlib';
@@ -79,4 +79,20 @@ test('wrong target, version, receipt or pinned bytes cannot produce a batch', as
   writeFileSync(resource,'mutated');
   await assert.rejects(stageRuntime(args), /differs from source-build pin/);
   assert.deepEqual(readdirSync(args.outputParent).sort(), ['apps','release']);
+});
+
+test('a byte-copied Cargo image passes without accepting a hardlinked input', async t => {
+  const {args, binary} = fixture(t);
+  const cargoDeps = join(args.root, 'cargo-deps-image.exe');
+  linkSync(binary, cargoDeps);
+  assert.equal(lstatSync(binary).nlink, 2);
+  await assert.rejects(stageRuntime(args), /Invalid bounded regular build file/);
+  assert.deepEqual(readdirSync(args.outputParent).sort(), ['apps', 'cargo-deps-image.exe', 'release']);
+  unlinkSync(binary);
+  copyFileSync(cargoDeps, binary);
+  assert.equal(lstatSync(binary).nlink, 1);
+  const batch = await stageRuntime(args);
+  const staged = join(batch.directory, 'rsrs-runtime-' + target + '.exe');
+  assert.deepEqual(readFileSync(staged), readFileSync(cargoDeps));
+  assert.equal(lstatSync(staged).nlink, 1);
 });

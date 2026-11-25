@@ -1,10 +1,19 @@
 # Stage a local Runtime build
 
 Run from a clean checkout. Build the requested Runtime target with the existing
-locked native or musl builder first. Use its exact profile output directory
-and the `build/respire_core_sdk-*/out/source-build.json` for that build invocation
-(as printed by Cargo's build-script-executed JSON message). Do not pass an
-unrelated receipt, cached binary, or arbitrary files from another build.
+locked native or musl builder first. Read the exact
+`build/respire_core_sdk-*/out/source-build.json` from that invocation's Cargo
+`build-script-executed` JSON message. Cargo can hardlink its profile executable
+to the copy in `deps`; the staging tool deliberately refuses multiply linked files.
+
+In a fresh, private scratch profile outside Cargo's target directory, copy
+(don't link) only `rsrs-runtime` (or `rsrs-runtime.exe`), each basename listed in
+`runtime_files` from the source receipt, and the receipt itself. Preserve its
+`build/respire_core_sdk-<hash>/out/source-build.json` location inside the scratch
+profile. After copying, check the SHA-256 of each copy against its original;
+the stager also verifies the native resources against the receipt pins.
+Do not copy metadata or files from another invocation. Pass the scratch profile
+and the copied receipt as the build inputs below.
 
 ```
 node apps/runtime/scripts/stage-runtime-release.mjs <runtime-component-tag> <checkout-sha> <target-triple> <absolute-build-dir> <absolute-source-build.json> <absolute-output-parent>
