@@ -490,8 +490,10 @@ func (m *Manager) executeRPC(ctx context.Context, method string, args []string, 
 
 func (m *Manager) executeRPCScoped(ctx context.Context, method string, args []string, id string, scope *runtimeScope) (json.RawMessage, error) {
 	parent, _, _ := strings.Cut(id, "/")
+	preview := false
 	m.mu.Lock()
 	if job := m.jobs[parent]; job != nil {
+		preview = id == parent && job.Name == "organize_resort_preview" && !job.write && !job.host
 		job.Scope, job.RuntimeID = scope, id
 		if job.write {
 			if err := m.persistOperationsLocked(); err != nil {
@@ -507,6 +509,9 @@ func (m *Manager) executeRPCScoped(ctx context.Context, method string, args []st
 	}
 	if legacyRPCUsesReceipt(method) && (reply.Scope == nil || *reply.Scope != *scope || reply.OperationID != id) {
 		return nil, &unconfirmedError{id, errors.New(i18n.Messagefb9a457abcc23607)}
+	}
+	if preview && completedOrganizePreview(id, scope, method, args, reply) {
+		return reply.Envelope, nil
 	}
 	return reply.Envelope, responseError(reply)
 }
