@@ -38,3 +38,28 @@ test('no export, no test, and duplicate exports fail', () => {
   assert.throws(() => runtimeRows(line));
   assert.throws(() => runtimeRows([line, line, pass].join('\n')));
 });
+
+test('reviewed gaps must match exactly and shrink when a route is bound', () => {
+  const gaps = [
+    "DELETE /v1/spaces/{spaceId} deleteSpace",
+    "GET /v1/backups/export exportBackup",
+    "GET /v1/spaces listSpaces",
+    "GET /v1/spaces/{spaceId} getSpace",
+    "PATCH /v1/spaces/{spaceId} updateSpace",
+    "POST /v1/backups/import importBackup",
+    "POST /v1/host/transactions/login executeLoginTransaction",
+    "POST /v1/host/transactions/logout executeLogoutTransaction",
+    "POST /v1/organize/split splitOrganizeNode",
+    "POST /v1/spaces createSpace",
+    "POST /v1/spaces/{spaceId}/members inviteSpaceMember"
+  ];
+  const canonical = [...expected, ...gaps];
+  const options = {ratchet: true};
+  assert.deepEqual(compare(canonical, [route], options), {registered: 1, canonical: 12, missing: 11});
+  assert.throws(() => compare(canonical, [route]), /missing:/);
+  assert.throws(() => compare(canonical, [], options), /missing: GET .*memories/);
+  const added = {method: 'GET', path: '/v1/spaces', operation_id: 'listSpaces'};
+  assert.throws(() => compare(canonical, [route, added], options), /remove stale reviewed gap/);
+  assert.throws(() => compare(canonical.slice(0, -1), [route], options), /remove stale reviewed gap/);
+  assert.throws(() => compare(canonical, [route, {...added, operation_id: 'listOtherSpaces'}], options), /unexpected:/);
+});

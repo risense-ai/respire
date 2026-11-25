@@ -12,6 +12,22 @@ const methods = new Set(['delete', 'get', 'head', 'options', 'patch', 'post', 'p
 const marker = 'RESPIRE_V1_ROUTES_JSON=';
 const own = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
 
+// CARD-010 #7: reviewed missing registrations at d8e6612 (33 of 44 live).
+// Delete a row in the same change that registers it. Never add new exceptions.
+const reviewedMissing = Object.freeze([
+  "DELETE /v1/spaces/{spaceId} deleteSpace",
+  "GET /v1/backups/export exportBackup",
+  "GET /v1/spaces listSpaces",
+  "GET /v1/spaces/{spaceId} getSpace",
+  "PATCH /v1/spaces/{spaceId} updateSpace",
+  "POST /v1/backups/import importBackup",
+  "POST /v1/host/transactions/login executeLoginTransaction",
+  "POST /v1/host/transactions/logout executeLogoutTransaction",
+  "POST /v1/organize/split splitOrganizeNode",
+  "POST /v1/spaces createSpace",
+  "POST /v1/spaces/{spaceId}/members inviteSpaceMember"
+]);
+
 function unique(items, description) {
   assert.equal(new Set(items).size, items.length, 'duplicate ' + description);
 }
@@ -77,7 +93,7 @@ export function canonicalTuples(document) {
   return expected;
 }
 
-export function compare(expected, rows) {
+export function compare(expected, rows, {ratchet = false} = {}) {
   assert.ok(Array.isArray(rows), 'runtime must export an array');
   const actual = rows.map(({method, path, operation_id}) => tuple(method, path, operation_id));
   for (const [items, name] of [[expected, 'canonical'], [actual, 'Runtime']]) {
@@ -88,10 +104,16 @@ export function compare(expected, rows) {
   const actualSet = new Set(actual);
   const missing = expected.filter((item) => !actualSet.has(item)).sort();
   const unexpected = actual.filter((item) => !expectedSet.has(item)).sort();
-  assert.ok(missing.length === 0 && unexpected.length === 0,
-    ['Runtime/OpenAPI route parity mismatch',
-      ...missing.map((item) => 'missing: ' + item),
-      ...unexpected.map((item) => 'unexpected: ' + item)].join('\n'));
+  const acknowledged = ratchet ? reviewedMissing : [];
+  unique(acknowledged, 'reviewed gap');
+  const unreviewed = missing.filter((item) => !acknowledged.includes(item));
+  const stale = acknowledged.filter((item) => !missing.includes(item));
+  assert.ok(unreviewed.length === 0 && unexpected.length === 0 && stale.length === 0,
+    ['Runtime/OpenAPI route registration mismatch',
+      ...unreviewed.map((item) => 'missing: ' + item),
+      ...unexpected.map((item) => 'unexpected: ' + item),
+      ...stale.map((item) => 'remove stale reviewed gap: ' + item)].join('\n'));
+  return {registered: actual.length, canonical: expected.length, missing: missing.length};
 }
 
 export function runtimeRows(stdout) {
@@ -117,7 +139,9 @@ function runRustTest(name) {
 }
 
 function main() {
-  assert.equal(process.argv.length, 2, 'this check builds and runs the actual Runtime Rust test');
+  const args = process.argv.slice(2);
+  const ratchet = args.length === 1 && args[0] === '--reviewed-gap-ratchet';
+  assert.ok(args.length === 0 || ratchet, 'only --reviewed-gap-ratchet is supported');
   const lock = JSON.parse(read('contracts/sync.lock.json'));
   assert.match(lock.commit, /^[0-9a-f]{40}$/);
   assert.equal(lock.source_repo, 'risense-ai/respire-resources');
@@ -130,9 +154,13 @@ function main() {
   const expected = canonicalTuples(load(raw.toString('utf8')));
   assert.equal(expected.length, 44, 'unexpected change to this card\'s canonical operation count');
   const registered = runtimeRows(runRustTest('export_registered_routes'));
-  compare(expected, registered);
+  const counts = compare(expected, registered, {ratchet});
   runRustTest('real_router_health_and_problem_wire_shapes');
-  console.log('Runtime/OpenAPI route parity: ' + expected.length + '/' + expected.length + ' at ' + lock.commit);
+  console.log(
+    'Runtime/OpenAPI registrations: ' + counts.registered + '/' + counts.canonical
+    + ' at ' + lock.commit
+    + (counts.missing ? ' (' + counts.missing + ' reviewed gaps; NOT full parity)' : ' (full registration parity)')
+  );
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) main();

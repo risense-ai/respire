@@ -412,6 +412,10 @@ jobs:
         with:
           node-version: "22"
 
+      - name: Install pinned parser for Runtime registration check
+        working-directory: packages/runtime-sdk-ts
+        run: npm ci --ignore-scripts
+
       - name: Build and link Runtime with Core from this checkout
         shell: bash
         env:
@@ -428,6 +432,8 @@ jobs:
           mkdir -- "$RSRS_DATA_DIR"
           # Existing storage and migration tests opt into synthetic Core inference.
           RSRS_CORE_TEST_MODE=1 cargo test --manifest-path apps/runtime/Cargo.toml --locked --workspace --lib --tests --bins
+          node --test apps/runtime/scripts/test-v1-route-parity.test.mjs
+          RSRS_CORE_TEST_MODE=1 node apps/runtime/scripts/test-v1-route-parity.mjs --reviewed-gap-ratchet
 
   cli-ci:
     name: cli-ci
