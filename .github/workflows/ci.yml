@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, verify/card-008-client2-only]
   pull_request:
     branches: [main]
   workflow_dispatch:
