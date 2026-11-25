@@ -20,6 +20,32 @@ pub fn set_index_root(root: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
+/// Scope the optional owner-selected index root to one synchronous worker request.
+/// An absent root means no local index access, not the previous request's root.
+pub(crate) fn with_index_root<T>(
+    root: Option<&std::path::Path>,
+    run: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let root = root
+        .map(|root| -> Result<_> {
+            anyhow::ensure!(root.is_absolute(), "Core index root must be absolute");
+            let root = root.canonicalize().context("Core index root is unavailable")?;
+            anyhow::ensure!(root.is_dir(), "Core index root must be a directory");
+            Ok(root)
+        })
+        .transpose()?;
+
+    struct RestoreRoot(Option<std::path::PathBuf>);
+    impl Drop for RestoreRoot {
+        fn drop(&mut self) {
+            INDEX_ROOT.with(|slot| *slot.borrow_mut() = self.0.take());
+        }
+    }
+
+    let _restore = RestoreRoot(INDEX_ROOT.with(|slot| slot.replace(root)));
+    run()
+}
+
 pub fn execute<T: DeserializeOwned>(operation: &str, mut payload: Value) -> Result<T> {
     let selection = crate::profiles::current()?;
     if let Some(selection) = selection.as_ref().filter(|s| s.backend_profile.backend == "host_transport") {

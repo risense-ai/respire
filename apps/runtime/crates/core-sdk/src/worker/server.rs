@@ -2,6 +2,20 @@ use super::*;
 
 type CallbackMap = Arc<Mutex<HashMap<u64, mpsc::Sender<Value>>>>;
 
+// The host serializes an optional current root on every request. Keep its
+// selection local to this worker frame, including root-less frames.
+fn with_frame_index_root<T>(root: Value, run: impl FnOnce() -> Result<T>) -> Result<T> {
+    let root = match &root {
+        Value::Null => None,
+        Value::String(path) => Some(std::path::Path::new(path)),
+        _ => bail!("invalid Core worker index root"),
+    };
+    crate::business::with_index_root(root, run)
+}
+
+#[cfg(test)]
+mod index_scope_tests;
+
 /// Hidden binary entry. No App, profile migration, store, or LibraryLock is opened.
 pub fn run() -> Result<()> {
     crate::bge::m3_model_dir()?;
@@ -34,10 +48,8 @@ pub fn run() -> Result<()> {
                     break;
                 };
                 let id = frame["id"].as_u64().unwrap_or(u64::MAX);
-                let result = (|| -> Result<Value> {
-                    if let Some(root) = frame["index_root"].as_str() {
-                        crate::business::set_index_root(std::path::Path::new(root))?;
-                    }
+                let root = frame.get_mut("index_root").map(Value::take).unwrap_or(Value::Null);
+                let result = with_frame_index_root(root, || -> Result<Value> {
                     let operation_value = frame["operation"].take();
                     let operation = operation_value
                         .as_str()
@@ -100,7 +112,7 @@ pub fn run() -> Result<()> {
                         Some(selection) => crate::profiles::scoped(selection, execute),
                         None => execute(),
                     }
-                })();
+                });
                 let body = match &result {
                     Ok(value) => ResponseBody::Result { result: value },
                     Err(error) => ResponseBody::Error {
