@@ -70,6 +70,9 @@ fn verify_control_authority(
         && maintenance_bytes.is_none()
         && grant.is_none_or(|grant| grant.maintenance.is_none())
     {
+        // Legacy admission writes this journal before the Paused marker.
+        // Do not start listening in the gap between those durable writes.
+        require_no_orphaned_keygen(&control)?;
         // Registration belongs to the host. Only transaction authority needs it.
         return Ok(());
     }
@@ -123,6 +126,42 @@ fn verify_control_authority(
         }
     }
     Ok(())
+}
+
+fn require_no_orphaned_keygen(control: &Path) -> Result<()> {
+    match fs::symlink_metadata(control.join("offline-keygen.json")) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).context("check offline key-generation recovery fence"),
+        Ok(_) => anyhow::bail!("offline key-generation admission must be recovered before serving"),
+    }
+}
+
+#[cfg(test)]
+mod keygen_fence_tests {
+    use super::*;
+
+    #[test]
+    fn ordinary_admission_refuses_a_keygen_journal_without_reading_or_mutating_it() -> Result<()> {
+        struct OwnedScratch(PathBuf);
+        impl Drop for OwnedScratch {
+            fn drop(&mut self) {
+                let _ = fs::remove_file(self.0.join("offline-keygen.json"));
+                let _ = fs::remove_dir(&self.0);
+            }
+        }
+
+        let path =
+            std::env::temp_dir().join(format!("respire-keygen-fence-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&path)?;
+        let scratch = OwnedScratch(path);
+        require_no_orphaned_keygen(&scratch.0)?;
+        let journal = scratch.0.join("offline-keygen.json");
+        let witness = b"synthetic recovery journal";
+        fs::write(&journal, witness)?;
+        assert!(require_no_orphaned_keygen(&scratch.0).is_err());
+        assert_eq!(fs::read(journal)?, witness);
+        Ok(())
+    }
 }
 
 #[cfg(test)]
