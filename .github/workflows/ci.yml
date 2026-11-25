@@ -417,11 +417,16 @@ jobs:
             run_native_case respire_core_sdk \
               worker::candidate::tests::native_owned_candidate_can_be_reaped_without_retiring_foreground --ignored
             unset RSRS_NATIVE_CANDIDATE_TEST_BINARY
-            for case_name in \
-              wal_read_stays_old_across_interleaved_write_and_stale_publication_refuses \
-              pending_target_and_physical_database_are_bound; do
-              run_native_case respire_storage "transport::local::model_switch_source::tests::$case_name"
-            done
+            (
+              # SQLite tests use NOFOLLOW; avoid the logical /var alias on macOS.
+              TMPDIR="$(cd -- "$RUNNER_TEMP" && pwd -P)"
+              export TMPDIR
+              for case_name in \
+                wal_read_stays_old_across_interleaved_write_and_stale_publication_refuses \
+                pending_target_and_physical_database_are_bound; do
+                run_native_case respire_storage "transport::local::model_switch_source::tests::$case_name"
+              done
+            )
           fi
 
       - name: Verify the native macOS device-local catalog and SQLite migration fence
