@@ -413,10 +413,10 @@ jobs:
           done
 
           if [ "$RUNNER_OS" = macOS ]; then
-            export RESPIRE_NATIVE_CANDIDATE_TEST_BINARY="$binary"
+            export RSRS_NATIVE_CANDIDATE_TEST_BINARY="$binary"
             run_native_case respire_core_sdk \
               worker::candidate::tests::native_owned_candidate_can_be_reaped_without_retiring_foreground --ignored
-            unset RESPIRE_NATIVE_CANDIDATE_TEST_BINARY
+            unset RSRS_NATIVE_CANDIDATE_TEST_BINARY
             for case_name in \
               wal_read_stays_old_across_interleaved_write_and_stale_publication_refuses \
               pending_target_and_physical_database_are_bound; do
