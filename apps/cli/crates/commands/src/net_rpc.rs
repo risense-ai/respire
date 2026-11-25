@@ -229,7 +229,7 @@ pub fn pid_is_respire(pid: u32) -> bool {
     }
     #[cfg(all(unix, not(target_os = "linux")))]
     {
-        darwin_runtime_name(std::process::Command::new("ps")
+        process::darwin_runtime_name(std::process::Command::new("ps")
             .args(["-p", &pid.to_string(), "-o", "comm="])
             .output()).is_ok()
     }
