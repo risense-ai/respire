@@ -520,6 +520,8 @@ pub fn resolve_runtime_bin() -> Result<PathBuf> {
 
 include!("runtime_fetch/metadata.rs");
 
+include!("runtime_fetch/release_source.rs");
+
 include!("runtime_fetch/download.rs");
 
 include!("runtime_fetch/archive.rs");
