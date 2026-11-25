@@ -147,7 +147,7 @@ fn linux_process_arguments(command: &[u8]) -> Result<Vec<&str>> {
 }
 
 #[cfg(any(test, all(unix, not(target_os = "linux"))))]
-fn darwin_runtime_name(output: std::io::Result<std::process::Output>) -> Result<()> {
+pub(super) fn darwin_runtime_name(output: std::io::Result<std::process::Output>) -> Result<()> {
     let output = output.map_err(|error| anyhow::anyhow!(
         "stage=process_name class=ps_spawn_failed os_kind={:?} os_code={:?}",
         error.kind(), error.raw_os_error()

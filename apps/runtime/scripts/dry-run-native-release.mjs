@@ -2,24 +2,19 @@ import assert from 'node:assert/strict';
 import {execFileSync} from 'node:child_process';
 import {createHash} from 'node:crypto';
 import {constants, closeSync, copyFileSync, createReadStream, mkdirSync, mkdtempSync, openSync,
-  readFileSync, readdirSync, writeFileSync} from 'node:fs';
+  existsSync, readFileSync, readdirSync, writeFileSync} from 'node:fs';
 import {dirname, isAbsolute, join, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {parseComponentTag} from '../../../scripts/component-release-plan.mjs';
 import {stageRuntimeCargo} from './stage-runtime-cargo.mjs';
 import {nativeRealpath} from './runtime-release-smoke-helpers.mjs';
 
+import {assertMachONative, assertNativeLane, assertNativePE, withoutLoaderOverrides} from './runtime-native-release-platform.mjs';
+
 const lane = process.env.RUNTIME_DRY_RUN_LANE;
-const lanes = new Map([
-  ['windows-x64', {target: 'x86_64-pc-windows-msvc', os: 'Windows', platform: 'win32', binary: 'rsrs-runtime.exe'}],
-  ['linux-gnu-x64', {target: 'x86_64-unknown-linux-gnu', os: 'Linux', platform: 'linux', binary: 'rsrs-runtime'}],
-]);
-assert(lanes.has(lane), 'Unsupported native dry-run lane');
-const {target, os, platform, binary} = lanes.get(lane);
-const image = `rsrs-runtime-${target}${platform === 'win32' ? '.exe' : ''}`;
-const archive = `rsrs-runtime-${target}.tar.gz`;
-const reportName = `runtime-build-${target}.json`;
 const root = nativeRealpath(resolve(dirname(fileURLToPath(import.meta.url)), '../../..'));
+const run = (command, args, options = {}) => execFileSync(command, args,
+  {encoding: 'utf8', cwd: root, ...options});
 const env = process.env;
 assert.equal(env.GITHUB_ACTIONS, 'true', 'Requires GitHub Actions');
 assert.match(env.GITHUB_WORKFLOW_SHA ?? '', /^[0-9a-f]{40}$/);
@@ -28,19 +23,20 @@ assert.match(env.GITHUB_RUN_ID ?? '', /^[1-9][0-9]*$/);
 assert.match(env.GITHUB_RUN_ATTEMPT ?? '', /^[1-9][0-9]*$/);
 assert.equal(env.RUNNER_ENVIRONMENT, 'github-hosted', 'Requires an ephemeral hosted runner');
 assert.equal(env.GITHUB_REPOSITORY, 'risense-ai/respire', 'Unexpected source repository');
-assert.equal(env.RUNNER_OS, os, 'Unexpected runner OS');
-assert.equal(env.RUNNER_ARCH, 'X64', 'Requires native x64 hardware');
-assert.equal(process.platform, platform);
-assert.equal(process.arch, 'x64');
 assert(isAbsolute(env.RUNNER_TEMP ?? ''), 'Runner temp path must be absolute');
+const rustHost = run('rustc', ['+1.95.0', '-vV']).match(/^host: ([^\r\n]+)$/m)?.[1];
+const {target, platform, binary, arch} = assertNativeLane(lane, {
+  runnerOS: env.RUNNER_OS, runnerArch: env.RUNNER_ARCH, platform: process.platform,
+  arch: process.arch, rustHost,
+});
+const image = `rsrs-runtime-${target}${platform === 'win32' ? '.exe' : ''}`;
+const archive = `rsrs-runtime-${target}.tar.gz`;
+const reportName = `runtime-build-${target}.json`;
 
-const run = (command, args, options = {}) => execFileSync(command, args,
-  {encoding: 'utf8', cwd: root, ...options});
 const source = run('git', ['rev-parse', 'HEAD']).trim();
 assert.match(source, /^[0-9a-f]{40}$/);
 assert.equal(source, env.GITHUB_SHA, 'Checkout must match the Actions event SHA');
 assert.equal(run('git', ['status', '--porcelain', '--untracked-files=no']).trim(), '', 'Tracked checkout must be clean');
-assert.equal(run('rustc', ['+1.95.0', '-vV']).match(/^host: ([^\r\n]+)$/m)?.[1], target, 'Unexpected Rust host');
 const tag = env.RUNTIME_COMPONENT_TAG;
 const {component, version} = parseComponentTag(tag);
 assert.equal(component, 'runtime');
@@ -60,9 +56,11 @@ async function hashFile(file) {
   return hash.digest('hex');
 }
 
-const cleanLoaderEnv = Object.fromEntries(Object.entries(env).filter(([key]) =>
-  !/^LD_|^GLIBC_TUNABLES$/i.test(key)));
+const cleanLoaderEnv = {...withoutLoaderOverrides(env), LC_ALL: 'C'};
 const buildEnv = {...cleanLoaderEnv};
+// Override inputs are permitted by local source builds but never by this hosted producer.
+for (const key of ['ORT_LIB_PATH', 'ORT_LIB_LOCATION', 'ORT_LIB_PROFILE', 'ORT_SKIP_DOWNLOAD',
+  'ORT_PREFER_DYNAMIC_LINK', 'RUSTFLAGS', 'CARGO_ENCODED_RUSTFLAGS']) delete buildEnv[key];
 let ortArchiveSha256;
 if (platform === 'linux') {
   const ort = join(work, 'pinned-ort');
@@ -72,7 +70,6 @@ if (platform === 'linux') {
   // images use the Runtime build.rs sibling lookup; do not add another RPATH.
   Object.assign(buildEnv, {ORT_LIB_PATH: ort, ORT_SKIP_DOWNLOAD: '1', ORT_PREFER_DYNAMIC_LINK: '1',
     RUSTFLAGS: '-C target-feature=-crt-static -C embed-bitcode=no'});
-  delete buildEnv.CARGO_ENCODED_RUSTFLAGS;
 }
 
 const descriptor = openSync(cargoLog, 'wx');
@@ -84,9 +81,13 @@ try {
   closeSync(descriptor);
 }
 assert.equal(run('git', ['status', '--porcelain', '--untracked-files=no']).trim(), '', 'Build modified tracked source');
+const profile = join(targetDir, target, 'release');
+const executable = join(profile, binary);
+let loaderMode;
 if (platform === 'linux') {
-  const profile = join(targetDir, target, 'release');
-  const executable = join(profile, binary);
+  const header = run('readelf', ['-h', executable], {env: cleanLoaderEnv});
+  const expectedMachine = arch === 'arm64' ? 'AArch64' : 'Advanced Micro Devices X86-64';
+  assert.equal(header.match(/^\s*Machine:\s*(.+)$/m)?.[1].trim(), expectedMachine, 'Unexpected ELF machine');
   const dynamic = run('readelf', ['-d', executable], {env: cleanLoaderEnv});
   const searchPaths = dynamic.split('\n').filter(line => /\((?:RPATH|RUNPATH)\)/.test(line));
   assert.equal(searchPaths.length, 1, 'Expected a single relative ELF loader path');
@@ -96,6 +97,21 @@ if (platform === 'linux') {
   assert(!links.includes('not found'), 'Runtime has an unresolved native dependency');
   const loaded = links.match(/^\s*libonnxruntime\.so\.1 => (.+) \(0x[0-9a-f]+\)$/m)?.[1];
   assert.equal(loaded, join(profile, 'libonnxruntime.so.1'), 'Loader did not resolve the staged ONNX sidecar');
+  loaderMode = 'adjacent-dynamic';
+} else if (platform === 'win32') {
+  assertNativePE(executable, arch);
+  assertNativePE(join(profile, 'DirectML.dll'), arch);
+  const ort = join(profile, 'onnxruntime.dll');
+  if (existsSync(ort)) assertNativePE(ort, arch);
+} else {
+  const ort = join(profile, 'libonnxruntime.dylib');
+  const inspect = (command, ...args) => run(command, args, {env: cleanLoaderEnv});
+  loaderMode = assertMachONative({
+    archs: inspect('/usr/bin/lipo', '-archs', executable),
+    commands: inspect('/usr/bin/otool', '-l', executable),
+    dependencies: inspect('/usr/bin/otool', '-L', executable),
+    sidecarArchs: existsSync(ort) ? inspect('/usr/bin/lipo', '-archs', ort) : undefined,
+  });
 }
 
 const batch = await stageRuntimeCargo({root, tag, source, target, targetDir, cargoLog, outputParent: work});
@@ -132,6 +148,8 @@ writeFileSync(join(directory, `runtime-${lane}.json`), JSON.stringify({
   workflow_ref: env.GITHUB_WORKFLOW_REF, workflow_sha: env.GITHUB_WORKFLOW_SHA,
   run_id: env.GITHUB_RUN_ID, run_attempt: env.GITHUB_RUN_ATTEMPT,
   target, tag, artifact_sha256: hashes,
+  native_identity: {runner_os: env.RUNNER_OS, runner_arch: env.RUNNER_ARCH, node_arch: arch, rust_host: rustHost},
+  ...(loaderMode && {native_loader: loaderMode}),
   ...(ortArchiveSha256 && {provider_archive_sha256: ortArchiveSha256}),
   packaged_native_smoke: {passed: true, case_results: smoke.case_results},
 }, null, 2) + '\n', {flag: 'wx'});
