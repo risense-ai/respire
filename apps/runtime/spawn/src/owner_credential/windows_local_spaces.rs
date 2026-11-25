@@ -113,14 +113,57 @@ impl LocalSpaceNamespace {
     }
 
     pub fn receipt(&self, id: &str) -> io::Result<Option<Vec<u8>>> {
+        self.with_receipt(id, None::<fn(&[u8]) -> bool>, |_, receipt| receipt)
+    }
+
+    /// Keep the verified native directory open for the synchronous operation.
+    pub fn with_library_receipt<T>(
+        &self, id: &str, authorize: impl FnOnce(&[u8]) -> bool, use_path: impl FnOnce(&Path) -> T,
+    ) -> io::Result<Option<T>> {
+        self.with_receipt(id, Some(authorize), |path, _| use_path(path))
+    }
+
+    fn with_receipt<T>(
+        &self, id: &str, authorize: Option<impl FnOnce(&[u8]) -> bool>, use_path: impl FnOnce(&Path, Vec<u8>) -> T,
+    ) -> io::Result<Option<T>> {
         let name = format!("local-{}", checked_id(id)?);
         let directory = match open_managed_child(self.catalog.as_raw_handle(), &name, &self.user) {
             Ok(directory) => directory,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error),
         };
-        read_record(directory.as_raw_handle(), FINAL, &self.user, MAX_RECEIPT)
+        let record = read_record(directory.as_raw_handle(), FINAL, &self.user, MAX_RECEIPT)?;
+        if let (Some(receipt), Some(authorize)) = (record.as_deref(), authorize) {
+            if !authorize(receipt) {
+                return Ok(None);
+            }
+            verify_library_files(directory.as_raw_handle(), &self.user)?;
+        }
+        Ok(record.map(|bytes| use_path(&self.path.join(name), bytes)))
     }
+}
+
+fn verify_library_files(directory: HANDLE, user: &CurrentUser) -> io::Result<()> {
+    for (leaf, required) in [
+        ("onememory.db", true), ("lock.db", true), ("lock.db-journal", false),
+        ("onememory.db-journal", false), ("onememory.db-wal", false), ("onememory.db-shm", false),
+    ] {
+        let file = match relative_open(
+            directory, OsStr::new(leaf), META, SHARE | FILE_SHARE_DELETE,
+            None, FILE_OPEN, FILE_NON_DIRECTORY_FILE,
+        ) {
+            Ok(file) => file,
+            Err(error) if !required && error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        let handle = file.as_raw_handle();
+        checked_file(handle, None)?;
+        if user.verify_handle(handle, true).is_err() {
+            user.verify_managed_base(handle)?;
+            user.verify_inherited_model_ace(handle)?;
+        }
+    }
+    Ok(())
 }
 
 impl FreshLocalSpace {

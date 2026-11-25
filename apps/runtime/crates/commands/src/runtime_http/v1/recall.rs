@@ -53,8 +53,9 @@ async fn handle(
     }
     let query = MemoryQuery::new(&input.query).limit(limit);
     let hits = rest_dispatch::submit_recall(scope.clone(), move |ctx| {
-        reads::check_space(ctx, input.space_id)?;
-        rank(ctx, &query).map_err(|_| transport::unavailable())
+        reads::with_memory_store(ctx, input.space_id, |store, device_local| {
+            rank(ctx, store, &query, device_local).map_err(|_| transport::unavailable())
+        })
     })
     .await?;
     super::owner_control::bounded_blocking(move || transport::with_scope(&scope, || Ok(())))
@@ -67,8 +68,10 @@ async fn handle(
     )
 }
 
-fn rank(ctx: &LibraryContext<'_>, query: &MemoryQuery) -> anyhow::Result<Vec<(f32, MemoryEntry)>> {
-    let store = ctx.store;
+fn rank(
+    ctx: &LibraryContext<'_>, store: &respire_app::transport::local::LocalStore,
+    query: &MemoryQuery, device_local: bool,
+) -> anyhow::Result<Vec<(f32, MemoryEntry)>> {
     let selection = store.active_selection()?;
     let run = || {
         anyhow::ensure!(
@@ -82,7 +85,9 @@ fn rank(ctx: &LibraryContext<'_>, query: &MemoryQuery) -> anyhow::Result<Vec<(f3
                 if source.entries().next().is_none() {
                     return Ok(Vec::new());
                 }
-                if source
+                // The ordinary worker owns only the serving profile. Never
+                // send it work from a separately locked device-local space.
+                if !device_local && source
                     .memories()
                     .iter()
                     .any(|row| !row.deleted && row.local_artifact.is_empty())

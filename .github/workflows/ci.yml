@@ -132,7 +132,14 @@ jobs:
           set -euo pipefail
           base="$RATCHET_BASE"
           if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
-            base=$(git rev-parse HEAD^)
+            # Full-depth checkout fetches the trusted upstream branch.
+            main=$(git rev-parse --verify 'refs/remotes/origin/main^{commit}')
+            if [ "$GITHUB_REF" = "refs/heads/main" ]; then
+              git merge-base --is-ancestor HEAD "$main"
+              base=$(git rev-parse --verify 'HEAD^1^{commit}')
+            else
+              base=$(git merge-base HEAD "$main")
+            fi
           fi
           node --test scripts/check-line-ratchet.test.mjs
           node scripts/check-line-ratchet.mjs --base "$base"

@@ -32,7 +32,7 @@ impl Admission {
     }
 }
 
-fn outcome_unknown() -> Problem {
+pub(super) fn outcome_unknown() -> Problem {
     Problem::new(
         axum::http::StatusCode::CONFLICT,
         "space_create_outcome_unknown",
@@ -43,11 +43,12 @@ fn outcome_unknown() -> Problem {
 fn complete<T>(
     admission: &Admission,
     result: Result<V1Result<T>, oneshot::error::RecvError>,
+    unknown: fn() -> Problem,
 ) -> V1Result<T> {
     match result {
         Ok(Ok(value)) if admission.admitted() => Ok(value),
         Ok(Ok(_)) => Err(transport::unavailable()),
-        _ if admission.admitted() => Err(outcome_unknown()),
+        _ if admission.admitted() => Err(unknown()),
         Ok(Err(error)) => Err(error),
         Err(_) => Err(transport::unavailable()),
     }
@@ -58,15 +59,16 @@ pub(super) async fn await_publication<T>(
     mut receiver: oneshot::Receiver<V1Result<T>>,
     queue_deadline: std::time::Instant,
     commit_wait: Duration,
+    unknown: fn() -> Problem,
 ) -> V1Result<T> {
     match time::timeout_at(time::Instant::from_std(queue_deadline), &mut receiver).await {
-        Ok(result) => complete(admission, result),
+        Ok(result) => complete(admission, result, unknown),
         Err(_) if admission.abandon() || !admission.admitted() => {
             Err(transport::unavailable())
         }
         Err(_) => match time::timeout(commit_wait, receiver).await {
-            Ok(result) => complete(admission, result),
-            Err(_) => Err(outcome_unknown()),
+            Ok(result) => complete(admission, result, unknown),
+            Err(_) => Err(unknown()),
         }
     }
 }
@@ -83,7 +85,7 @@ mod tests {
                 let admission = Admission::default();
                 let (_pending, receipt) = oneshot::channel::<V1Result<()>>();
                 let elapsed = std::time::Instant::now() - Duration::from_secs(1);
-                let rejected = await_publication(&admission, receipt, elapsed, Duration::ZERO)
+                let rejected = await_publication(&admission, receipt, elapsed, Duration::ZERO, outcome_unknown)
                     .await.expect_err("pending preparation exceeded its deadline");
                 assert_eq!(rejected.into_response().status(), StatusCode::SERVICE_UNAVAILABLE);
                 assert!(!admission.admit());
@@ -99,19 +101,19 @@ mod tests {
                 assert!(!admission.abandon());
                 let elapsed = std::time::Instant::now() - Duration::from_secs(1);
                 let (_pending, receipt) = oneshot::channel::<V1Result<()>>();
-                let unknown = await_publication(&admission, receipt, elapsed, Duration::ZERO)
+                let unknown = await_publication(&admission, receipt, elapsed, Duration::ZERO, outcome_unknown)
                     .await.expect_err("no outcome receipt after publication admission");
                 assert_eq!(unknown.into_response().status(), StatusCode::CONFLICT);
 
                 let (writer, receipt) = oneshot::channel::<V1Result<()>>();
                 writer.send(Err(transport::unavailable())).expect("receiver alive");
-                let unknown = await_publication(&admission, receipt, elapsed, Duration::ZERO)
+                let unknown = await_publication(&admission, receipt, elapsed, Duration::ZERO, outcome_unknown)
                     .await.expect_err("admitted I/O may already have published");
                 assert_eq!(unknown.into_response().status(), StatusCode::CONFLICT);
 
                 let (writer, receipt) = oneshot::channel::<V1Result<()>>();
                 writer.send(Ok(())).expect("receiver alive");
-                await_publication(&admission, receipt, elapsed, Duration::ZERO)
+                await_publication(&admission, receipt, elapsed, Duration::ZERO, outcome_unknown)
                     .await.expect("actual receipt is returned");
             });
     }
