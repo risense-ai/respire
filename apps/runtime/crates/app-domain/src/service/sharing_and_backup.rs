@@ -362,7 +362,7 @@ pub(crate) fn backup_database_policy(src: &std::path::Path, dest: &std::path::Pa
 
 // This accepts only the detached, exclusively-created backup above, not the
 // serving library. A rollback image deliberately takes the other policy lane.
-fn sanitize_detached_backup(backup: &mut rusqlite::Connection) -> Result<()> {
+pub(crate) fn sanitize_detached_backup(backup: &mut rusqlite::Connection) -> Result<()> {
     let has_grants = backup
         .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='access_grants'")?
         .exists([])?;

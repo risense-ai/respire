@@ -15,6 +15,8 @@ mod host_config;
 mod host_config_patch;
 mod models;
 pub(crate) mod operations;
+#[cfg(all(test, unix))]
+mod backup_export;
 pub(super) mod owner_control;
 mod owner_handshake;
 mod owner_native;

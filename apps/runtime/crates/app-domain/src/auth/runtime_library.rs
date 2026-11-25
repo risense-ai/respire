@@ -40,6 +40,21 @@ pub fn with_runtime_library<T>(
 pub struct ModelSwitchVault(SessionKeys);
 
 impl RuntimeLibrary<'_> {
+    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+    pub(crate) fn backup_account(&self) -> &str {
+        self.1
+    }
+
+    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+    pub(crate) fn seal_backup_challenge(&self, challenge: &str) -> Result<(String, String)> {
+        self.0.encrypt_content(challenge)
+    }
+
+    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+    pub(crate) fn open_backup_challenge(&self, ciphertext: &str, nonce: &str) -> Result<String> {
+        self.0.decrypt_content(ciphertext, nonce)
+    }
+
     /// Decrypt one prepared candidate input under the live Runtime vault.
     /// This returns no key or session context to the isolate.
     pub fn open_model_switch_row(&self, stored: &crate::StoredMemory) -> Result<crate::MemoryEntry> {
@@ -77,3 +92,7 @@ impl ModelSwitchVault {
         crate::diary::rebuild_with_progress(store, &self.0, embedder, check, commit, progress)
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "runtime_backup_tests.rs"]
+mod backup_tests;

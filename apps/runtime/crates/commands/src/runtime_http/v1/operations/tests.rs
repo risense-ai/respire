@@ -21,15 +21,19 @@ use sse_cursor_tests::events;
 mod model_switch_tests;
 #[path = "route_fixture_helpers.rs"]
 mod route_fixture_helpers;
-use route_fixture_helpers::check_light_status_and_legacy_aliases;
+use route_fixture_helpers::{check_light_status_and_legacy_aliases, check_organize_suggestions};
 #[path = "host_config_tests.rs"]
 mod host_config_tests;
 #[path = "space_members_tests.rs"]
 mod space_members_tests;
+#[cfg(unix)]
+#[path = "backup_export_http_tests.rs"]
+mod backup_export_http_tests;
 
 const TEST: &str = "runtime_http::v1::operations::tests::scoped_sync_sse_on_production_router";
 const DEEPEN_TEST: &str = "runtime_http::v1::operations::tests::scoped_deepen_on_production_router";
 const SPACE_TEST: &str = "runtime_http::v1::operations::tests::device_local_space_patch_on_production_router";
+const BACKUP_TEST: &str = "runtime_http::v1::operations::tests::backup_export_http_tests::native_backup_stream_fixture";
 const CHILD: &str = "RSRS_CARD_010_SSE_CHILD";
 pub(super) const TOKEN: &str = "fixture-runtime-bearer";
 const NEXT_TOKEN: &str = "fixture-rotated-bearer";
@@ -55,9 +59,9 @@ fn device_local_space_patch_on_production_router() -> Result<()> {
 pub(super) fn production_router_fixture(test: &'static str) -> Result<()> {
     if std::env::var_os(CHILD).is_none() {
         let directory = tempfile::tempdir()?;
-        let fixture_root = space_members_tests::fixture_root(directory.path(), matches!(test, TEST | SPACE_TEST))?;
-        let fixture_root = route_fixture_helpers::owner_fixture_root(fixture_root, test == SPACE_TEST)?;
-        if !matches!(test, TEST | SPACE_TEST) {
+        let fixture_root = space_members_tests::fixture_root(directory.path(), matches!(test, TEST | SPACE_TEST | BACKUP_TEST))?;
+        let fixture_root = route_fixture_helpers::owner_fixture_root(fixture_root, matches!(test, SPACE_TEST | BACKUP_TEST))?;
+        if !matches!(test, TEST | SPACE_TEST | BACKUP_TEST) {
             let profile = fixture_root.join("accounts").join("outline-fixture");
             fs::create_dir_all(&profile)?;
             fs::write(fixture_root.join("client.json"), serde_json::to_vec(&json!({"data_dir": profile}))?)?;
@@ -93,7 +97,7 @@ pub(super) fn production_router_fixture(test: &'static str) -> Result<()> {
         "user": "sse-fixture", "vault_version": 4, "kdf_salt": salt,
         "urk_nonce": nonce, "wrapped_urk": wrapped,
     });
-    if test != SPACE_TEST {
+    if !matches!(test, SPACE_TEST | BACKUP_TEST) {
         session_data["addr"] = json!("http://[");
         session_data["token"] = json!("fixture-sync-token");
     }
@@ -150,6 +154,11 @@ pub(super) fn production_router_fixture(test: &'static str) -> Result<()> {
         .build()?
         .block_on(async {
             let app = crate::runtime_http::router(BOUND);
+            #[cfg(unix)]
+            if test == BACKUP_TEST {
+                crate::rpc_serve::mark_http_fixture_ready();
+                return backup_export_http_tests::check(app, &root, &token, urk).await;
+            }
             if test == SPACE_TEST {
                 crate::rpc_serve::mark_http_fixture_ready();
                 return space_members_tests::device_space_tests::check(&app, &root, true).await;
@@ -443,63 +452,6 @@ async fn check_resource_routes(app: &Router) -> Result<()> {
     assert_eq!(
         json_response(listing, StatusCode::OK).await?["entries"],
         json!([second])
-    );
-    Ok(())
-}
-
-async fn check_organize_suggestions(app: &Router) -> Result<()> {
-    let path = "/v1/organize/suggestions";
-    assert_eq!(
-        request(app, "GET", path, None).await?.status(),
-        StatusCode::UNAUTHORIZED
-    );
-    for (query, status) in [
-        ("top=0", StatusCode::BAD_REQUEST),
-        ("top=201", StatusCode::BAD_REQUEST),
-        ("top=1&top=2", StatusCode::BAD_REQUEST),
-        ("space_id=other", StatusCode::NOT_FOUND),
-    ] {
-        let response = request(app, "GET", &format!("{path}?{query}"), Some(TOKEN)).await?;
-        assert_eq!(response.status(), status);
-        assert_eq!(response.headers()[header::CONTENT_TYPE], "application/problem+json");
-    }
-    assert_eq!(
-        json_response(request(app, "GET", path, Some(TOKEN)).await?, StatusCode::OK).await?,
-        json!({"suggestions": []})
-    );
-
-    let create = |body| send(app, "POST", "/v1/memories", Some(TOKEN), Some(body));
-    let root = json_response(create(json!({"content": "Fixture tree root"})).await?, StatusCode::CREATED).await?;
-    let id = root["id"].as_str().context("fixture root ID")?;
-    let mut last_child = Value::Null;
-    for index in 0..15 {
-        last_child = json_response(
-            create(json!({"content": format!("Fixture tree child {index}"), "parent_id": id})).await?,
-            StatusCode::CREATED,
-        ).await?;
-    }
-    let response = request(app, "GET", &format!("{path}?space_id=main&top=1"), Some(TOKEN)).await?;
-    assert_eq!(
-        json_response(response, StatusCode::OK).await?,
-        json!({"suggestions": [{
-            "kind": "deepen",
-            "target_id": id,
-            "summary": "Consider grouping the 15 direct children of this root."
-        }]})
-    );
-    let child_id = last_child["id"].as_str().context("fixture child ID")?;
-    let child_path = format!("/v1/memories/{child_id}");
-    assert_eq!(
-        json_response(request(app, "GET", &child_path, Some(TOKEN)).await?, StatusCode::OK).await?,
-        last_child
-    );
-    assert_eq!(
-        request(app, "DELETE", &child_path, Some(TOKEN)).await?.status(),
-        StatusCode::NO_CONTENT
-    );
-    assert_eq!(
-        json_response(request(app, "GET", path, Some(TOKEN)).await?, StatusCode::OK).await?,
-        json!({"suggestions": []})
     );
     Ok(())
 }

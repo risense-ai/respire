@@ -211,6 +211,73 @@ fn valid_id(id: &str) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
+fn fingerprint_path(path: &Path) -> Result<String> {
+    Ok(format!("{:x}", Sha256::digest(fs::canonicalize(path)?.to_string_lossy().as_bytes())))
+}
+
+fn fingerprint_account(account: &str) -> String {
+    format!("{:x}", Sha256::digest(account.as_bytes()))
+}
+
+fn snapshot_key_challenge(id: &str, library: &str, account: &str) -> String {
+    format!("snapshot-key-check:v1:{id}:{library}:{account}")
+}
+
+fn install_snapshot_key_check(copy: &Connection, nonce: &str, ciphertext: &str) -> Result<()> {
+    copy.execute_batch("DROP TABLE IF EXISTS snapshot_key_check; CREATE TABLE snapshot_key_check(singleton INTEGER PRIMARY KEY CHECK(singleton=1),nonce TEXT NOT NULL,ciphertext TEXT NOT NULL);")?;
+    copy.execute(
+        "INSERT INTO snapshot_key_check VALUES(1,?1,?2)",
+        rusqlite::params![nonce, ciphertext],
+    )?;
+    Ok(())
+}
+
+fn describe_detached_snapshot(
+    database: &Path,
+    id: String,
+    note: &str,
+    source_library: String,
+    account_fingerprint: String,
+) -> Result<Manifest> {
+    let (entries, sqlite_user_version) = inventory(database)?;
+    let database_schema_sha256 = schema_digest(database)?;
+    // Legacy diagnostic backups intentionally retain a damaged witness.
+    // Transfer staging must separately refuse such a witness.
+    let (witness, witness_problem) = match crate::transport::local::witness_checkpoint_file(database) {
+        Ok(report) => (report, None),
+        Err(_) => (None, Some("witness checkpoint is unverifiable; diagnostic copy only".to_owned())),
+    };
+    let copy = Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let selection: Option<String> = copy.query_row(
+        "SELECT value FROM meta WHERE key=?1",
+        [crate::core_sdk::profiles::ACTIVE_SELECTION_KEY],
+        |row| row.get(0),
+    ).optional()?;
+    let model = selection.map(|value| serde_json::from_str::<crate::core_sdk::profiles::Selection>(&value).map(|selection| selection.model))
+        .transpose()?.unwrap_or_else(|| "m3".to_owned());
+    drop(copy);
+    Ok(Manifest {
+        schema_version: 1,
+        id,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        note: note.to_owned(),
+        database_sha256: digest_file(database)?,
+        bytes: fs::metadata(database)?.len(),
+        entries,
+        source_library,
+        account_fingerprint,
+        database_schema_sha256,
+        sqlite_user_version,
+        sdk_version: crate::core_sdk::CORE_VERSION.to_owned(),
+        sdk_abi: crate::core_sdk::ABI_VERSION,
+        model,
+        witness_head: witness.as_ref().map(|report| report.head.clone()),
+        witness_count: witness.as_ref().map(|report| report.count),
+        witness_intact: if witness_problem.is_some() { Some(false) } else { witness.as_ref().map(|report| report.intact) },
+        witness_problem,
+    })
+}
+
 pub fn create(
     root: &Path,
     account: &str,
@@ -234,63 +301,17 @@ pub fn create(
     // remove a file that was present before our successful backup operation.
     crate::service::backup_database(&source, &database)?;
     let result = (|| -> Result<Manifest> {
-        let (entries, sqlite_user_version) = inventory(&database)?;
-        let sdk_version = crate::core_sdk::CORE_VERSION.to_owned();
-        let source_library = format!(
-            "{:x}",
-            Sha256::digest(fs::canonicalize(&source)?.to_string_lossy().as_bytes())
-        );
-        let account_fingerprint = format!("{:x}", Sha256::digest(account.as_bytes()));
-        let database_schema_sha256 = schema_digest(&database)?;
-        let challenge =
-            format!("snapshot-key-check:v1:{id}:{source_library}:{account_fingerprint}");
+        let source_library = fingerprint_path(&source)?;
+        let account_fingerprint = fingerprint_account(account);
+        let challenge = snapshot_key_challenge(&id, &source_library, &account_fingerprint);
         let (nonce, ciphertext) = keys.encrypt_content(&challenge)?;
         {
             let copy = Connection::open(&database)?;
-            copy.execute_batch("DROP TABLE IF EXISTS snapshot_key_check; CREATE TABLE snapshot_key_check(singleton INTEGER PRIMARY KEY CHECK(singleton=1),nonce TEXT NOT NULL,ciphertext TEXT NOT NULL);")?;
-            copy.execute(
-                "INSERT INTO snapshot_key_check VALUES(1,?1,?2)",
-                rusqlite::params![nonce, ciphertext],
-            )?;
+            install_snapshot_key_check(&copy, &nonce, &ciphertext)?;
         }
-        // A diagnostic pre-restore backup must preserve a damaged ledger too.
-        // Restore targets remain fail-closed in read_manifest below.
-        let (witness, witness_problem) =
-            match crate::transport::local::witness_checkpoint_file(&database) {
-                Ok(report) => (report, None),
-                Err(_) => (
-                    None,
-                    Some("witness checkpoint is unverifiable; diagnostic copy only".to_owned()),
-                ),
-            };
-        let manifest = Manifest {
-            schema_version: 1,
-            id,
-            created_at: chrono::Utc::now().to_rfc3339(),
-            note: note.to_owned(),
-            database_sha256: digest_file(&database)?,
-            bytes: fs::metadata(&database)?.len(),
-            entries,
-            source_library,
-            account_fingerprint,
-            database_schema_sha256,
-            sqlite_user_version,
-            sdk_version,
-            sdk_abi: crate::core_sdk::ABI_VERSION,
-            model: {
-                let copy = Connection::open_with_flags(&database,OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-                let snapshot: Option<String> = copy.query_row("SELECT value FROM meta WHERE key=?1",[crate::core_sdk::profiles::ACTIVE_SELECTION_KEY],|r|r.get(0)).optional()?;
-                snapshot.map(|v| serde_json::from_str::<crate::core_sdk::profiles::Selection>(&v).map(|s|s.model)).transpose()?.unwrap_or_else(||"m3".to_owned())
-            },
-            witness_head: witness.as_ref().map(|report| report.head.clone()),
-            witness_count: witness.as_ref().map(|report| report.count),
-            witness_intact: if witness_problem.is_some() {
-                Some(false)
-            } else {
-                witness.as_ref().map(|report| report.intact)
-            },
-            witness_problem,
-        };
+        let manifest = describe_detached_snapshot(
+            &database, id, note, source_library, account_fingerprint,
+        )?;
         let mut file = private_new(&temporary)?;
         file.write_all(&serde_json::to_vec_pretty(&manifest)?)?;
         file.sync_all()?;
@@ -443,6 +464,8 @@ pub fn list(root: &Path) -> Result<Vec<Manifest>> {
     );
     Ok(report.snapshots)
 }
+
+pub mod backup_archive;
 
 include!("snapshot/journal.rs");
 include!("snapshot/legacy_recovery.rs");
