@@ -1,4 +1,4 @@
-use super::{backup_database_policy, sanitize_detached_backup};
+use super::{backup_database, backup_database_policy, sanitize_detached_backup};
 use rusqlite::{params, Connection};
 use std::fs;
 
@@ -76,5 +76,57 @@ fn leaves_a_legacy_database_without_a_grant_schema_compatible() -> anyhow::Resul
     assert!(!backup
         .prepare("SELECT 1 FROM sqlite_master WHERE name='access_grants'")?
         .exists([])?);
+    Ok(())
+}
+
+fn seed_cascade(backup: &Connection) -> anyhow::Result<()> {
+    let foreign_keys: i64 = backup.query_row("PRAGMA foreign_keys", [], |r| r.get(0))?;
+    assert_eq!(foreign_keys, 1, "Runtime's locked SQLite must enable foreign keys");
+    backup.execute_batch(
+        "CREATE TABLE access_grants(id INTEGER PRIMARY KEY);
+         CREATE TABLE dependent(id INTEGER PRIMARY KEY,
+             grant_id INTEGER REFERENCES access_grants(id) ON DELETE CASCADE);
+         INSERT INTO access_grants VALUES(11);
+         INSERT INTO dependent VALUES(22,11);",
+    )?;
+    Ok(())
+}
+
+#[test]
+fn cascade_into_other_rows_is_rejected_and_rolled_back() -> anyhow::Result<()> {
+    let mut backup = Connection::open_in_memory()?;
+    seed_cascade(&backup)?;
+    let error = sanitize_detached_backup(&mut backup).unwrap_err();
+    assert_eq!(error.to_string(), "snapshot grant removal changed unrelated rows");
+    let rows: (i64, i64) = backup.query_row(
+        "SELECT d.id,g.id FROM dependent d JOIN access_grants g ON g.id=d.grant_id",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    assert_eq!(rows, (22, 11));
+    Ok(())
+}
+
+#[test]
+fn failed_portable_export_removes_only_its_new_destination() -> anyhow::Result<()> {
+    let root = tempfile::tempdir()?;
+    let source = root.path().join("source.db");
+    let destination = root.path().join("portable.db");
+    let existing = root.path().join("existing.db");
+    seed_cascade(&Connection::open(&source)?)?;
+    let source_bytes = fs::read(&source)?;
+    fs::write(&existing, b"preexisting fixture")?;
+
+    let error = backup_database(&source, &destination).unwrap_err();
+    assert_eq!(error.to_string(), "snapshot grant removal changed unrelated rows");
+    assert_eq!(
+        fs::symlink_metadata(&destination).unwrap_err().kind(),
+        std::io::ErrorKind::NotFound
+    );
+    assert!(backup_database(&source, &existing).is_err());
+    assert!(backup_database(&source, &source).is_err());
+    assert_eq!(fs::read(&existing)?, b"preexisting fixture");
+    assert_eq!(fs::read(&source)?, source_bytes);
+    assert_eq!(fs::read_dir(root.path())?.count(), 2);
     Ok(())
 }
