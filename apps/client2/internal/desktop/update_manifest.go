@@ -4,6 +4,8 @@ import "respire-client2/internal/i18n"
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -54,6 +56,67 @@ func newReleaseProvider(client *http.Client, preferences func() host.Preferences
 func (p releaseProvider) Name() string { return "respire" }
 
 func (p releaseProvider) Check(ctx context.Context, req updater.CheckRequest) (*updater.Release, error) {
+	channel := p.preferences().ClientChannel
+	selected, err := host.PrimaryComponentRelease(ctx, p.client, "client2", channel)
+	if err != nil {
+		return nil, err
+	}
+	if selected == nil {
+		return p.checkLegacy(ctx, req)
+	}
+	version := strings.TrimPrefix(selected.MetadataTag(), "v")
+	if semver.Compare("v"+version, "v"+req.CurrentVersion) <= 0 {
+		return nil, nil
+	}
+	manifestSource, err := host.ReleaseAssetURL(*selected, "respire-client2", updateManifestAsset)
+	if err != nil {
+		return nil, err
+	}
+	var document updateManifest
+	if err := p.fetchJSON(ctx, manifestSource, &document); err != nil {
+		return nil, err
+	}
+	picked := document.Stable
+	if selected.Prerelease {
+		picked = document.Dev
+	}
+	if document.SchemaVersion != 1 || picked.Version != version {
+		return nil, errors.New("Client2 component update manifest identity mismatch")
+	}
+	filename := host.ClientAsset(req.Platform, req.Arch)
+	boundURL, err := host.ReleaseAssetURL(*selected, "respire-client2", filename)
+	if err != nil {
+		return nil, err
+	}
+	var matches []manifestArtifact
+	for _, artifact := range picked.Artifacts {
+		if artifact.Filename == filename {
+			matches = append(matches, artifact)
+		}
+	}
+	if len(matches) != 1 || matches[0].Size <= 0 || matches[0].Size > 256<<20 {
+		return nil, errors.New("Invalid component update artifact count or size")
+	}
+	artifact := matches[0]
+	// The mirror publishes byte-identical metadata using legacy-neutral version
+	// and URL fields. Verify that legacy path; never follow it for this source.
+	urls, err := artifactURLs(artifact, version, filename)
+	if err != nil || artifact.URL == "" || len(urls) != 2 {
+		return nil, errors.New("Invalid component update artifact identity")
+	}
+	digest, err := base64.StdEncoding.DecodeString(artifact.SHA256)
+	if err != nil || len(digest) != sha256.Size {
+		return nil, errors.New("Invalid component update artifact digest")
+	}
+	return &updater.Release{
+		Version: version, Channel: channel, Name: "Respire " + version, Notes: picked.Notes,
+		Artifact:     updater.Artifact{Filename: filename, Size: artifact.Size, Platform: req.Platform, Arch: req.Arch},
+		Verification: &updater.Verification{DigestAlgo: "sha256", Digest: digest},
+		Metadata:     map[string]any{"respire.component-url": boundURL},
+	}, nil
+}
+
+func (p releaseProvider) checkLegacy(ctx context.Context, req updater.CheckRequest) (*updater.Release, error) {
 	var m updateManifest
 	if err := p.fetchJSON(ctx, manifestURL(true), &m); err != nil {
 		if mirrorErr := p.fetchJSON(ctx, manifestURL(false), &m); mirrorErr != nil {
@@ -134,6 +197,25 @@ func (p releaseProvider) Check(ctx context.Context, req updater.CheckRequest) (*
 }
 
 func (p releaseProvider) Download(ctx context.Context, r *updater.Release, dst io.Writer, progress func(int64, int64)) error {
+	if stored, exists := r.Metadata["respire.component-url"]; exists {
+		source, ok := stored.(string)
+		if !ok || r.Artifact.Filename != host.ClientAsset(r.Artifact.Platform, r.Artifact.Arch) ||
+			r.Verification == nil || r.Verification.DigestAlgo != "sha256" || len(r.Verification.Digest) != sha256.Size ||
+			r.Artifact.Size <= 0 || r.Artifact.Size > 256<<20 ||
+			source != "https://github.com/risense-ai/respire/releases/download/client2-v"+r.Version+"/"+r.Artifact.Filename {
+			return errors.New("Invalid bound Client2 component download")
+		}
+		counter := &componentDownloadWriter{remaining: r.Artifact.Size}
+		hash := sha256.New()
+		counter.dest = io.MultiWriter(dst, hash)
+		if err := p.download(ctx, source, r.Artifact.Size, counter, progress); err != nil {
+			return err
+		}
+		if counter.remaining != 0 || subtle.ConstantTimeCompare(hash.Sum(nil), r.Verification.Digest) != 1 {
+			return errors.New("Client2 component download size or digest mismatch")
+		}
+		return nil
+	}
 	if channel, ok := r.Metadata["respire.fallback"].(string); ok {
 		source := p.stable
 		if channel == "dev" {
@@ -160,6 +242,19 @@ func (p releaseProvider) Download(ctx context.Context, r *updater.Release, dst i
 	return errors.Join(failures...)
 }
 
+type componentDownloadWriter struct {
+	dest      io.Writer
+	remaining int64
+}
+
+func (w *componentDownloadWriter) Write(bytes []byte) (int, error) {
+	if int64(len(bytes)) > w.remaining {
+		return 0, errors.New("Client2 component download exceeds expected size")
+	}
+	n, err := w.dest.Write(bytes)
+	w.remaining -= int64(n)
+	return n, err
+}
 func (p releaseProvider) download(ctx context.Context, source string, limit int64, dst io.Writer, progress func(int64, int64)) error {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, source, nil)
 	if err != nil {

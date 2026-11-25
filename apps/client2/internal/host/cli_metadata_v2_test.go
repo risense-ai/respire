@@ -120,6 +120,8 @@ func TestLatestCLIBuildFrontendMetadata(t *testing.T) {
 		transport := cliMetadataTransport(func(r *http.Request) (*http.Response, error) {
 			var data []byte
 			switch r.URL.String() {
+			case "https://api.github.com/repos/risense-ai/respire/releases?per_page=100&page=1":
+				data = []byte("[]")
 			case "https://api.github.com/repos/risense-ai/respire-cli/releases?per_page=20":
 				data, _ = json.Marshal([]ReleaseInfo{{
 					Tag:        "v2.0.0-dev.1",
