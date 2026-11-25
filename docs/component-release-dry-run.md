@@ -76,3 +76,21 @@ not a release workflow, native test attestation, or authorization to publish.
 No hosted build, package signing, publication, registry call, release upload
 or protected environment action is performed by these local commands. Native
 checks cannot be replaced by the synthetic assembly regression.
+
+## First hosted dry-run lane
+
+`runtime-release-dry-run.yml` builds only the locked Windows x64 Runtime in a
+fresh native runner directory. On an eligible same-repository PR to main, a
+maintainer opts in with `native-release-dry-run`; this uses the ordinary PR
+integration SHA with a read-only token, no repository checkout credentials,
+and uploads only the run-bound smoke envelope. Fork PRs do not run this job.
+Workflow dispatch on trusted main can also retain exactly three verified
+assets as short-lived workflow artifacts; no release, tag, package registry,
+or deployment is touched. PR evidence does not replace the exact reviewed main
+commit's native evidence.
+
+This is one of eight Runtime targets, not a release fan-out. Windows ARM64,
+macOS Intel/ARM64, Linux GNU x64/ARM64, and Linux musl x64/ARM64 still need their
+own package smoke and provenance. The two musl lanes additionally need verified
+static ORT inputs for their architecture. The CLI and Client2 native matrices
+and complete same-run artifact assembly are separate prerequisites.
