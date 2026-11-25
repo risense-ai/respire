@@ -24,9 +24,13 @@ fn requires_scope(method: &str) -> bool {
 }
 
 fn model_switch_blocks(request: &RpcRequest) -> bool {
-    PROFILE_SWITCH_RUNNING.load(Ordering::Acquire)
-        && request.method == "cli.exec"
-        && !is_status(&request.args)
+    request.method == "cli.exec" && model_switch_blocks_args(&request.args)
+}
+
+fn model_switch_blocks_args(args: &[String]) -> bool {
+    PROFILE_SWITCH_RUNNING.load(Ordering::Acquire) && !is_status(args)
+        && !(DETACHED_MODEL_READS.load(Ordering::Acquire)
+            && command_name(args) == Some("recall") && !is_exclusive(args))
 }
 
 fn model_switch_busy() -> (String, String) {

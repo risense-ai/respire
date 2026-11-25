@@ -394,7 +394,7 @@ fn dispatch_loop_inner(
             let admission = PROFILE_ADMISSION
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
-            if PROFILE_SWITCH_RUNNING.load(Ordering::Acquire) && !is_status(&job.args) {
+            if model_switch_blocks_args(&job.args) {
                 let _ = job.reply.send(Err("model_switch_busy".into()));
                 continue;
             }

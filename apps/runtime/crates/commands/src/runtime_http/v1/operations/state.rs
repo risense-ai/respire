@@ -97,6 +97,20 @@ impl Entry {
         Ok(state.cancel_requested || state.snapshot.state == Phase::Cancelled)
     }
 
+    pub(super) fn progress(&self, percent: u8) -> V1Result<()> {
+        let mut state = self.lock()?;
+        if state.snapshot.state == Phase::Running
+            && state
+                .snapshot
+                .progress_percent
+                .is_none_or(|old| old < percent)
+        {
+            state.snapshot.progress_percent = Some(percent);
+            self.publish(&mut state);
+        }
+        Ok(())
+    }
+
     pub(super) fn subscribe(&self) -> watch::Receiver<Snapshot> {
         self.latest.subscribe()
     }
@@ -242,19 +256,8 @@ impl Job {
     }
 
     pub(super) fn progress(&self, percent: u8) -> V1Result<()> {
-        let mut state = self.0.lock()?;
-        if state.snapshot.state == Phase::Running
-            && state
-                .snapshot
-                .progress_percent
-                .is_none_or(|old| old < percent)
-        {
-            state.snapshot.progress_percent = Some(percent);
-            self.0.publish(&mut state);
-        }
-        Ok(())
+        self.0.progress(percent)
     }
-
     pub(super) fn finish(&self, phase: Phase) {
         if let Ok(mut state) = self.0.lock() {
             if !state.snapshot.terminal() {

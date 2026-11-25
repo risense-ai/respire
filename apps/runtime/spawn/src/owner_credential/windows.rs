@@ -467,3 +467,6 @@ pub(super) mod migration_copy;
 
 #[path = "windows_restore_stage.rs"]
 pub(super) mod restore_stage;
+
+#[path = "windows_model_job.rs"]
+pub(super) mod model_job;

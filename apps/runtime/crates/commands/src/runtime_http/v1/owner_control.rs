@@ -44,6 +44,7 @@ pub(crate) struct OwnerDispatch {
     receiver: mpsc::Receiver<DispatchWork>,
     model_receiver: mpsc::Receiver<model_work::Work>,
     last_refresh: Option<Instant>,
+    switching: Option<super::operations::model_switch::RunningSwitch>,
 }
 
 pub(crate) fn start_dispatch() -> Option<OwnerDispatch> {
@@ -54,6 +55,7 @@ pub(crate) fn start_dispatch() -> Option<OwnerDispatch> {
         receiver,
         model_receiver: model_work::start()?,
         last_refresh: None,
+        switching: None,
     })
 }
 
@@ -70,8 +72,13 @@ impl OwnerDispatch {
         match self.receiver.try_recv() {
             Ok(DispatchWork::Scoped(work)) => service_work(work, store, ownership),
             Ok(DispatchWork::Local(work)) => super::rest_dispatch::service(work, store, ownership),
-            Ok(DispatchWork::ModelSwitch(work)) => work.run(store, ownership),
-            Err(_) => {}
+            Ok(DispatchWork::ModelSwitch(work)) if self.switching.is_none() => {
+                self.switching = work.launch(store, ownership);
+            }
+            Ok(DispatchWork::ModelSwitch(_)) | Err(_) => {}
+        }
+        if self.switching.as_mut().is_some_and(|switch| switch.tick(store, ownership)) {
+            self.switching = None;
         }
         if let Ok(work) = self.model_receiver.try_recv() {
             model_work::service(work, store, ownership);

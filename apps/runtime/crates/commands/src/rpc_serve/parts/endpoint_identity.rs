@@ -46,6 +46,13 @@ pub(crate) fn try_verified_owner_scope<T>(
     Ok(with_locked_owner_scope(action))
 }
 
+pub(crate) fn with_verified_owner_library_scope<T>(
+    action: impl FnOnce(&str, &std::path::Path, uuid::Uuid, u64, uuid::Uuid, respire_app::auth::RuntimeLibrary<'_>) -> T,
+) -> Option<T> {
+    let _identity = SCOPE_EXECUTION.try_read().ok()?;
+    with_locked_library(action)
+}
+
 pub(crate) fn with_verified_owner_store_scope<T>(
     action: impl FnOnce(&str, &std::path::Path, uuid::Uuid, u64, uuid::Uuid, respire_app::auth::RuntimeLibrary<'_>) -> T,
 ) -> Option<T> {

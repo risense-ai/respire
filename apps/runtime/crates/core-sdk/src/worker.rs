@@ -3,11 +3,12 @@ use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, ChildStdin};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
+const CANDIDATE_FRAME_LIMIT: usize = 64 * 1024 * 1024;
 const HEARTBEAT_LIMIT: Duration = Duration::from_secs(10);
 const CANCEL_GRACE: Duration = Duration::from_secs(5);
 // Load + native queue + execution budgets, plus cancellation grace.
@@ -83,6 +84,7 @@ struct Process {
     pid: u32,
     generation: u64,
     active_callbacks: AtomicUsize,
+    foreground: bool,
 }
 
 struct CallbackGuard<'a>(&'a Process);
@@ -148,11 +150,18 @@ pub fn status() -> Result<Value> {
 }
 
 fn read_frame(input: &mut impl Read) -> Result<Value> {
+    read_frame_bounded(input, usize::MAX)
+}
+
+fn read_frame_bounded(input: &mut impl Read, maximum: usize) -> Result<Value> {
     let mut length = [0; 8];
     input.read_exact(&mut length)?;
     let length =
         usize::try_from(u64::from_le_bytes(length)).context("Core worker frame length overflow")?;
-    anyhow::ensure!(length > 0, "invalid Core worker frame length");
+    anyhow::ensure!(
+        (1..=maximum).contains(&length),
+        "invalid Core worker frame length"
+    );
     let mut bytes = Vec::new();
     bytes
         .try_reserve_exact(length)
@@ -170,6 +179,35 @@ fn write_frame<T: serde::Serialize + ?Sized>(output: &mut impl Write, value: &T)
     Ok(())
 }
 
+struct CandidateJson(Vec<u8>);
+impl Write for CandidateJson {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if bytes.len() > CANDIDATE_FRAME_LIMIT.saturating_sub(self.0.len()) {
+            return Err(std::io::Error::other("candidate frame exceeds byte budget"));
+        }
+        self.0
+            .try_reserve(bytes.len())
+            .map_err(std::io::Error::other)?;
+        self.0.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn write_candidate_frame<T: serde::Serialize + ?Sized>(
+    output: &mut impl Write,
+    value: &T,
+) -> Result<()> {
+    let mut bytes = CandidateJson(Vec::new());
+    serde_json::to_writer(&mut bytes, value)?;
+    output.write_all(&(bytes.0.len() as u64).to_le_bytes())?;
+    output.write_all(&bytes.0)?;
+    output.flush()?;
+    Ok(())
+}
+
 impl Process {
     fn begin_callback(&self) -> Result<CallbackGuard<'_>> {
         // Linearize callback dispatch with retirement. Once admitted, a host
@@ -179,7 +217,9 @@ impl Process {
             .lock()
             .map_err(|_| anyhow::anyhow!("Core worker pending poisoned"))?;
         anyhow::ensure!(
-            !self.retired.load(Ordering::Acquire) && self.generation == generation(),
+            self.foreground
+                && !self.retired.load(Ordering::Acquire)
+                && self.generation == generation(),
             "retired Core callback discarded before host transport; not replayed"
         );
         self.active_callbacks.fetch_add(1, Ordering::AcqRel);
@@ -195,7 +235,12 @@ impl Process {
             .input
             .lock()
             .map_err(|_| anyhow::anyhow!("Core worker input poisoned"))?;
-        write_frame(input.as_mut().context("Core worker pipe closed")?, value)
+        let input = input.as_mut().context("Core worker pipe closed")?;
+        if self.foreground {
+            write_frame(input, value)
+        } else {
+            write_candidate_frame(input, value)
+        }
     }
 
     fn retire(&self, reason: &str) -> Result<()> {
@@ -206,7 +251,9 @@ impl Process {
                 .lock()
                 .map_err(|_| anyhow::anyhow!("Core worker pending poisoned"))?;
             if !self.retired.swap(true, Ordering::AcqRel) {
-                GENERATION.fetch_add(1, Ordering::AcqRel);
+                if self.foreground {
+                    GENERATION.fetch_add(1, Ordering::AcqRel);
+                }
                 for (id, pending) in pending.drain() {
                     let _ = pending.sender.send(json!({"id":id,"error":format!("Core worker retired: {reason}; command was not replayed")}));
                 }
@@ -288,58 +335,16 @@ fn process() -> Result<Arc<Process>> {
             "previous Core worker has not exited; replacement prohibited; command was not submitted",
         )?;
     }
-    let mut command = Command::new(std::env::current_exe()?);
-    // Transport credentials and account keys remain in the owning host. Only
-    // OS loader paths and explicit local inference settings reach the child.
-    command.env_clear();
-    for name in [
-        "PATH",
-        "SystemRoot",
-        "SystemDrive",
-        "USERPROFILE",
-        "HOME",
-        "APPDATA",
-        "LOCALAPPDATA",
-        "TEMP",
-        "TMP",
-        "TMPDIR",
-        "LD_LIBRARY_PATH",
-        "DYLD_LIBRARY_PATH",
-        "XDG_CACHE_HOME",
-        "XDG_CONFIG_HOME",
-        "XDG_DATA_HOME",
-    ] {
-        if let Some(value) = std::env::var_os(name) {
-            command.env(name, value);
-        }
-    }
-    for name in [
-        "RSRS_DATA_DIR",
-        "RSRS_M3_DIR",
-        "RSRS_ENGINE",
-        "RSRS_MODEL_VARIANT",
-        "RSRS_ORT_PROFILE",
-        #[cfg(feature = "cpu-owned-ort-experiment")]
-        "RSRS_CPU_OWNED_ORT_EXPERIMENT",
-        #[cfg(feature = "cpu-owned-ort-experiment")]
-        "RSRS_CPU_OWNED_ORT_FILE",
-        "RSRS_CORE_TEST_MODE",
-        "RSRS_INTRA_THREADS",
-    ] {
-        if let Some(value) = crate::env::var_os(name) {
-            command.env(name, value);
-        }
-    }
-    command
-        .arg("--core-worker-internal")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x0800_0000);
-    }
+    start_process(&mut slot, None, None)
+}
+
+fn start_process(
+    slot: &mut Option<Arc<Process>>,
+    candidate_root: Option<&std::path::Path>,
+    fixture_executable: Option<&std::path::Path>,
+) -> Result<Arc<Process>> {
+    let foreground = candidate_root.is_none();
+    let mut command = spawn_config::command(candidate_root, fixture_executable)?;
     let mut child = command.spawn().context("start owned Core worker")?;
     let input = child.stdin.take().context("missing Core worker stdin")?;
     let mut output = child.stdout.take().context("missing Core worker stdout")?;
@@ -356,14 +361,20 @@ fn process() -> Result<Arc<Process>> {
         retired: AtomicBool::new(false),
         reaped: AtomicBool::new(false),
         pid,
-        generation: generation(),
+        generation: if foreground { generation() } else { 0 },
         active_callbacks: AtomicUsize::new(0),
+        foreground,
     });
     // Publish ownership before any subsequent fallible thread initialization.
     *slot = Some(Arc::clone(&process));
     let reader = Arc::clone(&process);
     spawn_control_thread("respire-core-replies", move || loop {
-        let mut frame = match read_frame(&mut output) {
+        let reply = if reader.foreground {
+            read_frame(&mut output)
+        } else {
+            read_frame_bounded(&mut output, CANDIDATE_FRAME_LIMIT)
+        };
+        let mut frame = match reply {
             Ok(frame) => frame,
             Err(error) => {
                 if let Err(retire) = reader.retire(&format!("IPC closed: {error:#}")) {
@@ -547,6 +558,7 @@ pub(crate) fn execute(
 /// Stop before releasing the host's LibraryLock. Replacement never overlaps a retired child.
 pub fn shutdown() -> Result<()> {
     STOPPING.store(true, Ordering::Release);
+    let candidate_result = candidate::shutdown();
     let process = PROCESS
         .lock()
         .map_err(|_| anyhow::anyhow!("Core worker state poisoned"))?
@@ -554,8 +566,12 @@ pub fn shutdown() -> Result<()> {
     if let Some(process) = process {
         process.retire("host shutdown")?;
     }
-    Ok(())
+    candidate_result
 }
+
+mod candidate;
+mod spawn_config;
+pub use candidate::CandidateWorker;
 
 mod server;
 pub use server::run;

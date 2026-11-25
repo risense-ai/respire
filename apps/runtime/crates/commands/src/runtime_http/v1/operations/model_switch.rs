@@ -19,6 +19,10 @@ use respire_app::{
 };
 use serde::Deserialize;
 
+mod dispatch;
+mod prepare;
+pub(in crate::runtime_http::v1) use dispatch::RunningSwitch;
+
 #[derive(Deserialize)]
 pub(super) struct Request {
     model_id: String,
@@ -94,6 +98,15 @@ impl PendingSwitch {
         store: Option<&LocalStore>,
         ownership: &LibraryLock,
     ) {
+        self.run_established(store, ownership, false)
+    }
+
+    fn run_established(
+        self,
+        store: Option<&LocalStore>,
+        ownership: &LibraryLock,
+        already_started: bool,
+    ) {
         let Self {
             job,
             task_id,
@@ -103,7 +116,15 @@ impl PendingSwitch {
         let result = rpc_serve::with_owner_store_fence(|| -> Result<Phase> {
             let scope = job.scope();
             let Some(vault) = with_authority(scope, |library| {
-                if !job
+                if already_started {
+                    if job
+                        .entry()
+                        .cancelled()
+                        .map_err(|_| anyhow::anyhow!("operation state unavailable"))?
+                    {
+                        return Ok(None);
+                    }
+                } else if !job
                     .start()
                     .map_err(|_| anyhow::anyhow!("operation state unavailable"))?
                 {
