@@ -81,3 +81,38 @@ fn revocation_before_chunk_release_cannot_resume_or_leak_the_chunk() -> Result<(
     assert!(fs::read_dir(&profile)?.all(|entry| entry.is_ok_and(|entry| !entry.file_name().to_string_lossy().starts_with(".backup-export-"))));
     Ok(())
 }
+
+#[test]
+fn split_import_header_requires_live_lineage_before_copying() -> Result<()> {
+    use crate::snapshot::backup_archive::BackupArchiveHeader;
+
+    let root = tempfile::tempdir()?;
+    let profile = root.path().canonicalize()?;
+    let store = detached_fixture(&profile)?;
+    let keys = SessionKeys::from_urk([7; 32])?;
+    let changed = SessionKeys::from_urk([8; 32])?;
+    let authority = RuntimeLibrary(&keys, "alice", &profile);
+    let draft = BackupExportDraft::new(store.prepare_backup_export(&profile)?.copy(|| Ok(()))?)?;
+    let proof = authority.prove_backup_snapshot(&draft)?;
+    let export = authority.authenticate_backup_export(draft.prepare(proof, || Ok(()))?)?;
+    let mut bytes = Vec::new();
+    export.write_verified(&mut bytes, || Ok(()))?;
+    let denied = RuntimeLibrary(&changed, "alice", &profile);
+    assert!(denied.authenticate_backup_import_header(BackupArchiveHeader::read(bytes.as_slice())?).is_err());
+
+    let mut body = bytes.as_slice();
+    let authenticated = authority.authenticate_backup_import_header(BackupArchiveHeader::read(&mut body)?)?;
+    let mut output = Vec::new();
+    let attempt = authenticated.copy_to_stage(body, &mut output, || {
+        anyhow::bail!("fixture scope expired before write")
+    });
+    assert!(attempt.is_err());
+    assert!(output.is_empty());
+
+    let mut body = bytes.as_slice();
+    let authenticated = authority.authenticate_backup_import_header(BackupArchiveHeader::read(&mut body)?)?;
+    let manifest = authenticated.copy_to_stage(body, &mut output, || Ok(()))?;
+    assert_eq!(output.as_slice(), body);
+    assert_eq!(manifest.bytes, body.len() as u64);
+    Ok(())
+}

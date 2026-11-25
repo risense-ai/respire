@@ -142,6 +142,77 @@ pub fn seal_verified_snapshot(
     seal_to_stage(keys, account, manifest, File::open(snapshot)?, stage, check)
 }
 
+/// An untrusted envelope header. Parsing is bounded and requires neither the
+/// Vault nor access to a stage. The reader is positioned at the SQLite body.
+pub struct BackupArchiveHeader(Header);
+
+/// Proof of a header's account and Vault lineage. This is not a restore
+/// grant: the selected library, live scope, and offline authority still
+/// have to be verified. It cannot expose a manifest before the body passes
+/// the exact length and digest checks.
+pub struct AuthenticatedBackupHeader(Manifest);
+
+impl BackupArchiveHeader {
+    pub fn read(mut archive: impl Read) -> Result<Self> {
+        let mut magic = [0; 8];
+        archive.read_exact(&mut magic)?;
+        ensure!(&magic == MAGIC, "unsupported backup archive");
+        let mut size = [0; 4];
+        archive.read_exact(&mut size)?;
+        let size = u32::from_be_bytes(size) as usize;
+        ensure!((1..=MAX_HEADER).contains(&size), "invalid backup header length");
+        let mut wire = vec![0; size];
+        archive.read_exact(&mut wire)?;
+        Ok(Self(serde_json::from_slice(&wire)?))
+    }
+
+    fn authenticate(
+        self,
+        account: &str,
+        open: impl FnOnce(&str, &str) -> Result<String>,
+    ) -> Result<AuthenticatedBackupHeader> {
+        let header = self.0;
+        check_manifest(&header.manifest, account, header.bytes)?;
+        let proof = open(&header.sealed_manifest_digest, &header.nonce)
+            .context("backup manifest authentication failed")?;
+        ensure!(
+            proof == manifest_challenge(&header.manifest)?,
+            "backup manifest authentication failed"
+        );
+        Ok(AuthenticatedBackupHeader(header.manifest))
+    }
+}
+
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+impl crate::auth::RuntimeLibrary<'_> {
+    /// The caller checks the full live Runtime scope around this short
+    /// operation. No reader, writer, or SessionKeys crosses the lock boundary.
+    pub fn authenticate_backup_import_header(
+        &self,
+        header: BackupArchiveHeader,
+    ) -> Result<AuthenticatedBackupHeader> {
+        header.authenticate(self.backup_account(), |ciphertext, nonce| {
+            self.open_backup_challenge(ciphertext, nonce)
+        })
+    }
+}
+
+impl AuthenticatedBackupHeader {
+    /// Only for an exclusively held, disposable owner-private stage. Failed
+    /// copies can leave partial bytes; discard them, never publish them.
+    /// The callback must verify cancellation and the captured scope on each
+    /// 64 KiB read and before handing the result to offline maintenance.
+    pub fn copy_to_stage(
+        self,
+        database_body: impl Read,
+        stage: impl Write,
+        check: impl FnMut() -> Result<()>,
+    ) -> Result<Manifest> {
+        copy_checked(database_body, stage, &self.0, check)?;
+        Ok(self.0)
+    }
+}
+
 /// Authenticate before writing any DB bytes, and verify the exact final
 /// digest before returning. Do not open the output as SQLite or expose it
 /// unless this function and subsequent offline restore validation succeed.
@@ -153,26 +224,9 @@ pub fn open_to_stage(
     mut check: impl FnMut() -> Result<()>,
 ) -> Result<Manifest> {
     check()?;
-    let mut magic = [0; 8];
-    archive.read_exact(&mut magic)?;
-    ensure!(&magic == MAGIC, "unsupported backup archive");
-    let mut size = [0; 4];
-    archive.read_exact(&mut size)?;
-    let size = u32::from_be_bytes(size) as usize;
-    ensure!((1..=MAX_HEADER).contains(&size), "invalid backup header length");
-    let mut wire = vec![0; size];
-    archive.read_exact(&mut wire)?;
-    let header: Header = serde_json::from_slice(&wire)?;
-    check_manifest(&header.manifest, account, header.bytes)?;
-    let proof = keys
-        .decrypt_content(&header.sealed_manifest_digest, &header.nonce)
-        .context("backup manifest authentication failed")?;
-    ensure!(
-        proof == manifest_challenge(&header.manifest)?,
-        "backup manifest authentication failed"
-    );
-    copy_checked(archive, stage, &header.manifest, check)?;
-    Ok(header.manifest)
+    BackupArchiveHeader::read(&mut archive)?
+        .authenticate(account, |ciphertext, nonce| keys.decrypt_content(ciphertext, nonce))?
+        .copy_to_stage(archive, stage, check)
 }
 
 #[cfg(test)]

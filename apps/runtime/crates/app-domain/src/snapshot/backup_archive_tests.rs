@@ -141,3 +141,34 @@ fn native_snapshot_envelope_preserves_committed_wal_and_excludes_grants() -> Res
     assert_eq!(live.query_row("SELECT count(*) FROM access_grants", [], |row| row.get::<_, u64>(0))?, 1);
     Ok(())
 }
+
+#[test]
+fn split_header_streams_more_than_the_ordinary_http_body_limit() -> Result<()> {
+    // Model a fixed wire body without allocating or collecting it in memory.
+    // This proves the archive component, not HTTP or SQLite acceptance.
+    let block = [21; 64 * 1024];
+    let count = 513;
+    let mut hash = Sha256::new();
+    for _ in 0..count {
+        hash.update(block);
+    }
+    let mut metadata = manifest("alice", b"not the body");
+    metadata.bytes = block.len() as u64 * count;
+    metadata.database_sha256 = format!("{:x}", hash.finalize());
+    let keys = crate::SessionKeys::from_urk([7; 32])?;
+    let wire = authenticated_header("alice", &metadata, |challenge| keys.encrypt_content(challenge))?;
+    let mut input = Cursor::new(wire).chain(std::io::repeat(21).take(metadata.bytes));
+    let header = BackupArchiveHeader::read(&mut input)?.authenticate("alice", |ciphertext, nonce| {
+        keys.decrypt_content(ciphertext, nonce)
+    })?;
+    drop(keys);
+    let mut checks = 0;
+    let result = header.copy_to_stage(input, std::io::sink(), || {
+        checks += 1;
+        Ok(())
+    })?;
+    assert_eq!(result.bytes, metadata.bytes);
+    assert_eq!(result.database_sha256, metadata.database_sha256);
+    assert!(checks >= count);
+    Ok(())
+}
