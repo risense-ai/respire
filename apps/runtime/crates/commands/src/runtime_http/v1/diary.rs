@@ -1,9 +1,9 @@
 use super::{
-    reads::check_space,
+    reads::with_memory_store,
     registration::{bind, RouteSpec, Verb},
-    rest_dispatch::{self, Access, LibraryContext},
+    rest_dispatch::{self, LibraryContext},
     transport::{self, invalid},
-    writes::{new_entry, notify, write_failure},
+    writes::{admit_device_write, new_entry, notify, write_failure},
     V1Result,
 };
 use axum::{
@@ -69,25 +69,27 @@ async fn upsert(
         .ok_or_else(invalid)?
         .to_utc()
         .to_rfc3339_opts(SecondsFormat::Millis, true);
-    let entry = rest_dispatch::submit(scope, Access::Write, move |ctx| {
-        check_space(ctx, input.space_id)?;
-        let entry = append(ctx, &input.date, input.content, created).map_err(write_failure)?;
-        notify();
-        Ok(entry)
+    let entry = rest_dispatch::submit_memory_write(scope, move |ctx, admission| {
+        with_memory_store(ctx, input.space_id, |store, device_local| {
+            let entry = append(ctx, store, &input.date, input.content, created,
+                || !device_local || admit_device_write(ctx, admission)).map_err(write_failure)?;
+            if !device_local {
+                notify();
+            }
+            Ok(entry)
+        })
     })
     .await?;
     transport::json_response(StatusCode::OK, item(entry))
 }
 
 fn append(
-    ctx: &LibraryContext<'_>,
-    date: &str,
-    content: String,
-    created: String,
+    ctx: &LibraryContext<'_>, store: &respire_app::transport::local::LocalStore,
+    date: &str, content: String, created: String, admit: impl FnOnce() -> bool,
 ) -> anyhow::Result<MemoryEntry> {
     let user = crate::util::current_user();
     let (id, title) = crate::engine::diary_track_identity(&user, date);
-    let rows = ctx.store.active_diary_tracks(&id, &title)?;
+    let rows = store.active_diary_tracks(&id, &title)?;
     let tracks = crate::engine::select_diary_tracks(&rows, &id, &title, |row| {
         let author = ctx.library.open_memory(row)?.user;
         Ok(author == user || author == ctx.scope.account)
@@ -97,7 +99,7 @@ fn append(
         entry.id = id;
         entry.created_at = created;
         entry.importance = "trivial".to_owned();
-        ctx.library.create_memory(ctx.store, &entry)?;
+        ctx.library.create_device_space_memory(store, &entry, admit)?;
         return Ok(entry);
     };
     let mut entry = ctx.library.open_memory(primary)?;
@@ -116,9 +118,9 @@ fn append(
     }
     merged.push_str(&content);
     entry.content = merged;
-    entry.updated_at = ctx.store.edit_stamp(&entry.id)?;
+    entry.updated_at = store.edit_stamp(&entry.id)?;
     entry.modified_by = respire_app::service::device_tag();
     ctx.library
-        .append_diary(ctx.store, &entry, primary, duplicates)?;
+        .append_diary_with_admission(store, &entry, primary, duplicates, admit)?;
     Ok(entry)
 }

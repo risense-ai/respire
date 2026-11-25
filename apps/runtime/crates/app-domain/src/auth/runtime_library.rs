@@ -11,7 +11,7 @@ pub struct RuntimeLibrary<'a>(pub(super) &'a SessionKeys, &'a str, &'a std::path
 #[path = "device_spaces.rs"]
 mod device_spaces;
 #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
-pub use device_spaces::{valid_device_space_name, DeviceSpaceAuthorityChanged};
+pub use device_spaces::{valid_device_space_name, DeviceSpaceAuthorityChanged, DeviceSpacePatch, DeviceSpaceRetirement};
 
 pub fn with_runtime_library<T>(
     canonical_profile: &std::path::Path,

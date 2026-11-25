@@ -72,7 +72,7 @@ impl OwnerCall {
 
     /// Caller owns the scope fence, checked lease ticket and storage gate
     /// for the duration of this call. This function never reopens the store.
-    pub(super) fn run(self, store: &LocalStore) -> V1Result<Response> {
+    pub(super) fn run(self, store: &LocalStore, device_local: bool) -> V1Result<Response> {
         self.check_policy(
             respire_app::service::off_mode(),
             respire_app::service::service_paused(),
@@ -84,7 +84,7 @@ impl OwnerCall {
                 service::revoke_grant(store, &grant_id).map_err(service_error)?;
                 return Ok(StatusCode::NO_CONTENT.into_response());
             }
-            Self::Stats => service::stats(store, respire_app::sync::remote_configured()),
+            Self::Stats => service::stats(store, !device_local && respire_app::sync::remote_configured()),
             Self::QueryLog { limit } => service::query_log(store, limit),
             Self::Reviews { memory_id, limit } => service::reviews(store, &memory_id, limit),
             Self::Conflicts {

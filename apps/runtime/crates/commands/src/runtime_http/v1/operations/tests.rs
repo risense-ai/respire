@@ -19,6 +19,9 @@ use sse_cursor_tests::events;
 
 #[path = "model_switch_tests.rs"]
 mod model_switch_tests;
+#[path = "route_fixture_helpers.rs"]
+mod route_fixture_helpers;
+use route_fixture_helpers::check_light_status_and_legacy_aliases;
 #[path = "host_config_tests.rs"]
 mod host_config_tests;
 #[path = "space_members_tests.rs"]
@@ -26,6 +29,7 @@ mod space_members_tests;
 
 const TEST: &str = "runtime_http::v1::operations::tests::scoped_sync_sse_on_production_router";
 const DEEPEN_TEST: &str = "runtime_http::v1::operations::tests::scoped_deepen_on_production_router";
+const SPACE_TEST: &str = "runtime_http::v1::operations::tests::device_local_space_patch_on_production_router";
 const CHILD: &str = "RSRS_CARD_010_SSE_CHILD";
 pub(super) const TOKEN: &str = "fixture-runtime-bearer";
 const NEXT_TOKEN: &str = "fixture-rotated-bearer";
@@ -43,11 +47,17 @@ fn scoped_deepen_on_production_router() -> Result<()> {
     production_router_fixture(DEEPEN_TEST)
 }
 
+#[test]
+fn device_local_space_patch_on_production_router() -> Result<()> {
+    production_router_fixture(SPACE_TEST)
+}
+
 pub(super) fn production_router_fixture(test: &'static str) -> Result<()> {
     if std::env::var_os(CHILD).is_none() {
         let directory = tempfile::tempdir()?;
-        let fixture_root = space_members_tests::fixture_root(directory.path(), test == TEST)?;
-        if test != TEST {
+        let fixture_root = space_members_tests::fixture_root(directory.path(), matches!(test, TEST | SPACE_TEST))?;
+        let fixture_root = route_fixture_helpers::owner_fixture_root(fixture_root, test == SPACE_TEST)?;
+        if !matches!(test, TEST | SPACE_TEST) {
             let profile = fixture_root.join("accounts").join("outline-fixture");
             fs::create_dir_all(&profile)?;
             fs::write(fixture_root.join("client.json"), serde_json::to_vec(&json!({"data_dir": profile}))?)?;
@@ -59,6 +69,8 @@ pub(super) fn production_router_fixture(test: &'static str) -> Result<()> {
             .env("RSRS_DATA_DIR", &fixture_root)
             .env_remove("RSRS_DEFAULT_DATA_DIR")
             .env_remove("RSRS_RPC_TOKEN")
+            .env_remove("RSRS_ADDR")
+            .env_remove("RSRS_TOKEN")
             .env_remove("RSRS_LANG")
             .output()?;
         anyhow::ensure!(
@@ -77,11 +89,15 @@ pub(super) fn production_router_fixture(test: &'static str) -> Result<()> {
     fs::write(&token, TOKEN)?;
     let (password, urk, salt, wrapped, nonce) = auth::new_vault_v4()?;
     // A malformed URL exercises the real sync failure before the HTTP client can connect.
-    let session = auth::write_session_json(&json!({
+    let mut session_data = json!({
         "user": "sse-fixture", "vault_version": 4, "kdf_salt": salt,
         "urk_nonce": nonce, "wrapped_urk": wrapped,
-        "addr": "http://[", "token": "fixture-sync-token",
-    }))?;
+    });
+    if test != SPACE_TEST {
+        session_data["addr"] = json!("http://[");
+        session_data["token"] = json!("fixture-sync-token");
+    }
+    let session = auth::write_session_json(&session_data)?;
     let unlock = || -> Result<()> {
         auth::supply_runtime_session(respire_protocol::credentials::RuntimeUnlock {
             schema_version: respire_protocol::credentials::CREDENTIAL_SCHEMA_V,
@@ -134,6 +150,10 @@ pub(super) fn production_router_fixture(test: &'static str) -> Result<()> {
         .build()?
         .block_on(async {
             let app = crate::runtime_http::router(BOUND);
+            if test == SPACE_TEST {
+                crate::rpc_serve::mark_http_fixture_ready();
+                return space_members_tests::device_space_tests::check(&app, &root, true).await;
+            }
             if test == DEEPEN_TEST || test == host_config_tests::TEST {
                 crate::rpc_serve::mark_http_fixture_ready();
                 if test == host_config_tests::TEST { return host_config_tests::check(&app).await; }
@@ -423,29 +443,6 @@ async fn check_resource_routes(app: &Router) -> Result<()> {
     assert_eq!(
         json_response(listing, StatusCode::OK).await?["entries"],
         json!([second])
-    );
-    Ok(())
-}
-
-async fn check_light_status_and_legacy_aliases(app: &Router) -> Result<()> {
-    let status = "/v1/status/light?space_id=main";
-    assert_eq!(
-        request(app, "GET", status, None).await?.status(),
-        StatusCode::UNAUTHORIZED
-    );
-    let status = json_response(request(app, "GET", status, Some(TOKEN)).await?, StatusCode::OK).await?;
-    assert_eq!(status["space_id"], "main");
-    assert_eq!(status["memory_count"], 1);
-    assert_eq!(status["diary_count"], 1);
-    assert_eq!(status["indexed_count"], 0);
-    assert!(status["last_updated_at"].is_string());
-
-    let invalid_rpc = |path| send(app, "POST", path, None, Some(json!({})));
-    let legacy = json_response(invalid_rpc("/rpc").await?, StatusCode::BAD_REQUEST).await?;
-    assert!(legacy["error"].is_string());
-    assert_eq!(
-        json_response(invalid_rpc("/api/rpc").await?, StatusCode::BAD_REQUEST).await?,
-        legacy
     );
     Ok(())
 }
