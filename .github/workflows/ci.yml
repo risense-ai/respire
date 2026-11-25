@@ -106,7 +106,7 @@ jobs:
   guardrails:
     name: guardrails
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 12
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -120,7 +120,9 @@ jobs:
           node-version: "22"
 
       - name: Run architecture & Zero-CJK guardrails
-        run: node scripts/check-guardrails.mjs
+        run: |
+          node --test scripts/check-zero-cjk.test.mjs
+          node scripts/check-guardrails.mjs
 
       - name: Verify tracked source line count ratchet
         shell: bash
@@ -142,6 +144,13 @@ jobs:
           export RESPIRE_RUST_PANIC_PARSER="$CARGO_TARGET_DIR/debug/respire-rust-panic-guard"
           node --test scripts/check-rust-panic.test.mjs
           node scripts/check-rust-panic.mjs --base "$base" --head "$(git rev-parse HEAD)" --parser "$RESPIRE_RUST_PANIC_PARSER"
+
+      - name: Verify locked Core dependency graph
+        env:
+          RUSTUP_TOOLCHAIN: 1.95.0
+        run: |
+          node --test scripts/check-core-dependencies.test.mjs
+          node scripts/check-core-dependencies.mjs
 
   contract-check:
     name: contract-check
