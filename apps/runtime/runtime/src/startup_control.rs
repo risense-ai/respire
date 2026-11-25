@@ -2,6 +2,7 @@
 //! The same OS user already has access to this installation lock.
 //! This grants no maintenance, launch, credential, or business authority.
 mod hold;
+pub(crate) mod keygen_exclusion;
 #[cfg(test)]
 mod tests;
 mod wire;

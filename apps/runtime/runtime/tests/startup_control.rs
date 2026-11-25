@@ -320,3 +320,93 @@ fn profile_changed_by_old_cli_is_rejected_before_held_receipt() -> Result<()> {
     assert!(output.is_empty());
     Ok(())
 }
+
+#[test]
+fn private_cold_keygen_commits_and_queries_the_same_synthetic_receipt() -> Result<()> {
+    use respire_protocol::{HOST_AUTH_KEYGEN_METHOD, HOST_AUTH_RESULT_METHOD};
+    use sha2::{Digest, Sha256};
+
+    let fixture = Fixture::new()?;
+    let operation = uuid::Uuid::new_v4().to_string();
+    let (factor, _, salt, wrapped, nonce) = respire_app::auth::new_vault_v4()?;
+    let backend = if cfg!(target_os = "linux") { "secret_service" } else { "native" };
+    let material = json!({
+        "super_password": factor, "kdf_salt": salt, "wrapped_urk": wrapped, "urk_nonce": nonce,
+        "keyring_account": format!("login-{}", operation.replace('-', "")), "keyring_backend": backend,
+    });
+    let port = 64183;
+    let binary = PathBuf::from(env!("CARGO_BIN_EXE_rsrs-runtime")).canonicalize()?;
+    let hash = |bytes: &[u8]| format!("{:x}", Sha256::digest(bytes));
+    let id = hash(fixture.0.display().to_string().as_bytes());
+    let binary_digest = hash(&fs::read(&binary)?);
+    let pid = std::process::id();
+    let birth = process_birth(pid)?;
+    let call = |method: &str| -> Result<Value> {
+        let grant_id = uuid::Uuid::new_v4().to_string();
+        let request_id = uuid::Uuid::new_v4().to_string();
+        let issued = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as u64;
+        let grant = json!({
+            "schema_version":1, "protocol_version":1, "nonce":grant_id, "instance_id":grant_id,
+            "installation_root":fixture.0, "installation_id":id, "profile":fixture.0, "account_id":id,
+            "sync_generation":0, "image_path":binary, "image_sha256":binary_digest, "supervisor_pid":pid,
+            "supervisor_birth":birth, "managed_id":null, "registration_sha256":null, "maintenance":null,
+            "port":port, "issued_at_ms":issued, "expires_at_ms":issued+60_000,
+        });
+        let capability = method == "control.auth.cold_keygen_capability";
+        let binding = json!({"installation_root":fixture.0,"profile":fixture.0,
+            "launch_id":grant_id,"expected_account_id":null});
+        let request = if capability {
+            json!({"v":1,"id":request_id,"method":method,
+                "args":[json!({"schema_version":1,"binding":binding}).to_string()]})
+        } else {
+            json!({"v":1,"id":request_id,"operation_id":operation,"idempotency_key":operation,"method":method,
+                "args":[json!({"schema_version":1,"binding":binding,"identity":{"kind":"absent"},
+                    "force":false,"material":material}).to_string()]})
+        };
+        let mut child = Process(fixture.command(port).current_dir(&fixture.0)
+            .stderr(Stdio::null()).arg("--host-cold-keygen-internal").spawn()?);
+        let mut input = child.0.stdin.take().context("cold keygen fixture input")?;
+        let mut output = child.0.stdout.take().context("cold keygen fixture output")?;
+        send(&mut input, &grant)?;
+        send(&mut input, &request)?;
+        let response: Value = receive(&mut output)?;
+        let exit = wait(&mut child.0)?;
+        anyhow::ensure!(response["id"] == request_id && response["pid"] == child.0.id(),
+            "cold keygen did not match its exact inherited request");
+        if capability {
+            assert!(response["operation_id"].is_null() && response["idempotency_key"].is_null());
+        } else {
+            assert!(response["operation_id"] == operation && response["idempotency_key"] == operation);
+        }
+        anyhow::ensure!(exit.code().is_some_and(|code| response["exit"] == code),
+            "cold keygen process status mismatch");
+        Ok(response)
+    };
+
+    assert!(!fixture.0.join("runtime").exists());
+    let negotiated = call("control.auth.cold_keygen_capability")?;
+    assert!(negotiated["ok"] == true);
+    assert_eq!(negotiated["envelope"]["command"], "keygen-capability");
+    assert_eq!(negotiated["envelope"]["summary"], json!({"protocol":"cold_keygen.v1"}));
+    assert!(!fixture.0.join("runtime").exists() && !fixture.0.join("session.json").exists());
+
+    let lifetime = LibraryLock::acquire(&fixture.0.join("runtime"), Duration::ZERO)?;
+    let blocked = call(HOST_AUTH_KEYGEN_METHOD)?;
+    assert_eq!(blocked["code"], "auth_ownership_unavailable");
+    assert!(!fixture.0.join("session.json").exists());
+    drop(lifetime);
+
+    let committed = call(HOST_AUTH_KEYGEN_METHOD)?;
+    anyhow::ensure!(committed["ok"] == true, "cold keygen did not commit: {}", committed["code"]);
+    let session = fixture.0.join("session.json");
+    let original = fs::read(&session)?;
+    let receipt = &committed["envelope"]["summary"];
+    assert_eq!(receipt["outcome"], "committed");
+    assert_eq!(receipt["session_sha256"], hash(&original));
+    assert!(receipt["super_password"].is_null());
+    let recovered = call(HOST_AUTH_RESULT_METHOD)?;
+    assert!(recovered["ok"] == true);
+    assert_eq!(recovered["envelope"]["summary"], *receipt);
+    assert_eq!(fs::read(session)?, original);
+    Ok(())
+}

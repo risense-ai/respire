@@ -4,12 +4,16 @@ fn recovery_path() -> PathBuf {
 }
 
 fn auth_journal_lock() -> Result<std::fs::File> {
+    auth_journal_lock_with_wait(std::time::Duration::from_secs(1))
+}
+
+fn auth_journal_lock_with_wait(wait: std::time::Duration) -> Result<std::fs::File> {
     let path = recovery_path().with_extension("json.lock");
     std::fs::create_dir_all(path.parent().context("auth recovery root is missing")?)?;
     ensure!(!std::fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.file_type().is_symlink()),
         "auth recovery lock must not be a symbolic link");
     let file = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(path)?;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    let deadline = std::time::Instant::now() + wait;
     loop {
         match file.try_lock() {
             Ok(()) => return Ok(file),

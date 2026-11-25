@@ -25,6 +25,15 @@ impl LibraryLock {
         Ok(std::fs::canonicalize(held)? == std::fs::canonicalize(dir.join("lock.db"))?)
     }
 
+    /// Try the exact lock once, with no SQLite busy wait.
+    pub fn try_acquire(dir: &Path) -> Result<Self> {
+        std::fs::create_dir_all(dir)?;
+        let conn = Connection::open(dir.join("lock.db"))?;
+        conn.busy_timeout(Duration::ZERO)?;
+        conn.execute_batch("BEGIN EXCLUSIVE;")?;
+        Ok(Self { _conn: conn })
+    }
+
     /// Take the library lock and hold it until this object (this process) ends.
     /// While occupied, print wait messages on stderr (do not pollute json stdout)
     /// and retry every 300ms. Give up after max_wait so a stuck holder cannot block forever.

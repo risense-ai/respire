@@ -159,6 +159,39 @@ fn verify_managed_boot_inner(check_login_recovery: bool) -> Result<()> {
     }
 }
 
+/// Verify the exact inherited parent and installation without consuming a
+/// serving or Paused grant. This cannot authorize any other host operation.
+pub(crate) fn verify_cold_keygen_launch(
+    grant: &LaunchGrant,
+    binding: &respire_protocol::ControlBinding,
+) -> Result<()> {
+    respire_commands::runtime_policy::require_host("private cold keygen")?;
+    respire_spawn::verify_control_parent(grant.supervisor_pid)?;
+    respire_app::service::validate_client_config()?;
+    let context = current_context(respire_commands::net_rpc::rpc_port())?;
+    anyhow::ensure!(
+        grant.maintenance.is_none() && grant.managed_id.is_none()
+            && context.account_id == hash(context.profile.display().to_string().as_bytes()),
+        "cold keygen requires an unbound, unmanaged profile"
+    );
+    validate_grant(grant, &context, false, &grant.nonce, now_ms()?)?;
+    control::validate_control_binding(binding, &context, grant, None)?;
+    // An old host may have published its journal before the Paused marker.
+    // Do not inspect or implicitly recover any legacy transaction here.
+    let control = context.root.join("runtime").join("autostart");
+    for name in ["offline-keygen.json", "maintenance.json", "account-active.json",
+        "key-control.json", "space-client2.json"]
+    {
+        match fs::symlink_metadata(control.join(name)) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+            Ok(_) => anyhow::bail!("another host control operation must be recovered first"),
+        }
+    }
+    verify_authority_for_mode(Some(grant), &context, false)
+}
+
+
 fn serving_unbound_identity(profile: &Path) -> Result<Option<respire_protocol::HostAuthIdentity>> {
     use respire_client_host::identity::{auth_session_identity, AuthSessionIdentity};
     let Some(session) = respire_client_host::identity::read_session_json(&profile.join("session.json"))? else {

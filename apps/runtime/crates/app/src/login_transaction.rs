@@ -9,6 +9,7 @@ use respire_protocol::{HostAuthIdentity, HostAuthOutcome, HostAuthResult};
 use respire_protocol::host_control::{HostAuthAccountOutcome, HostAuthAccountResult,
     HostAuthAuthorization, HostAuthLoginParams, HostAuthRegisterParams};
 
+mod cold_keygen;
 mod login;
 mod identity;
 pub use identity::{control_identity_write, control_identity_write_result};
