@@ -285,9 +285,10 @@ mod frontend_route_tests {
         if let Some(root) = std::env::var_os(CHILD) {
             let root = std::path::PathBuf::from(root);
             let mut flags = parse(&[])?;
+            std::fs::create_dir_all(&root)?;
             flags.data_dir = Some(root.clone());
             super::apply_data_dir(&flags)?;
-            assert_eq!(respire_app::service::main_data_dir(), root.canonicalize()?);
+            assert_eq!(respire_app::service::main_data_dir().canonicalize()?, root.canonicalize()?);
             assert!(root.is_dir());
             let selected = root.join("accounts").join("existing-profile");
             std::fs::create_dir_all(&selected)?;

@@ -109,6 +109,11 @@ fn exercise(root: &Path, child_env: &str) -> Result<()> {
             let frame = output
                 .strip_prefix(b"\nrunning 1 test\n")
                 .context("missing offline mode child output")?;
+            // Cargo's single-threaded libtest formatter emits the test name
+            // before the child writes its actual binary response frame.
+            let frame = frame.strip_prefix(
+                b"test startup_identity::tests::offline_setting::private_offline_setting_owns_legacy_takeover_and_selected_profile ... ",
+            ).unwrap_or(frame);
             let length = u32::from_be_bytes(
                 frame
                     .get(..4)
