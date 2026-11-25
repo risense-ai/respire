@@ -5,11 +5,25 @@ import {createConnection} from 'node:net';
 import {chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync} from 'node:fs';
 import {isAbsolute, join, relative, resolve, sep, win32} from 'node:path';
 import {setTimeout as delay} from 'node:timers/promises';
+import {fileURLToPath} from 'node:url';
 import {runRuntimeMcpProbe} from './runtime-mcp-probe.mjs';
 
 import {archiveArgs, archiveTool, assertBadConfigResponse, assertDrained, assertModelResponse, assertNativeIntel, assertProtocol, assertSamePath, digest, modelRequest, normalizedPath, safePath, syntheticSession} from './runtime-release-smoke-helpers.mjs';
 
+function canonicalSmokePath(path) {
+  // Runtime receipts can carry Rust's verbatim drive-path spelling on Windows.
+  // Node 22's JavaScript walker may otherwise try to lstat a drive-relative root.
+  if (process.platform !== 'win32') return realpathSync(path);
+  return normalizedPath(realpathSync.native(normalizedPath(path)));
+}
+
 if (process.argv.includes('--self-check')) {
+  if (process.platform === 'win32') {
+    const script = fileURLToPath(import.meta.url);
+    const helper = fileURLToPath(new URL('./runtime-release-smoke-helpers.mjs', import.meta.url));
+    assertSamePath(canonicalSmokePath(win32.toNamespacedPath(script)), canonicalSmokePath(script));
+    assert.throws(() => assertSamePath(canonicalSmokePath(win32.toNamespacedPath(helper)), canonicalSmokePath(script)));
+  }
   const windowsImage = 'D:\\payload\\rsrs-runtime.exe';
   assertSamePath('\\\\?\\D:\\payload\\rsrs-runtime.exe', windowsImage, 'win32');
   assertSamePath('D:/payload/rsrs-runtime.exe', windowsImage, 'win32');
@@ -169,7 +183,7 @@ if (process.argv.includes('--core-config-candidate')) {
     else birth = execFileSync('ps', ['-p', String(process.pid), '-o', 'lstart='], {encoding: 'utf8'}).trim();
     const marker = {schema: 1, id: 'core-config-candidate', phase: 'Paused', owner_pid: process.pid,
       owner_birth: birth, expected_version: '2.0.0-dev.25',
-      expected_profile: process.platform === 'win32' ? win32.toNamespacedPath(realpathSync(root)) : realpathSync(root)};
+      expected_profile: process.platform === 'win32' ? win32.toNamespacedPath(canonicalSmokePath(root)) : canonicalSmokePath(root)};
     const markerBytes = Buffer.from(JSON.stringify(marker));
     mkdirSync(join(root, 'runtime/autostart'));
     writeFileSync(join(root, 'runtime/autostart/maintenance.json'), markerBytes, {mode: 0o600});
@@ -234,7 +248,7 @@ assert.ok(safePath(metadata.binary_file) && !metadata.binary_file.includes('/'))
 assert.match(metadata.binary_sha256 ?? '', /^[a-f0-9]{64}$/);
 assert.equal(digest(readFileSync(join(assets, metadata.archive_file))), metadata.archive_sha256);
 const root = mkdtempSync(join(process.env.RUNNER_TEMP, 'respire-runtime-smoke-'));
-const temporaryRelative = relative(normalizedPath(realpathSync(process.env.RUNNER_TEMP)), normalizedPath(realpathSync(root)));
+const temporaryRelative = relative(normalizedPath(canonicalSmokePath(process.env.RUNNER_TEMP)), normalizedPath(canonicalSmokePath(root)));
 assert.ok(temporaryRelative && !isAbsolute(temporaryRelative) && temporaryRelative.split(sep).every(part => part !== '..'));
 const payload = join(root, 'payload'), dataDir = join(root, 'data'), modelDir = join(root, 'empty-models');
 mkdirSync(payload);
@@ -359,8 +373,8 @@ try {
     assertProtocol(candidate);
     assert.equal(candidate.pid, child.pid);
     assert.equal(candidate.image_sha256, metadata.binary_sha256);
-    assertSamePath(realpathSync(candidate.image_path), realpathSync(executable));
-    assertSamePath(realpathSync(candidate.installation_root), realpathSync(dataDir));
+    assertSamePath(canonicalSmokePath(candidate.image_path), canonicalSmokePath(executable));
+    assertSamePath(canonicalSmokePath(candidate.installation_root), canonicalSmokePath(dataDir));
     assert.equal(candidate.runtime_version, version);
     assert.ok(Array.isArray(candidate.capabilities) &&
       ['business_executor', 'mcp_server'].every(capability => candidate.capabilities.includes(capability)));
@@ -374,11 +388,11 @@ try {
     if (candidate.startup_complete && candidate.credential_state === 'required' && !unlockSent) {
       assert.equal(candidate.state, 'locked');
       assert.equal(candidate.store_ready, false);
-      assertSamePath(realpathSync(candidate.data_dir), realpathSync(dataDir));
+      assertSamePath(canonicalSmokePath(candidate.data_dir), canonicalSmokePath(dataDir));
       unlockSent = true;
       const unlocked = await fetch(`${endpoint}/api/runtime/unlock`, {method: 'POST',
         headers: {'Content-Type': 'application/json', Authorization: `Bearer ${hostToken}`},
-        body: JSON.stringify({schema_version: 1, profile: realpathSync(dataDir),
+        body: JSON.stringify({schema_version: 1, profile: canonicalSmokePath(dataDir),
           session_sha256: digest(sessionBytes), instance_id: candidate.instance_id,
           generation: candidate.generation, super_password: fixture.superPassword, login_password: null}),
         signal: AbortSignal.timeout(15000)});
@@ -407,7 +421,7 @@ try {
     assert.ok(response.ok, `model ${phase} HTTP ${response.status}`);
     const reply = JSON.parse(evidence.body);
     const summary = assertModelResponse(reply, request, health);
-    assertSamePath(realpathSync(reply.data_dir), realpathSync(dataDir));
+    assertSamePath(canonicalSmokePath(reply.data_dir), canonicalSmokePath(dataDir));
     return summary;
   }
   const saved = await execModel('save', ['cpu', '--model', 'quantized']);
