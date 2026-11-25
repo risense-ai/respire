@@ -390,6 +390,40 @@ jobs:
           grep -Fx -- 'Owner handshake: native scoped proof, six routes, denials, legacy RPC/MCP, and scoped stop passed.' "$log"
           if grep -F -- 'no Runtime launched' "$log"; then exit 1; fi
 
+          run_native_case() {
+            local package="$1" case_name="$2"
+            shift 2
+            local case_log="$RUNNER_TEMP/${case_name##*::}-native.log"
+            local cargo_args=()
+            if [ "$package" = respire_spawn ]; then
+              cargo_args+=(--features test-private-space-root)
+            fi
+            cargo +1.95.0 test --locked --manifest-path apps/runtime/Cargo.toml \
+              --target "$EXPECTED_HOST" --target-dir "$target_dir" -p "$package" "${cargo_args[@]}" \
+              --lib "$case_name" -- --exact --test-threads=1 --format pretty "$@" 2>&1 | tr -d '\r' | tee "$case_log"
+            grep -Fx -- "test $case_name ... ok" "$case_log"
+            grep -F -- 'test result: ok. 1 passed; 0 failed; 0 ignored;' "$case_log"
+          }
+          for case_name in \
+            native_job_root_reserves_only_bounded_owner_private_children \
+            model_job_rejects_non_directory_without_creating_a_stage \
+            concurrent_owners_cannot_reserve_more_than_four_native_slots \
+            failed_setup_releases_only_its_new_native_slot; do
+            run_native_case respire_spawn "owner_credential::model_job::tests::$case_name"
+          done
+
+          if [ "$RUNNER_OS" = macOS ]; then
+            export RESPIRE_NATIVE_CANDIDATE_TEST_BINARY="$binary"
+            run_native_case respire_core_sdk \
+              worker::candidate::tests::native_owned_candidate_can_be_reaped_without_retiring_foreground --ignored
+            unset RESPIRE_NATIVE_CANDIDATE_TEST_BINARY
+            for case_name in \
+              wal_read_stays_old_across_interleaved_write_and_stale_publication_refuses \
+              pending_target_and_physical_database_are_bound; do
+              run_native_case respire_storage "transport::local::model_switch_source::tests::$case_name"
+            done
+          fi
+
       - name: Verify the native macOS device-local catalog and SQLite migration fence
         if: runner.os == 'macOS'
         shell: bash
