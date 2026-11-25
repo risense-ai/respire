@@ -257,22 +257,39 @@ fn service_work(work: Work, store: Option<&LocalStore>, ownership: &LibraryLock)
     }
     let mut reply = Some(reply);
     let _ = crate::rpc_serve::with_verified_owner_store_scope(
-        |account, profile, instance, generation, vault_epoch, _| {
+        |account, profile, instance, generation, vault_epoch, library| {
             let result = (|| {
                 let store = store
                     .filter(|_| ownership.protects(profile).unwrap_or(false))
                     .ok_or_else(unavailable)?;
                 let live = binding(account, profile, instance, generation, vault_epoch);
                 with_bound_native(&live, |owner, live| {
-                    owner
-                        .recheck(live, &ticket, call.action())
-                        .map_err(|_| unauthorized())?;
-                    if reply.as_ref().is_none_or(oneshot::Sender::is_closed)
-                        || Instant::now() >= deadline
-                    {
+                    let action = call.action();
+                    owner.recheck(live, &ticket, action).map_err(|_| unauthorized())?;
+                    let current = || reply.as_ref().is_some_and(|sender| !sender.is_closed())
+                        && Instant::now() < deadline;
+                    if !current() {
                         return Err(busy());
                     }
-                    call.run(store)
+                    let Some(space) = library.active_device_space(ownership)
+                        .map_err(|_| super::transport::unavailable())?
+                    else {
+                        owner.recheck(live, &ticket, action).map_err(|_| unauthorized())?;
+                        if !current() {
+                            return Err(busy());
+                        }
+                        return call.run(store, false);
+                    };
+                    // Same verified Vault, account/profile/instance/generation
+                    // and exact scoped lease; no parent fallback on any child error.
+                    library.with_device_space_store(ownership, &space, current, |child_store| {
+                        owner.recheck(live, &ticket, action).map_err(|_| unauthorized())?;
+                        if !current() {
+                            return Err(busy());
+                        }
+                        call.run(child_store, true)
+                    }).map_err(|_| super::transport::unavailable())?
+                        .ok_or_else(super::transport::unavailable)?
                 })
             })();
             if let Some(sender) = reply.take() {

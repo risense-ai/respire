@@ -24,15 +24,8 @@ pub(super) async fn enqueue(
     request: Option<Trigger>,
 ) -> V1Result<Response> {
     rest_dispatch::submit(scope, Access::Write, move |ctx| {
-        if let Some(space) = request.and_then(|request| request.space_id) {
-            if space != reads::space_id(ctx)? {
-                return Err(Problem::new(
-                    StatusCode::NOT_FOUND,
-                    "space_not_found",
-                    "Space not found",
-                ));
-            }
-        }
+        // Device-local content never reaches the profile's remote transport.
+        reads::check_space(ctx, request.and_then(|request| request.space_id))?;
         check_mode()?;
         let remote = crate::engine::build_remote().map_err(|_| {
             Problem::new(

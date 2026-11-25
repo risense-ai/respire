@@ -120,6 +120,7 @@ fn plan_failure(error: anyhow::Error) -> Problem {
 
 pub(super) async fn apply(scope: RestScope, input: ApplyRequest) -> V1Result<Response> {
     rest_dispatch::submit(scope, Access::Write, move |ctx| {
+        reads::check_space(ctx, None)?;
         check_write_mode()?;
         let mut previews = PREVIEWS.lock().map_err(|_| transport::unavailable())?;
         let preview = previews
@@ -133,6 +134,10 @@ pub(super) async fn apply(scope: RestScope, input: ApplyRequest) -> V1Result<Res
         rest_dispatch::enqueue_write(ctx.scope.clone(), move |ctx| {
             if !job.start()? {
                 return Ok(());
+            }
+            if let Err(error) = reads::check_space(ctx, None) {
+                job.finish(Phase::Failed);
+                return Err(error);
             }
             check_write_mode()?;
             let result = ctx.library.apply_deepen(

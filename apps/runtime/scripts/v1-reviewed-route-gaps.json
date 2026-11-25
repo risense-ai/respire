@@ -1,7 +1,5 @@
 [
-  "DELETE /v1/spaces/{spaceId} deleteSpace",
   "GET /v1/backups/export exportBackup",
-  "PATCH /v1/spaces/{spaceId} updateSpace",
   "POST /v1/backups/import importBackup",
   "POST /v1/host/transactions/login executeLoginTransaction",
   "POST /v1/host/transactions/logout executeLogoutTransaction",

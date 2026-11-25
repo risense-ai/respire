@@ -10,12 +10,19 @@ use serde::Deserialize;
 use serde_json::json;
 use std::net::SocketAddr;
 
+#[path = "device_space_update.rs"]
+mod update;
+#[path = "device_space_delete.rs"]
+mod delete;
+
 const PATH: &str = "/v1/spaces";
 
 pub(super) fn routes(bound: SocketAddr) -> Router {
     let router = bind(Router::new(), RouteSpec::new(Verb::Get, PATH, "listSpaces"), list);
     let router = bind(router, RouteSpec::new(Verb::Post, PATH, "createSpace"), create);
-    bind(router, RouteSpec::new(Verb::Get, "/v1/spaces/{spaceId}", "getSpace"), get)
+    let router = bind(router, RouteSpec::new(Verb::Get, "/v1/spaces/{spaceId}", "getSpace"), get);
+    let router = bind(router, RouteSpec::new(Verb::Patch, "/v1/spaces/{spaceId}", "updateSpace"), update::handle);
+    bind(router, RouteSpec::new(Verb::Delete, "/v1/spaces/{spaceId}", "deleteSpace"), delete::handle)
         .method_not_allowed_fallback(super::method_not_allowed)
         .with_state(bound)
 }

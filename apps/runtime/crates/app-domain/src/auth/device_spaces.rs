@@ -6,6 +6,10 @@ use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, time::Duration};
 use uuid::Uuid;
 
+#[path = "device_space_state.rs"]
+mod state;
+pub use state::{DeviceSpacePatch, DeviceSpaceRetirement};
+
 const DOMAIN: &[u8] = b"rsrs:device-local-space-owner:1";
 const LIMIT: usize = 4096;
 const CATALOG_LIMIT: usize = 256;
@@ -139,13 +143,15 @@ impl RuntimeLibrary<'_> {
             return Ok(Vec::new());
         };
         let key = crypto::derive_subkey(&self.0.urk, DOMAIN)?;
+        let state = self.read_space_state(&area, installation)?.1;
         let mut result = Vec::new();
         for candidate in area.candidates()? {
             let id = Uuid::parse_str(&candidate).context("invalid local space candidate")?;
             if id.get_version_num() != 4 {
                 continue;
             }
-            if let Some(found) = self.read_device_space(&area, installation, &key, id)? {
+            if let Some(mut found) = self.read_device_space(&area, installation, &key, id)? {
+                state.project(&mut found);
                 result.push(found);
             }
         }
@@ -165,7 +171,11 @@ impl RuntimeLibrary<'_> {
             return Ok(None);
         };
         let key = crypto::derive_subkey(&self.0.urk, DOMAIN)?;
-        self.read_device_space(&area, installation, &key, id)
+        let Some(mut found) = self.read_device_space(&area, installation, &key, id)? else {
+            return Ok(None);
+        };
+        self.read_space_state(&area, installation)?.1.project(&mut found);
+        Ok(Some(found))
     }
 
     /// Resolve and hold a committed device-local library, without changing

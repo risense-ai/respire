@@ -5,6 +5,7 @@ const INSTALLATION: &str = "installation.id";
 const FINAL: &str = "owner.receipt";
 const STAGING: &str = ".pending";
 const MAX_RECEIPT: usize = 8192;
+const MAX_STATE: usize = 262_144;
 const SHARE: u32 = FILE_SHARE_READ | FILE_SHARE_WRITE;
 
 pub struct LocalSpaceNamespace {
@@ -35,6 +36,15 @@ impl LocalSpaceNamespace {
         let _root = managed_child(parent.as_raw_handle(), name, &user, true)?;
         Ok(temporary_parent.join(name))
     }
+    #[cfg(feature = "test-private-space-root")]
+    #[doc(hidden)]
+    pub fn make_fixture_runtime_parent(installation: &Path) -> io::Result<()> {
+        let base = pinned_base_with_sharing(installation, SHARE, true)?;
+        let user = CurrentUser::query_managed()?;
+        let _runtime = managed_child(base.as_raw_handle(), "runtime", &user, true)?;
+        Ok(())
+    }
+
     pub fn open(profile: &Path) -> io::Result<Self> {
         let base = pinned_base_with_sharing(profile, SHARE, true)?;
         let user = CurrentUser::query_managed()?;
@@ -52,6 +62,73 @@ impl LocalSpaceNamespace {
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(error),
         }
+    }
+
+    /// An old installation without a device catalog keeps its unchanged
+    /// default library, even if its base lacks the new owner-only policy.
+    pub fn open_configured(profile: &Path) -> io::Result<Option<Self>> {
+        let name = CATALOG;
+        match std::fs::symlink_metadata(profile.join(name)) {
+            Ok(_) => Self::open_existing(profile),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// The caller supplies an opaque profile/Vault slot, never a user path.
+    pub fn state_record(&self, slot: &str) -> io::Result<Option<Vec<u8>>> {
+        self.user.verify_new_managed_directory(self.catalog.as_raw_handle())?;
+        let name = format!("state-{}", checked_id(slot)?);
+        read_record(self.catalog.as_raw_handle(), &name, &self.user, MAX_STATE)
+    }
+
+    pub fn replace_state_record(
+        &self, slot: &str, bytes: &[u8], admit: impl FnOnce() -> io::Result<()>,
+    ) -> io::Result<()> {
+        if bytes.is_empty() || bytes.len() > MAX_STATE {
+            return Err(denied("private space state is outside limits"));
+        }
+        let parent = self.catalog.as_raw_handle();
+        self.user.verify_new_managed_directory(parent)?;
+        let slot = checked_id(slot)?;
+        let name = format!("state-{slot}");
+        let pending = format!(".state-{slot}.pending");
+        // The active owner serializes writes with its original profile lock.
+        match relative_open(
+            parent, OsStr::new(&pending), DELETE | META, FILE_SHARE_READ | FILE_SHARE_DELETE,
+            None, FILE_OPEN, FILE_NON_DIRECTORY_FILE,
+        ) {
+            Ok(stale) => {
+                checked_file(stale.as_raw_handle(), None)?;
+                self.user.verify_handle(stale.as_raw_handle(), true)?;
+                mark_delete(stale.as_raw_handle())?;
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        let descriptor = self.user.descriptor()?;
+        let file = relative_open(
+            parent, OsStr::new(&pending), GENERIC_WRITE | META | DELETE,
+            FILE_SHARE_READ | FILE_SHARE_DELETE, Some(&descriptor), FILE_CREATE,
+            FILE_NON_DIRECTORY_FILE,
+        )?;
+        let mut file = File::from(file);
+        let result = (|| {
+            checked_file(file.as_raw_handle(), Some(0))?;
+            self.user.verify_handle(file.as_raw_handle(), true)?;
+            file.write_all(bytes)?;
+            file.sync_all()?;
+            checked_file(file.as_raw_handle(), Some(bytes.len() as u64))?;
+            self.user.verify_new_managed_directory(parent)?;
+            // Refuse an invalid existing destination rather than adopting it.
+            let _ = self.state_record(slot)?;
+            admit()?;
+            rename_relative(file.as_raw_handle(), parent, OsStr::new(&name), ATOMIC_REPLACE)
+        })();
+        if result.is_err() {
+            let _ = mark_delete(file.as_raw_handle());
+        }
+        result
     }
 
     pub fn existing_installation(&self) -> io::Result<Option<[u8; 16]>> {
@@ -110,6 +187,63 @@ impl LocalSpaceNamespace {
             user,
             published: false,
         })
+    }
+
+    /// Atomically retire the exact verified child under a bounded private
+    /// quarantine. A malformed or unknown child never authorizes deletion.
+    pub fn retire(
+        &self, id: &str, authorize: impl FnOnce(&[u8]) -> bool,
+        admit: impl FnOnce() -> io::Result<()>,
+    ) -> io::Result<bool> {
+        let parent = self.catalog.as_raw_handle();
+        self.user.verify_new_managed_directory(parent)?;
+        let name = format!("local-{}", checked_id(id)?);
+        let directory = match relative_open(
+            parent, OsStr::new(&name), DELETE | META | FILE_TRAVERSE, SHARE,
+            None, FILE_OPEN, FILE_DIRECTORY_FILE,
+        ) {
+            Ok(directory) => directory,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        let handle = directory.as_raw_handle();
+        checked_directory(handle)?;
+        self.user.verify_new_managed_directory(handle)?;
+        let Some(receipt) = read_record(handle, FINAL, &self.user, MAX_RECEIPT)? else {
+            return Ok(false);
+        };
+        if !authorize(&receipt) {
+            return Ok(false);
+        }
+        let quarantine = managed_child(parent, ".retired", &self.user, false)?;
+        let retired = quarantine.as_raw_handle();
+        let candidates = available_retirement_slots(retired, &self.user)?;
+        self.user.verify_new_managed_directory(handle)?;
+        admit()?;
+        for slot in candidates {
+            match rename_relative(handle, retired, OsStr::new(&slot), 0) {
+                Ok(()) => {
+                    cleanup_known_space_files(handle, &self.user);
+                    let _ = mark_delete(handle);
+                    return Ok(true);
+                }
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        Err(retirement_full())
+    }
+
+    #[cfg(feature = "test-private-space-root")]
+    #[doc(hidden)]
+    pub fn make_fixture_retirement_slot(&self, number: u8) -> io::Result<PathBuf> {
+        if number >= super::super::LOCAL_SPACE_STAGING_SLOTS {
+            return Err(denied("invalid fixture retirement slot"));
+        }
+        let parent = open_managed_child(self.catalog.as_raw_handle(), ".retired", &self.user)?;
+        let leaf = format!("slot-{number:02}");
+        let _slot = managed_child(parent.as_raw_handle(), &leaf, &self.user, true)?;
+        Ok(self.path.join(".retired").join(leaf))
     }
 
     pub fn receipt(&self, id: &str) -> io::Result<Option<Vec<u8>>> {
@@ -197,23 +331,60 @@ impl Drop for FreshLocalSpace {
         if self.user.verify_new_managed_directory(stage).is_err() {
             return;
         }
-        for leaf in super::super::LOCAL_SPACE_STAGE_FILES {
-            let Ok(file) = relative_open(
-                stage, OsStr::new(leaf), DELETE | META, FILE_SHARE_READ | FILE_SHARE_DELETE,
-                None, FILE_OPEN, FILE_NON_DIRECTORY_FILE,
-            ) else {
-                continue;
-            };
-            let handle = file.as_raw_handle();
-            if checked_file(handle, None).is_ok() && (self.user.verify_handle(handle, true).is_ok()
-                || (self.user.verify_managed_base(handle).is_ok()
-                    && self.user.verify_inherited_model_ace(handle).is_ok()))
-            {
-                let _ = mark_delete(handle);
-            }
-        }
+        cleanup_known_space_files(stage, &self.user);
         // Handles only; an unknown file or non-empty stage stays quarantined.
         let _ = mark_delete(stage);
+    }
+}
+
+fn available_retirement_slots(parent: HANDLE, user: &CurrentUser) -> io::Result<Vec<String>> {
+    let mut available = Vec::new();
+    for number in 0..super::super::LOCAL_SPACE_STAGING_SLOTS {
+        let name = format!("slot-{number:02}");
+        let directory = match relative_open(
+            parent, OsStr::new(&name), DELETE | META | FILE_TRAVERSE, SHARE,
+            None, FILE_OPEN, FILE_DIRECTORY_FILE,
+        ) {
+            Ok(directory) => directory,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                available.push(name);
+                continue;
+            }
+            Err(error) if error.raw_os_error() == Some(32) => continue,
+            Err(error) => return Err(error),
+        };
+        let handle = directory.as_raw_handle();
+        checked_directory(handle)?;
+        user.verify_new_managed_directory(handle)?;
+        // Native disposition refuses nonempty directories. Recover only exact
+        // empty slots abandoned by a former interrupted cleanup.
+        if mark_delete(handle).is_ok() {
+            drop(directory);
+            available.push(name);
+        }
+    }
+    if available.is_empty() { Err(retirement_full()) } else { Ok(available) }
+}
+
+fn retirement_full() -> io::Error {
+    io::Error::new(io::ErrorKind::StorageFull, "local space retirement quarantine is full")
+}
+
+fn cleanup_known_space_files(stage: HANDLE, user: &CurrentUser) {
+    for leaf in super::super::LOCAL_SPACE_STAGE_FILES {
+        let Ok(file) = relative_open(
+            stage, OsStr::new(leaf), DELETE | META, FILE_SHARE_READ | FILE_SHARE_DELETE,
+            None, FILE_OPEN, FILE_NON_DIRECTORY_FILE,
+        ) else {
+            continue;
+        };
+        let handle = file.as_raw_handle();
+        if checked_file(handle, None).is_ok() && (user.verify_handle(handle, true).is_ok()
+            || (user.verify_managed_base(handle).is_ok()
+                && user.verify_inherited_model_ace(handle).is_ok()))
+        {
+            let _ = mark_delete(handle);
+        }
     }
 }
 

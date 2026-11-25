@@ -52,14 +52,14 @@ pub(super) async fn check(app: &Router) -> Result<()> {
     fs::remove_file(&members_path)?;
     #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
     if id == "main" {
-        device_space_tests::check(app, &root).await?;
+        device_space_tests::check(app, &root, false).await?;
     }
     Ok(())
 }
 
 #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 #[path = "device_space_tests.rs"]
-mod device_space_tests;
+pub(super) mod device_space_tests;
 
 pub(super) fn fixture_root(path: &std::path::Path, secure: bool) -> Result<std::path::PathBuf> {
     let root = path.canonicalize()?;

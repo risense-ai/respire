@@ -38,21 +38,45 @@ where
     T: Send + 'static,
     F: for<'a> FnOnce(&LibraryContext<'a>, &Admission) -> V1Result<T> + Send + 'static,
 {
-    submit_publication(scope, run, device_space_publication::outcome_unknown).await
+    submit_publication(scope, run, device_space_publication::outcome_unknown, false).await
 }
 
-pub(super) async fn submit_device_space_memory<T, F>(scope: RestScope, run: F) -> V1Result<T>
+pub(super) async fn submit_device_space_update<T, F>(scope: RestScope, run: F) -> V1Result<T>
 where
     T: Send + 'static,
     F: for<'a> FnOnce(&LibraryContext<'a>, &Admission) -> V1Result<T> + Send + 'static,
 {
     submit_publication(scope, run, || Problem::new(
-        StatusCode::CONFLICT, "memory_create_outcome_unknown",
-        "Memory creation outcome is unknown; do not retry automatically",
-    )).await
+        StatusCode::CONFLICT, "space_update_outcome_unknown",
+        "Local space update outcome is unknown; do not retry automatically",
+    ), false).await
 }
 
-async fn submit_publication<T, F>(scope: RestScope, run: F, unknown: fn() -> Problem) -> V1Result<T>
+pub(super) async fn submit_device_space_delete<T, F>(scope: RestScope, run: F) -> V1Result<T>
+where
+    T: Send + 'static,
+    F: for<'a> FnOnce(&LibraryContext<'a>, &Admission) -> V1Result<T> + Send + 'static,
+{
+    submit_publication(scope, run, || Problem::new(
+        StatusCode::CONFLICT, "space_delete_outcome_unknown",
+        "Local space deletion outcome is unknown; do not retry automatically",
+    ), false).await
+}
+
+pub(super) async fn submit_memory_write<T, F>(scope: RestScope, run: F) -> V1Result<T>
+where
+    T: Send + 'static,
+    F: for<'a> FnOnce(&LibraryContext<'a>, &Admission) -> V1Result<T> + Send + 'static,
+{
+    submit_publication(scope, run, || Problem::new(
+        StatusCode::CONFLICT, "memory_write_outcome_unknown",
+        "Memory write outcome is unknown; do not retry automatically",
+    ), true).await
+}
+
+async fn submit_publication<T, F>(
+    scope: RestScope, run: F, unknown: fn() -> Problem, allow_original: bool,
+) -> V1Result<T>
 where
     T: Send + 'static,
     F: for<'a> FnOnce(&LibraryContext<'a>, &Admission) -> V1Result<T> + Send + 'static,
@@ -68,7 +92,7 @@ where
     let receiver = enqueue(scope, Access::Write, deadline, cancelled, move |ctx| {
         run(ctx, &worker)
     })?;
-    await_publication(&admission, receiver, deadline, COMMIT_WAIT, unknown).await
+    await_publication(&admission, receiver, deadline, COMMIT_WAIT, unknown, allow_original).await
 }
 
 const REQUEST_WAIT: Duration = Duration::from_secs(2);
