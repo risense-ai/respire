@@ -9,7 +9,7 @@ use super::{
 use axum::{
     body::{Body, Bytes, HttpBody},
     extract::{ConnectInfo, Request},
-    http::{header, StatusCode},
+    http::{header, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     routing::post,
     Router,
@@ -105,7 +105,16 @@ async fn install(request: Request, peer: SocketAddr, bound: SocketAddr) -> Respo
         )
     }
     .await;
-    result.into_response()
+    let mut response = result.into_response();
+    // Both fixed Problem Details and our success receipt have an exact length.
+    // Keep this one native response explicitly bounded and unchunked even
+    // when Hyper returns an admission error before it has polled the upload.
+    if let Some(length) = response.body().size_hint().exact() {
+        response
+            .headers_mut()
+            .insert(header::CONTENT_LENGTH, HeaderValue::from(length));
+    }
+    response
 }
 
 async fn receive(
