@@ -281,6 +281,32 @@ mod frontend_route_tests {
     }
     #[test]
     fn runtime_only_serves_in_the_foreground() -> anyhow::Result<()> {
+        const CHILD: &str = "RSRS_RUNTIME_DATA_ROOT_TEST_CHILD";
+        if let Some(root) = std::env::var_os(CHILD) {
+            let root = std::path::PathBuf::from(root);
+            let mut flags = parse(&[])?;
+            flags.data_dir = Some(root.clone());
+            super::apply_data_dir(&flags)?;
+            assert_eq!(respire_app::service::main_data_dir(), root.canonicalize()?);
+            assert!(root.is_dir());
+            let selected = root.join("accounts").join("existing-profile");
+            std::fs::create_dir_all(&selected)?;
+            let config = serde_json::to_vec(&serde_json::json!({"data_dir": selected}))?;
+            std::fs::write(root.join("client.json"), &config)?;
+            super::apply_data_dir(&parse(&[])?)?;
+            assert_eq!(respire_app::service::data_dir().canonicalize()?, selected.canonicalize()?);
+            assert_eq!(std::fs::read(root.join("client.json"))?, config);
+            return Ok(());
+        }
+        let directory = std::env::temp_dir().join(format!("runtime-data-root-{}", uuid::Uuid::new_v4()));
+        let output = std::process::Command::new(std::env::current_exe()?)
+            .args(["--exact", "frontend_route_tests::runtime_only_serves_in_the_foreground", "--nocapture"])
+            .env(CHILD, directory.join("new-root"))
+            .env_remove("RSRS_DEFAULT_DATA_DIR")
+            .output()?;
+        anyhow::ensure!(output.status.success(), "data root child failed: {} {}",
+            String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        std::fs::remove_dir_all(&directory)?;
         assert!(!parse(&[])?.version);
         assert!(parse(&["serve"])?.serve);
         assert!(parse(&["--runtime-internal"])?.serve);

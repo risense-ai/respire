@@ -81,6 +81,30 @@ mod tests {
     use std::time::Duration;
 
     #[test]
+    fn legacy_exclusive_transaction_and_runtime_ownership_exclude_each_other() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let legacy = Connection::open(dir.path().join("lock.db"))?;
+        legacy.busy_timeout(Duration::ZERO)?;
+        legacy.execute_batch("BEGIN EXCLUSIVE")?;
+        let blocked = LibraryLock::acquire(dir.path(), Duration::ZERO);
+        assert!(matches!(
+            blocked,
+            Err(error) if error.to_string().contains("memory library still locked")
+        ));
+        legacy.execute_batch("ROLLBACK")?;
+
+        let runtime = LibraryLock::acquire(dir.path(), Duration::ZERO)?;
+        assert!(runtime.protects(dir.path())?);
+        assert!(matches!(
+            legacy.execute_batch("BEGIN EXCLUSIVE"),
+            Err(rusqlite::Error::SqliteFailure(error, _)) if error.code == ErrorCode::DatabaseBusy
+        ));
+        drop(runtime);
+        legacy.execute_batch("BEGIN EXCLUSIVE; ROLLBACK")?;
+        Ok(())
+    }
+
+    #[test]
     fn acquire_and_timeout() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let held = LibraryLock::acquire(dir.path(), Duration::from_secs(2))?;

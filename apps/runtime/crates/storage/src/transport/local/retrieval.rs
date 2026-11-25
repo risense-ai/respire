@@ -22,6 +22,17 @@ impl std::fmt::Display for IndexSourceChanged {
 impl std::error::Error for IndexSourceChanged {}
 
 impl LocalStore {
+    /// Read an exact live source and its current-generation artifact together.
+    pub fn active_indexed_memory_exact(&self, id: &str, generation: &str) -> Result<Option<crate::StoredMemory>> {
+        use rusqlite::OptionalExtension;
+        let Some(mut memory) = self.active_memory_exact(id)? else { return Ok(None); };
+        memory.local_artifact = self.connection.query_row(
+            "SELECT artifact FROM core_artifacts WHERE memory_id=?1 AND model=?2 AND source=?3",
+            params![id, generation, memory.ciphertext], |row| row.get(0),
+        ).optional()?.unwrap_or_default();
+        Ok(Some(memory))
+    }
+
     // Only production caller: LocalStore::all. Its SELECT reads the memories
     // primary key, so out has unique IDs. On any error all discards the entire
     // output Vec; this helper does not promise rollback for an arbitrary slice.
@@ -112,6 +123,21 @@ impl LocalStore {
             return Ok(true);
         }
         respire_core_sdk::index_ready(&artifacts)
+    }
+
+    /// Count current live entries and only current-generation matching artifacts.
+    /// This query does not materialize ciphertext or retrieval vectors.
+    pub fn light_status_counts(&self, generation: &str) -> Result<(u64, u64, u64, Option<String>)> {
+        Ok(self.connection.query_row(
+            "SELECT count(*), count(CASE WHEN m.importance = 'trivial' THEN 1 END),
+                    count(CASE WHEN EXISTS (
+                        SELECT 1 FROM core_artifacts a WHERE a.memory_id=m.id
+                        AND a.model=?1 AND a.source=m.ciphertext
+                    ) THEN 1 END), max(m.updated_at)
+             FROM memories m WHERE m.deleted=0",
+            [generation],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )?)
     }
 
     pub fn index_missing(&self, model: &str) -> Result<bool> {
@@ -322,6 +348,28 @@ impl LocalStore {
 #[cfg(test)]
 mod copy_tests {
     use super::*;
+
+    #[test]
+    fn light_status_counts_pick_only_live_current_artifacts_and_diaries() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let store = LocalStore::open(&dir.path().join("status.db"))?;
+        assert_eq!(store.light_status_counts("current")?, (0, 0, 0, None));
+        store.connection.execute_batch(
+            "INSERT INTO memories(id,ciphertext,updated_at,importance,deleted) VALUES
+              ('memory','m','2026-11-24T02:00:00Z','normal',0),
+              ('diary','d','2026-11-24T01:00:00Z','trivial',0),
+              ('stale','new','2026-11-24T03:00:00Z','normal',0),
+              ('deleted','gone','2026-11-24T04:00:00Z','trivial',1);
+             INSERT INTO core_artifacts(memory_id,model,source,artifact) VALUES
+              ('memory','current','m',X'01'),('diary','other','d',X'02'),
+              ('stale','current','old',X'03'),('deleted','current','gone',X'04');",
+        )?;
+        assert_eq!(
+            store.light_status_counts("current")?,
+            (3, 1, 1, Some("2026-11-24T03:00:00Z".to_owned())),
+        );
+        Ok(())
+    }
 
     #[test]
     fn attachments_preserve_source_deleted_model_and_subset_guards() -> Result<()> {

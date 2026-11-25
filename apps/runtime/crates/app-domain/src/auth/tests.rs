@@ -404,3 +404,6 @@
         }
         result
     }
+
+#[path = "vault_legacy_sqlite_tests.rs"]
+mod vault_legacy_sqlite_tests;

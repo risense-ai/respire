@@ -18,7 +18,7 @@ mod keygen_existing_protocol;
 mod keys;
 pub use keys::{control_key, control_key_result, control_key_rollback, control_key_complete, verify_key_receipt};
 mod space;
-pub use space::control_space;
+pub use space::{control_space, list_space_members};
 mod profile;
 pub use profile::control_profile_remove;
 

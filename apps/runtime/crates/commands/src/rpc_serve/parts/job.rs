@@ -79,7 +79,6 @@ fn watch_queue(deadline: &Arc<crate::admission::QueueDeadline>, reply: &Reply) -
 }
 
 pub fn serve(flags: RuntimeFlags) -> Result<()> {
-    respire_app::service::validate_client_config()?;
     validate_process_identity()?;
     crate::runtime_policy::require_host("runtime startup")?;
     // Ignore SIGHUP off this thread. signal_hook's handler install must not sit
@@ -117,6 +116,8 @@ pub fn serve(flags: RuntimeFlags) -> Result<()> {
     if probe_runtime()?.is_some() {
         return Ok(());
     }
+    respire_app::service::recover_host_config()?;
+    respire_app::service::validate_client_config()?;
     // Acquire the existing library ownership before publishing readiness. This
     // also guards an older runtime using another port, and direct-mode clients.
     let library = respire_app::lock::LibraryLock::acquire(

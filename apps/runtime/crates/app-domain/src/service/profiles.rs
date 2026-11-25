@@ -115,13 +115,23 @@ pub fn validate_client_config() -> Result<()> {
 }
 
 pub fn client_config_lock() -> Result<std::fs::File> {
+    let file = client_config_lock_unchecked(true)?;
+    host_config_transaction::ensure_no_host_config_transaction()?;
+    Ok(file)
+}
+
+fn client_config_lock_unchecked(wait: bool) -> Result<std::fs::File> {
     let path = client_config_path().with_extension("json.lock");
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let file = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(&path)
         .with_context(|| format!("cannot open client config lock {}", path.display()))?;
-    file.lock().with_context(|| format!("cannot lock client config {}", path.display()))?;
+    if wait {
+        file.lock().with_context(|| format!("cannot lock client config {}", path.display()))?;
+    } else {
+        file.try_lock().with_context(|| format!("client config is busy: {}", path.display()))?;
+    }
     Ok(file)
 }
 
@@ -182,7 +192,8 @@ fn json_type_name(value: &serde_json::Value) -> &'static str {
     }
 }
 
-fn read_client_config_for_write() -> Result<serde_json::Value> {
+pub fn read_client_config_for_write() -> Result<serde_json::Value> {
+    host_config_transaction::ensure_no_host_config_transaction()?;
     crate::memory::bge::m3_model_dir()?;
     let path = client_config_path();
     let text = match std::fs::read_to_string(&path) {

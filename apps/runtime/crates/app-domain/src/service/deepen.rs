@@ -29,13 +29,69 @@ pub fn deepen_plan(
             counts.direct, counts.descendants,
         )).into());
     }
-    require_candidates_ready(store, &candidates)?;
+    cluster_deepen(store, &candidates, root_prefix, min_sim)
+}
+
+fn cluster_deepen(
+    store: &LocalStore,
+    candidates: &[crate::StoredMemory],
+    root: &str,
+    min: f32,
+) -> Result<(String, DeepenPlan)> {
+    require_candidates_ready(store, candidates)?;
     respire_core_sdk::execute(
         "deepen_plan",
         serde_json::json!({
-            "snapshots":respire_core_sdk::metadata_snapshots(&candidates), "root":root_prefix, "min":min_sim,
+            "snapshots":respire_core_sdk::metadata_snapshots(candidates), "root":root, "min":min,
         }),
     )
+}
+
+/// Plan against only the verified owner's active outline. The caller supplies exact IDs.
+pub fn scoped_deepen_plan(
+    store: &LocalStore,
+    owner: &str,
+    root: Option<&str>,
+) -> Result<Vec<(String, DeepenPlan)>> {
+    let candidates = store.all(false)?.into_iter()
+        .filter(|row| row.user == owner && row.local_importance != "trivial")
+        .collect::<Vec<_>>();
+    let tree = TreeLinks::new(candidates.iter()
+        .map(|row| (row.id.as_str(), row.local_parent_id.as_str())));
+    let eligible = |id| tree.counts(id).is_flat();
+    let roots = if let Some(id) = root {
+        if !tree.ids.contains(id) || !eligible(id) {
+            return Err(InputError("target is not an eligible outline".into()).into());
+        }
+        vec![id]
+    } else {
+        candidates.iter().filter(|row| row.local_parent_id.is_empty() && eligible(&row.id))
+            .map(|row| row.id.as_str()).collect()
+    };
+    roots.into_iter().map(|id| {
+        let (resolved, plan) = cluster_deepen(store, &candidates, id, 0.55)?;
+        anyhow::ensure!(resolved == id, "Core resolved a different outline");
+        Ok((resolved, plan))
+    }).collect()
+}
+
+/// Recommend roots that meet the existing automatic deepen topology rule.
+pub fn deepen_suggestions(
+    store: &LocalStore,
+    owner: &str,
+    top: usize,
+) -> Result<Vec<(String, usize)>> {
+    let links = store.owner_tree_links(owner)?;
+    let tree = TreeLinks::new(links.iter().map(|(id, parent)| (id.as_str(), parent.as_str())));
+    Ok(links
+        .iter()
+        .filter(|(_, parent)| parent.is_empty())
+        .filter_map(|(id, _)| {
+            let counts = tree.counts(id);
+            counts.is_flat().then(|| (id.clone(), counts.direct))
+        })
+        .take(top)
+        .collect())
 }
 
 pub struct DeepenRoot {
@@ -244,6 +300,37 @@ mod tests {
             descendants: 11
         }
         .is_flat());
+    }
+
+    #[test]
+    fn suggestions_only_count_live_tree_nodes_owned_by_the_caller() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("rsrs.db");
+        let store = LocalStore::open(&path)?;
+        fixture_writer(&path)?.execute_batch(
+            "INSERT INTO memories(id,user) VALUES
+             ('mine-b','owner'),('mine-a','owner'),('foreign','other'),
+             ('foreign-child','owner'),('tombstoned-child','owner'),('diary-child','owner');
+             WITH RECURSIVE numbers(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM numbers WHERE n<15)
+             INSERT INTO memories(id,user,parent_id,deleted,importance)
+             SELECT root.id || '-child-' || n,
+                    CASE WHEN root.id='foreign-child' AND n=15 THEN 'other' ELSE root.user END,
+                    root.id, root.id='tombstoned-child' AND n=15,
+                    CASE WHEN root.id='diary-child' AND n=15 THEN 'trivial' ELSE 'normal' END
+             FROM memories AS root CROSS JOIN numbers;
+             INSERT INTO memories(id,user) VALUES ('','owner');
+             WITH RECURSIVE numbers(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM numbers WHERE n<15)
+             INSERT INTO memories(id,user) SELECT 'loose-' || n,'owner' FROM numbers;",
+        )?;
+        assert_eq!(
+            deepen_suggestions(&store, "owner", 1)?,
+            vec![("mine-a".to_owned(), 15)]
+        );
+        assert_eq!(
+            deepen_suggestions(&store, "owner", 50)?,
+            vec![("mine-a".to_owned(), 15), ("mine-b".to_owned(), 15)]
+        );
+        Ok(())
     }
 
     #[test]

@@ -264,10 +264,23 @@ static SYNC_KICK: Mutex<SyncSchedule> = Mutex::new(SyncSchedule {
 });
 struct SyncSchedule {
     due: Option<Instant>,
-    manual: VecDeque<(Job, usize, i64)>,
+    manual: VecDeque<ManualSync>,
     backoff: u32,
     blocked_generation: Option<usize>,
     last_success: Option<u64>,
+}
+
+enum ManualSync {
+    Legacy(Job, usize, i64),
+    V1(Box<crate::runtime_http::PendingSync>),
+}
+
+impl ManualSync {
+    fn reject(self, error: &str) {
+        if let Self::Legacy(job, _, _) = self {
+            let _ = job.reply.send(Err(error.into()));
+        }
+    }
 }
 
 impl SyncSchedule {
@@ -558,6 +571,8 @@ static PROFILE_SWITCH_STATE: Mutex<Value> = Mutex::new(Value::Null);
 
 
 include!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/rpc_serve/parts/profile_state.rs"));
+include!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/rpc_serve/parts/model_switch.rs"));
+// The unfinished typed_sync.rs draft is intentionally not wired: it reopens SQLite.
 
 include!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/rpc_serve/parts/job.rs"));
 

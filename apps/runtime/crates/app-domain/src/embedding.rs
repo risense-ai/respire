@@ -291,7 +291,10 @@ mod managed_tests {
 }
 
 pub fn select(choice: Choice) -> Result<Selection> {
-    let registry = registry()?;
+    select_from_registry(choice, &registry()?)
+}
+
+pub fn select_from_registry(choice: Choice, registry: &Registry) -> Result<Selection> {
     let mut profile = registry
         .models
         .get(&choice.model)

@@ -4,6 +4,16 @@ fn profile_state() -> Value {
         .map(|v| v.clone())
         .unwrap_or_else(|_| json!({"state":"failed","error":"switch state lock poisoned"}))
 }
+
+pub(crate) fn model_assets_stable() -> bool {
+    !PROFILE_SWITCH_RUNNING.load(Ordering::Acquire)
+        && PROFILE_SWITCH_STATE.lock().is_ok_and(|state| state["semantic"] != "unverified")
+}
+
+#[cfg(test)]
+pub(crate) fn hold_sync_fixture() -> Result<std::sync::MutexGuard<'static, ()>> {
+    PROFILE_ADMISSION.lock().map_err(|_| anyhow::anyhow!("model admission lock poisoned"))
+}
 fn set_profile_state(value: Value) {
     if let Ok(mut slot) = PROFILE_SWITCH_STATE.lock() {
         *slot = value;
@@ -102,64 +112,26 @@ fn start_profile_switch_target(
             check_sync_context(epoch)?;
             anyhow::ensure!(library == respire_app::service::data_dir(), "model switch library changed");
             let store = respire_app::service::open_store()?;
-            let previous = store.active_selection()?;
-            let source_revision = store.meta_get("memory_revision_v1")?.context("source revision unavailable")?;
-            let keys = crate::engine::build_session()?;
-            store.meta_set("embedding_pending_task_v1",&serde_json::to_string(&json!({"id":task_id,"phase":"prepare"}))?)?;
-            check_sync_context(epoch)?;
-            crate::model_progress::check()?;
-            crate::model_assets::verify_selection_assets(&target)?;
-            check_sync_context(epoch)?;
-            crate::model_progress::check()?;
-            target.generation = respire_app::core_sdk::profiles::generation_key_for_profile(&target)?;
-            store.meta_set("embedding_pending_selection_v1",&serde_json::to_string(&target)?)?;
-            respire_app::core_sdk::profiles::exclusive(|| {
-                let attempt = respire_app::core_sdk::profiles::scoped(target.clone(), || {
-                    store.meta_set("embedding_pending_task_v1",&serde_json::to_string(&json!({"id":task_id,"phase":"load"}))?)?;
-                    crate::model_progress::update("switch-load",&target.model,0,None)?;
-                    respire_app::core_sdk::profiles::load(&target)?;
-                    crate::model_progress::check()?;
-                    let embedder = respire_app::memory::bge::BgeEmbedder::load_model(&target.model)?;
-                    store.meta_set("embedding_pending_task_v1",&serde_json::to_string(&json!({"id":task_id,"phase":"main-index"}))?)?;
-                    store.build_candidate_index_with_progress(&keys,&embedder,&target,|done,total| {
-                        check_sync_context(epoch)?;
-                        crate::model_progress::update("switch-index",&target.model,done as u64,Some(total as u64))
-                    })?;
-                    store.meta_set("embedding_pending_task_v1",&serde_json::to_string(&json!({"id":task_id,"phase":"diary-index"}))?)?;
-                    respire_app::diary::rebuild_with_progress(&store,&keys,&embedder,
-                        || { check_sync_context(epoch)?; crate::model_progress::check() },
-                        |action| { check_sync_context(epoch)?; crate::model_progress::commit(action) },
-                        |done| crate::model_progress::update("switch-diary",&target.model,done as u64,None))?;
+            let vault = respire_app::auth::ModelSwitchVault::from_session(crate::engine::build_session()?);
+            run_model_switch(
+                &store, &vault, &task_id, &mut target,
+                || {
                     check_sync_context(epoch)?;
                     anyhow::ensure!(library == respire_app::service::data_dir(), "model switch library changed");
-                    anyhow::ensure!(!store.index_pending(&target.model)? && !respire_app::diary::needs_rebuild(&store)?, "candidate index/source validation failed");
-                    respire_app::resident::clear()?;
-                    *crate::engine::EMBEDDER_SLOT.lock().map_err(|_|anyhow::anyhow!("embedder cache poisoned"))? = None;
-                    crate::model_progress::commit_final(|| store.activate_selection(&target,&source_revision))?;
                     Ok(())
-                });
-                if let Err(error) = attempt {
-                    let restored = match previous {
-                        Some(ref selection) => respire_app::core_sdk::profiles::load(selection).map(|_| ()),
-                        None => {
-                            respire_app::core_sdk::profiles::set_active(None);
-                            respire_app::memory::onnx::reset_sessions().and_then(|_| respire_app::memory::bge::BgeEmbedder::load_model("m3")?.probe("Respire rollback verification").map(|_| ()))
-                        }
-                    };
-                    return match restored {
-                        Ok(()) => Err(anyhow::anyhow!("model switch failed: {error:#}; previous selection restored and trial inference passed")),
-                        Err(recovery) => Err(anyhow::anyhow!("recovery_failed: model switch failed: {error:#}; previous model reload failed: {recovery:#}; semantic availability is unverified")),
-                    };
-                }
-                respire_app::core_sdk::profiles::set_active(Some(target.clone()));
-                Ok(json!({"selection":target,"active_changed":true,"semantic":"ready"}))
-            })
+                },
+                |_, _, _| Ok(()),
+                |final_commit, action| {
+                    if final_commit {
+                        crate::model_progress::commit_final(action)
+                    } else {
+                        check_sync_context(epoch)?;
+                        crate::model_progress::commit(action)
+                    }
+                },
+            )
         })();
-        let final_state = match &result {
-            Ok(result) => json!({"id":task_id,"state":"ready","active_changed":true,"semantic":"ready","result":result}),
-            Err(error) => json!({"id":task_id,"state":"failed","active_changed":false,"error":format!("{error:#}"),"semantic":if format!("{error:#}").contains("recovery_failed") {"unverified"} else if format!("{error:#}").contains("previous selection restored and trial inference passed") {"previous_ready"} else {"unchanged"}}),
-        };
-        set_profile_state(final_state.clone());
+        let final_state = record_switch_result(&task_id, &result);
         let completion = result.map(|_| crate::output_state::Captured {
             exit: 0,
             envelope: ResultEnvelope::new(&method, OutputStatus::Ok, final_state, Vec::new()),
@@ -330,12 +302,13 @@ pub(crate) fn deliver_post_sync(pulled: usize, pushed: usize) -> Result<()> {
     result.map_err(|error| HostPluginFailure(error).into())
 }
 
-fn ensure_sync_worker() {
+// The caller holds SYNC_KICK while starting the worker and queueing work.
+fn ensure_sync_worker() -> bool {
     if FLIGHT_ON
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .is_err()
     {
-        return;
+        return true;
     }
     if std::thread::Builder::new()
         .name("respire-sync".into())
@@ -345,7 +318,19 @@ fn ensure_sync_worker() {
     {
         FLIGHT_ON.store(false, Ordering::Release);
         eprintln!("command=sync status=warn error=failed to start sync worker");
+        return false;
     }
+    true
+}
+
+pub(crate) fn enqueue_v1_sync(sync: crate::runtime_http::PendingSync) -> Result<()> {
+    let mut state = SYNC_KICK.lock().map_err(|_| anyhow::anyhow!("sync queue lock poisoned"))?;
+    anyhow::ensure!(!STOPPING.load(Ordering::Acquire) && state.manual.len() < 64,
+        "sync queue unavailable");
+    anyhow::ensure!(ensure_sync_worker(), "sync worker unavailable");
+    state.manual.push_back(ManualSync::V1(Box::new(sync)));
+    SYNC_CV.notify_one();
+    Ok(())
 }
 
 /// Notifications are hints; the durable outbox holds the work.
@@ -354,9 +339,8 @@ pub fn kick_autosync() {
     if state.due.is_none() {
         state.due = Some(Instant::now() + Duration::from_secs(3));
     }
-    drop(state);
-    SYNC_CV.notify_one();
     ensure_sync_worker();
+    SYNC_CV.notify_one();
 }
 
 fn enqueue_manual(job: Job) {
@@ -370,10 +354,9 @@ fn enqueue_manual(job: Job) {
                 let _ = job.reply.send(Err("sync request queue is full".into()));
                 return;
             }
-            state.manual.push_back((job, generation, boundary));
-            drop(state);
-            SYNC_CV.notify_one();
             ensure_sync_worker();
+            state.manual.push_back(ManualSync::Legacy(job, generation, boundary));
+            SYNC_CV.notify_one();
         }
         Err(error) => {
             let _ = job.reply.send(Err(format!("{error:#}")));
@@ -388,8 +371,8 @@ fn flight_loop() {
             let mut state = SYNC_KICK.lock().unwrap_or_else(|e| e.into_inner());
             loop {
                 if STOPPING.load(Ordering::Acquire) {
-                    for (job, _, _) in state.manual.drain(..) {
-                        let _ = job.reply.send(Err("runtime is stopping".into()));
+                    for job in state.manual.drain(..) {
+                        job.reject("runtime is stopping");
                     }
                     FLIGHT_ON.store(false, Ordering::Release);
                     return;
@@ -427,8 +410,8 @@ fn flight_loop() {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         if PROFILE_SWITCH_RUNNING.load(Ordering::Acquire) {
-            if let Some((job, _, _)) = manual {
-                let _ = job.reply.send(Err("model_switch_busy".into()));
+            if let Some(job) = manual {
+                job.reject("model_switch_busy");
             } else {
                 SYNC_KICK
                     .lock()
@@ -440,7 +423,11 @@ fn flight_loop() {
         }
         SYNC_RUNNING.store(true, Ordering::Release);
         drop(admission);
-        if let Some((job, generation, boundary)) = manual {
+        if let Some(ManualSync::V1(sync)) = manual {
+            if sync.run() {
+                SYNC_KICK.lock().unwrap_or_else(|error| error.into_inner()).record_success(true);
+            }
+        } else if let Some(ManualSync::Legacy(job, generation, boundary)) = manual {
             let _scope_held = match SCOPE_EXECUTION.read() {
                 Ok(held) => held,
                 Err(_) => {

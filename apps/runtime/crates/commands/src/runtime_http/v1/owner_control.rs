@@ -20,11 +20,18 @@ use super::{
 pub(super) mod model_work;
 
 static ACTIVE: Mutex<Option<NativeOwner>> = Mutex::new(None);
-static QUEUE: OnceLock<mpsc::SyncSender<Work>> = OnceLock::new();
+static QUEUE: OnceLock<mpsc::SyncSender<DispatchWork>> = OnceLock::new();
+static DISPATCH_LIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static AUTH_BUDGET: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(16);
 const WORK_LIMIT: usize = 16;
 const WORK_DEADLINE: Duration = Duration::from_secs(2);
 const REFRESH_INTERVAL: Duration = Duration::from_millis(250);
+
+enum DispatchWork {
+    Scoped(Work),
+    Local(super::rest_dispatch::Work),
+    ModelSwitch(Box<super::operations::model_switch::PendingSwitch>),
+}
 
 struct Work {
     call: OwnerCall,
@@ -34,7 +41,7 @@ struct Work {
 }
 
 pub(crate) struct OwnerDispatch {
-    receiver: mpsc::Receiver<Work>,
+    receiver: mpsc::Receiver<DispatchWork>,
     model_receiver: mpsc::Receiver<model_work::Work>,
     last_refresh: Option<Instant>,
 }
@@ -42,6 +49,7 @@ pub(crate) struct OwnerDispatch {
 pub(crate) fn start_dispatch() -> Option<OwnerDispatch> {
     let (sender, receiver) = mpsc::sync_channel(WORK_LIMIT);
     QUEUE.set(sender).ok()?;
+    DISPATCH_LIVE.store(true, std::sync::atomic::Ordering::Release);
     Some(OwnerDispatch {
         receiver,
         model_receiver: model_work::start()?,
@@ -59,8 +67,11 @@ impl OwnerDispatch {
             self.last_refresh = Some(now);
             refresh(store.is_some(), ownership);
         }
-        if let Ok(work) = self.receiver.try_recv() {
-            service_work(work, store, ownership);
+        match self.receiver.try_recv() {
+            Ok(DispatchWork::Scoped(work)) => service_work(work, store, ownership),
+            Ok(DispatchWork::Local(work)) => super::rest_dispatch::service(work, store, ownership),
+            Ok(DispatchWork::ModelSwitch(work)) => work.run(store, ownership),
+            Err(_) => {}
         }
         if let Ok(work) = self.model_receiver.try_recv() {
             model_work::service(work, store, ownership);
@@ -70,8 +81,13 @@ impl OwnerDispatch {
 
 impl Drop for OwnerDispatch {
     fn drop(&mut self) {
+        DISPATCH_LIVE.store(false, std::sync::atomic::Ordering::Release);
         revoke();
     }
+}
+
+pub(super) fn dispatch_live() -> bool {
+    DISPATCH_LIVE.load(std::sync::atomic::Ordering::Acquire)
 }
 
 pub(crate) fn revoke() {
@@ -194,6 +210,16 @@ pub(super) async fn bounded_blocking<T: Send + 'static>(
     }
 }
 
+pub(super) fn enqueue_rest(work: super::rest_dispatch::Work) -> V1Result<()> {
+    let sender = QUEUE.get().ok_or_else(super::transport::unavailable)?;
+    sender.try_send(DispatchWork::Local(work)).map_err(|_| busy())
+}
+
+pub(super) fn enqueue_model_switch(work: super::operations::model_switch::PendingSwitch) -> V1Result<()> {
+    let sender = QUEUE.get().ok_or_else(super::transport::unavailable)?;
+    sender.try_send(DispatchWork::ModelSwitch(Box::new(work))).map_err(|_| busy())
+}
+
 pub(super) async fn submit(
     call: OwnerCall,
     ticket: LeaseTicket,
@@ -205,12 +231,12 @@ pub(super) async fn submit(
     let sender = QUEUE.get().ok_or_else(unavailable)?;
     let (reply, receiver) = oneshot::channel();
     sender
-        .try_send(Work {
+        .try_send(DispatchWork::Scoped(Work {
             call,
             ticket,
             deadline,
             reply,
-        })
+        }))
         .map_err(|_| busy())?;
     match tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), receiver).await {
         Ok(Ok(result)) => result,
@@ -231,7 +257,7 @@ fn service_work(work: Work, store: Option<&LocalStore>, ownership: &LibraryLock)
     }
     let mut reply = Some(reply);
     let _ = crate::rpc_serve::with_verified_owner_store_scope(
-        |account, profile, instance, generation, vault_epoch| {
+        |account, profile, instance, generation, vault_epoch, _| {
             let result = (|| {
                 let store = store
                     .filter(|_| ownership.protects(profile).unwrap_or(false))

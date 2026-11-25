@@ -272,7 +272,7 @@ pub(crate) fn execute_agent_config(grant: HostControlLaunchGrant, request: &RpcR
 }
 
 /// Same exact-byte durable publication as the existing CLI config CAS transaction.
-fn replace_reviewed_file(path: &std::path::Path, bytes: Option<&[u8]>) -> Result<()> {
+pub(crate) fn replace_reviewed_file(path: &std::path::Path, bytes: Option<&[u8]>) -> Result<()> {
     use std::io::Write;
     let parent = path.parent().context("config parent missing")?;
     let Some(bytes) = bytes else {

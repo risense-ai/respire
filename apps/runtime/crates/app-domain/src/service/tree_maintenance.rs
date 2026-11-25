@@ -223,32 +223,8 @@ pub fn deepen_apply<E: crate::memory::search::Embedder>(
         let mut built = 0usize;
         let mut moved = 0usize;
         for (sub, title) in plan.sub_roots.iter().zip(titles) {
-            let node = MemoryEntry {
-                metadata: Default::default(),
-                unknown_fields: Default::default(),
-                supersedes: String::new(),
-                superseded_by: String::new(),
-                see_also: Vec::new(),
-                id: uuid::Uuid::new_v4().to_string(),
-                kind: Kind::Context,
-                tags: {
-                    let mut t = root.local_tags.split(',').map(str::trim).filter(|s| !s.is_empty()).map(ToOwned::to_owned).collect::<Vec<_>>();
-                    t.push("\u{5b50}\u{7eb2}".to_owned());
-                    t
-                },
-                title: title.clone(),
-                content: format!("sub-outline of `{}` \u{2014} absorbs {} same-topic entries (auto-outline from tree-deepen 2026-09-06).", root.local_title, sub.member_ids.len()),
-                user: user.clone(),
-                computer: root.local_computer.clone(),
-                device: device_tag(),
-                modified_by: device_tag(),
-                project: root.local_project.clone(),
-                created_at: stamp.clone(),
-                updated_at: stamp.clone(),
-                emotion: -1.0,
-                parent_id: root_id.to_owned(),
-                importance: "normal".to_owned(),
-            };
+            let id = uuid::Uuid::new_v4().to_string();
+            let node = deepen_node(root, id, title, sub.member_ids.len(), &stamp);
             let stored = MemoryEngine::seal(keys, embedder, &node, &user)?;
             store.put(&stored)?;
             built += 1;
@@ -262,6 +238,42 @@ pub fn deepen_apply<E: crate::memory::search::Embedder>(
     })?;
     notify_autosync();
     Ok((built, moved))
+}
+
+pub(crate) fn deepen_node(
+    root: &crate::StoredMemory,
+    id: String,
+    title: &str,
+    count: usize,
+    stamp: &str,
+) -> MemoryEntry {
+    MemoryEntry {
+        metadata: Default::default(),
+        unknown_fields: Default::default(),
+        supersedes: String::new(),
+        superseded_by: String::new(),
+        see_also: Vec::new(),
+        id,
+        kind: Kind::Context,
+        tags: {
+            let mut tags = root.local_tags.split(',').map(str::trim).filter(|tag| !tag.is_empty())
+                .map(ToOwned::to_owned).collect::<Vec<_>>();
+            tags.push("\u{5b50}\u{7eb2}".to_owned());
+            tags
+        },
+        title: title.to_owned(),
+        content: format!("sub-outline of `{}` \u{2014} absorbs {} same-topic entries (auto-outline from tree-deepen 2026-09-06).", root.local_title, count),
+        user: root.user.clone(),
+        computer: root.local_computer.clone(),
+        device: device_tag(),
+        modified_by: device_tag(),
+        project: root.local_project.clone(),
+        created_at: stamp.to_owned(),
+        updated_at: stamp.to_owned(),
+        emotion: -1.0,
+        parent_id: root.id.clone(),
+        importance: "normal".to_owned(),
+    }
 }
 
 // ── split engine (CLI emits material, AI decides, CLI executes) ──

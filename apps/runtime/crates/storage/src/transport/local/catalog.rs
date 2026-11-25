@@ -7,6 +7,11 @@ use rusqlite::{Row, Statement};
 use super::LocalStore;
 use crate::memory::model::StoredMemory;
 
+pub(super) const MEMORY_SELECT: &str = "SELECT id, user, ciphertext, nonce, embedding_enc, updated_at, deleted,
+    kind, tags, title, project, computer, embedding, created_at, parent_id, content_head, recall_count, importance, device, modified_by,
+    memory_contract, summary, source_refs, valid_until, review_at, COALESCE(artifact,'null'), COALESCE(verification,'null')
+    FROM memories";
+
 struct CheckedText;
 
 impl FromSql for CheckedText {
@@ -180,18 +185,9 @@ impl LocalStore {
         &self,
         include_deleted: bool,
     ) -> rusqlite::Result<Statement<'_>> {
-        let sql = if include_deleted {
-            "SELECT id, user, ciphertext, nonce, embedding_enc, updated_at, deleted,
-                 kind, tags, title, project, computer, embedding, created_at, parent_id, content_head, recall_count, importance, device, modified_by,
-                 memory_contract, summary, source_refs, valid_until, review_at, COALESCE(artifact,'null'), COALESCE(verification,'null')
-             FROM memories"
-        } else {
-            "SELECT id, user, ciphertext, nonce, embedding_enc, updated_at, deleted,
-                 kind, tags, title, project, computer, embedding, created_at, parent_id, content_head, recall_count, importance, device, modified_by,
-                 memory_contract, summary, source_refs, valid_until, review_at, COALESCE(artifact,'null'), COALESCE(verification,'null')
-             FROM memories WHERE deleted = 0"
-        };
-        self.connection.prepare(sql)
+        let filter = if include_deleted { "" } else { " WHERE deleted = 0" };
+        self.connection
+            .prepare(&format!("{MEMORY_SELECT}{filter}"))
     }
 }
 

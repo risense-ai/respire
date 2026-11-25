@@ -87,6 +87,19 @@ fn members(bytes: Option<&[u8]>) -> Result<Vec<Member>> {
     Ok(rows)
 }
 
+/// Project locally committed session grants; remote revocation is observed by existing control.
+/// The caller must hold the selected profile ownership lock.
+pub fn list_space_members(profile: &Path) -> Result<Value> {
+    let bytes = read_optional(&profile.join(MEMBERS))?;
+    let rows = members(bytes.as_deref())?.into_iter().map(|row| json!({
+        "member_id": row.session_id,
+        "display_name": row.device_name,
+        "role": if row.readonly { "viewer" } else { "editor" },
+        "status": "active",
+    })).collect::<Vec<_>>();
+    Ok(json!({"members": rows}))
+}
+
 fn field<'a>(value: &'a Value, key: &str) -> Result<&'a str> {
     value[key].as_str().filter(|value| !value.trim().is_empty()).context("space credential field missing")
 }

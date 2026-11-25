@@ -49,6 +49,7 @@ fn fixture() -> (LaunchContext, LaunchGrant) {
 }
 
 mod detached;
+mod offline_setting;
 
 #[test]
 fn detached_grant_accepts_only_its_exact_context() -> Result<()> {

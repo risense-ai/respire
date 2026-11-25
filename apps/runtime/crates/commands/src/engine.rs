@@ -413,6 +413,15 @@ pub fn run_resort(
 
 /// Daily identity is stable even when its display title or importance changes.
 /// Legacy same-user/title tracks still participate in the existing atomic merge.
+pub fn diary_track_identity(user: &str, day: &str) -> (String, String) {
+    let id = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, format!("activity-track/{user}/{day}").as_bytes());
+    (id.to_string(), format!("\u{6d3b}\u{52a8}\u{8f68}\u{8ff9} {day}"))
+}
+
+pub fn diary_track_marker(day: &str) -> String {
+    format!("\u{3010}\u{6d3b}\u{52a8}\u{8f68}\u{8ff9}\u{3011}{day}")
+}
+
 pub fn select_diary_tracks<'a>(
     memories: &'a [respire_app::StoredMemory],
     track_id: &str,

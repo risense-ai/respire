@@ -22,6 +22,11 @@ pub fn startup_complete() -> bool {
     STARTUP_COMPLETE.load(Ordering::Acquire)
 }
 
+#[cfg(test)]
+pub(crate) fn mark_http_fixture_ready() {
+    STARTUP_COMPLETE.store(true, Ordering::Release);
+}
+
 /// Borrow the authoritative local owner and scope while the serving identity
 /// and unlocked vault are fenced. Callers must not re-enter session I/O.
 pub(crate) fn with_verified_owner_scope<T>(
@@ -42,16 +47,30 @@ pub(crate) fn try_verified_owner_scope<T>(
 }
 
 pub(crate) fn with_verified_owner_store_scope<T>(
-    action: impl FnOnce(&str, &std::path::Path, uuid::Uuid, u64, uuid::Uuid) -> T,
+    action: impl FnOnce(&str, &std::path::Path, uuid::Uuid, u64, uuid::Uuid, respire_app::auth::RuntimeLibrary<'_>) -> T,
 ) -> Option<T> {
+    with_owner_store_fence(|| with_locked_library(action)).flatten()
+}
+
+// Long local model work retains the identity and store fences while releasing
+// the vault mutex between checkpoints so operation status and cancel stay live.
+pub(crate) fn with_owner_store_fence<T>(action: impl FnOnce() -> T) -> Option<T> {
     let _identity = SCOPE_EXECUTION.try_read().ok()?;
     let writer = crate::rpc_worker::shared_exclusive();
     let _foreground = writer.try_owner_foreground()?;
-    with_locked_owner_scope(action)
+    Some(action())
 }
 
 fn with_locked_owner_scope<T>(
     action: impl FnOnce(&str, &std::path::Path, uuid::Uuid, u64, uuid::Uuid) -> T,
+) -> Option<T> {
+    with_locked_library(|owner, profile, instance, generation, epoch, _| {
+        action(owner, profile, instance, generation, epoch)
+    })
+}
+
+pub(crate) fn with_locked_library<T>(
+    action: impl FnOnce(&str, &std::path::Path, uuid::Uuid, u64, uuid::Uuid, respire_app::auth::RuntimeLibrary<'_>) -> T,
 ) -> Option<T> {
     if !startup_complete() || !store_ready() || business_paused()
         || respire_app::service::off_mode()
@@ -65,8 +84,8 @@ fn with_locked_owner_scope<T>(
     respire_app::snapshot::ensure_no_incomplete_restore(&profile).ok()?;
     let instance = uuid::Uuid::parse_str(&process_identity().instance_id).ok()?;
     let generation = crate::rpc_worker::wire_generation();
-    respire_app::auth::with_runtime_session_owner(&profile, |owner, vault_epoch| {
-        action(owner, &profile, instance, generation, vault_epoch)
+    respire_app::auth::with_runtime_library(&profile, |owner, vault_epoch, library| {
+        action(owner, &profile, instance, generation, vault_epoch, library)
     }).ok().flatten()
 }
 
@@ -78,6 +97,17 @@ pub(crate) fn v1_health_identity() -> Option<(&'static str, String)> {
         _ => "degraded",
     };
     Some((status, process_identity().instance_id))
+}
+
+pub(crate) fn v1_host_account_status() -> Result<Value> {
+    let _identity = SCOPE_EXECUTION.try_read()
+        .map_err(|_| anyhow::anyhow!("runtime identity is changing"))?;
+    anyhow::ensure!(startup_complete() && v1_health_identity().is_some(), "runtime identity unavailable");
+    validate_business_config().map_err(anyhow::Error::msg)?;
+    crate::host_hooks::check_direct_access()?;
+    respire_app::service::ensure_runtime_profile()?;
+    let profile = respire_app::service::data_dir().canonicalize()?;
+    respire_app::login_transaction::host_account_status(&profile)
 }
 
 pub fn health_body() -> Value {

@@ -147,6 +147,23 @@ impl MemoryEngine {
         entry: &MemoryEntry,
         user: &str,
     ) -> Result<StoredMemory> {
+        if respire_core_sdk::indexing_deferred() {
+            return Self::seal_for_indexing(keys, entry, user);
+        }
+        Self::seal_with(keys, entry, user, || Ok(embedder.prepare(entry)?.artifact))
+    }
+
+    /// Commit the encrypted source before the resident index worker prepares its artifact.
+    pub fn seal_for_indexing(keys: &SessionKeys, entry: &MemoryEntry, user: &str) -> Result<StoredMemory> {
+        Self::seal_with(keys, entry, user, || Ok(Vec::new()))
+    }
+
+    fn seal_with(
+        keys: &SessionKeys,
+        entry: &MemoryEntry,
+        user: &str,
+        artifact: impl FnOnce() -> Result<Vec<u8>>,
+    ) -> Result<StoredMemory> {
         validate_metadata(entry.kind.as_str(), &entry.metadata, &entry.unknown_fields)?;
         // v2 payload: metadata and content encrypted as a whole (including parent_id — the causal parent travels with ciphertext so the tree restores across devices)
         let payload = PayloadV2 {
@@ -173,10 +190,6 @@ impl MemoryEngine {
         let payload_json = serde_json::to_string(&payload).context("payload serialize failed")?;
         let (nonce, ciphertext) = keys.encrypt_content(&payload_json)?;
 
-        let prepared = if respire_core_sdk::indexing_deferred() {
-            respire_core_sdk::Prepared { artifact:Vec::new() }
-        } else { embedder.prepare(entry)? };
-
         Ok(StoredMemory {
             id: entry.id.clone(),
             user: user.to_owned(),
@@ -199,7 +212,7 @@ impl MemoryEngine {
             local_device: entry.device.clone(),
             local_modified_by: entry.modified_by.clone(),
             local_chunks: Vec::new(),
-            local_artifact: prepared.artifact,
+            local_artifact: artifact()?,
             local_meta: entry.metadata.clone(),
         })
     }

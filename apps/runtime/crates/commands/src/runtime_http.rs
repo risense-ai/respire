@@ -6,6 +6,7 @@
 mod legacy_rpc;
 mod v1;
 pub(crate) use v1::owner_control::start_dispatch as start_owner_dispatch;
+pub(crate) use v1::operations::PendingSync;
 #[cfg(test)]
 mod tests;
 
