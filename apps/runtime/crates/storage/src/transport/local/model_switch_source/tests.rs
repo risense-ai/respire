@@ -51,11 +51,11 @@ fn committed_input_copy_does_not_attach_prior_artifacts_or_change_profile() -> R
     store.queue_selection(&target, &uuid::Uuid::new_v4().to_string())?;
     store.meta_set(ACTIVE_SELECTION_KEY, &serde_json::to_string(&prior)?)?;
     let snapshot = profiles::scoped(prior, || {
-        let before = profiles::current()?.expect("foreground profile");
+        let before = profiles::current()?.context("foreground profile")?;
         let snapshot = store.capture_model_switch_source(|| Ok(()))?;
         assert_eq!(
             profiles::current()?
-                .expect("unchanged foreground profile")
+                .context("unchanged foreground profile")?
                 .model,
             before.model
         );
@@ -156,7 +156,7 @@ fn publish_cas_rejects_changed_content_prior_selection_and_foreign_library() -> 
     )?;
     assert_eq!(
         live.active_selection()?
-            .expect("published active selection")
+            .context("published active selection")?
             .model,
         target.model
     );
