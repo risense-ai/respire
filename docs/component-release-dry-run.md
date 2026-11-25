@@ -59,6 +59,13 @@ not a release workflow, native test attestation, or authorization to publish.
   with the actual pack generation/export mode, never publication or
   `--download`. Preserve its producer and checksum sidecars as evidence;
   stage only the nine verified tarballs in the adapter's npm directory.
+  The current manifest emits the direct `rsrs-cli` launcher and eight platform
+  packages, with exact matching CLI versions. Use the reviewed version in the
+  CLI Cargo manifest, lockfile, and npm artifact manifest for this lane.
+  Windows packages are
+  `@rsrsai/win-x64` and `@rsrsai/win-arm64`; `win32` is the Node platform key,
+  not the package prefix. The historical `@rsrsai/cli` launcher and dependent
+  `rsrs-cli` alias remain recovery-only, not additional packs in this lane.
 - **Client2:** generate the pinned Go SDK before building. Use
   `apps/client2/scripts/build.ps1 -Version <version> -Arch <arch>` and
   `build-installer.ps1` on both native Windows targets; run `build.sh` on

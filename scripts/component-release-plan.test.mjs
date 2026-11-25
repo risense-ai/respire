@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import {createHash} from "node:crypto";
-import {cp, mkdir, mkdtemp, realpath, rm, writeFile} from "node:fs/promises";
+import {cp, mkdir, mkdtemp, readFile, realpath, rm, writeFile} from "node:fs/promises";
 import {tmpdir} from "node:os";
-import {join} from "node:path";
+import path, {join} from "node:path";
 import {test} from "node:test";
+import {runInNewContext} from "node:vm";
 import {expectedReleaseAssets, parseComponentTag, verifyLocalRelease} from "./component-release-plan.mjs";
 
 const source = "a".repeat(40);
@@ -21,6 +22,68 @@ test("separates exact runtime, CLI, and Client2 tags", () => {
     "refs/tags/cli-v2.3.4", "runtime-v1.3.0/foo", "", null]) {
     assert.throws(() => parseComponentTag(input), /exact component tag/);
   }
+});
+
+test("CLI pack inventory agrees with the current producer and actual launcher selection", async () => {
+  const cli = new URL("../apps/cli/", import.meta.url);
+  const manifest = JSON.parse(await readFile(new URL("npm/artifact-manifest.json", cli), "utf8"));
+  const cargo = await readFile(new URL("cli/Cargo.toml", cli), "utf8");
+  const lock = await readFile(new URL("Cargo.lock", cli), "utf8");
+  const launcher = await readFile(new URL("npm/bin/cli.js", cli), "utf8");
+  assert.equal(manifest.cliVersion, /^version\s*=\s*"([^"]+)"/m.exec(cargo)?.[1]);
+  assert.equal(manifest.cliVersion, /\[\[package\]\]\r?\nname = "respire"\r?\nversion = "([^"]+)"/.exec(lock)?.[1]);
+  assert.equal(manifest.npmScope, "rsrs-cli", "Current producer uses the direct launcher, not the historical alias");
+  assert.equal(manifest.targets.length, 8);
+  const platformNames = new Set(manifest.targets.map(target => target.pkg));
+  assert.equal(platformNames.size, 8);
+  const version = manifest.cliVersion;
+  const expected = expectedReleaseAssets("cli-v" + version);
+  const filenames = [...platformNames, manifest.npmScope].map(name =>
+    [name, name.replace(/^@/, "").replace("/", "-") + "-" + version + ".tgz"]);
+  assert.deepEqual(expected.npm, Object.fromEntries(filenames));
+  assert.deepEqual(expected.github, manifest.targets.flatMap(({triple}) => [
+    "rsrs-" + triple + (triple.endsWith("-windows-msvc") ? ".exe" : ""), "cli-build-" + triple + ".json",
+  ]).sort());
+  assert.equal(expected.npm["@rsrsai/cli"], undefined);
+
+  for (const {os: [platform], cpu: [arch], libc, pkg} of manifest.targets) {
+    const selected = [], errors = [];
+    const stopped = new Error("stop before starting any binary");
+    function require(name) {
+      if (name === "../package.json") return {version};
+      if (name === "child_process") return {spawnSync: () => assert.fail("Cannot run a binary in an inventory test")};
+      if (name === "path") return path;
+      if (name === "fs") return {existsSync: () => false, readFileSync: () => assert.fail("Unexpected package access")};
+      assert.fail("Unexpected launcher dependency " + name);
+    }
+    require.resolve = name => { selected.push(name); throw Error("Fixture platform binary absent"); };
+    assert.throws(() => runInNewContext(launcher, {
+      require, __dirname: "/fixture/npm/bin",
+      process: {platform, arch, env: libc ? {RSRS_LIBC: libc[0]} : {}, exit: code => {
+        assert.equal(code, 1);
+        throw stopped;
+      }},
+      console: {error: message => errors.push(message)},
+    }), error => error === stopped);
+    assert.deepEqual(selected, [pkg + "/bin/rsrs" + (platform === "win32" ? ".exe" : "")]);
+    assert.equal(errors.length, 1);
+    assert(errors[0].includes(pkg + "@" + version));
+  }
+});
+
+test("CLI local release rejects misspelled Windows packs and historical aliases", async t => {
+  const {input, expected} = await makeFixture(t, "cli-v2.5.0");
+  const old = "rsrsai-win32-x64-2.5.0.tgz";
+  await rm(join(input.npmDir, expected.npm["@rsrsai/win-x64"]));
+  await writeFile(join(input.npmDir, old), "wrong package");
+  await assert.rejects(verifyLocalRelease(input), /asset set/);
+  await rm(join(input.npmDir, old));
+  await writeFile(join(input.npmDir, expected.npm["@rsrsai/win-x64"]), "replacement fixture");
+  const historical = join(input.npmDir, "rsrsai-cli-2.5.0.tgz");
+  await writeFile(historical, "historical package");
+  await assert.rejects(verifyLocalRelease(input), /asset set/);
+  await rm(historical);
+  assert.equal(Object.keys((await verifyLocalRelease(input)).npm).length, 9);
 });
 
 async function makeFixture(t, tag) {

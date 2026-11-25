@@ -11,7 +11,7 @@ const triples = [
 ];
 const npmPackages = ["rsrs-cli", ...[
   "linux-x64-gnu", "linux-x64", "linux-arm64-gnu", "linux-arm64", "macos-x64", "macos-arm64",
-  "win32-x64", "win32-arm64",
+  "win-x64", "win-arm64",
 ].map(name => "@rsrsai/" + name)];
 const desktopUpdates = Object.entries({windows: "exe", linux: "tar.gz", darwin: "zip"})
   .flatMap(([platform, extension]) => ["amd64", "arm64"].map(arch => "respire-" + platform + "-" + arch + "." + extension));
