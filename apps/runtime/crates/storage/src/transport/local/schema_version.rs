@@ -1,19 +1,16 @@
 use anyhow::{ensure, Result};
 use rusqlite::Connection;
 
-// Published 1.x libraries and current Runtime use SQLite's original zero
-// application version. A nonzero marker is not a supported migration entry.
-const SUPPORTED_SQLITE_USER_VERSION: i64 = 0;
+pub(super) const CURRENT: i64 = 1;
 
-pub(super) fn require_supported(connection: &Connection) -> Result<()> {
+pub(super) fn require_supported(connection: &Connection) -> Result<i64> {
     let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
     ensure!(
-        version == SUPPORTED_SQLITE_USER_VERSION,
-        "Unsupported local memory database version {version}; this Runtime supports version {SUPPORTED_SQLITE_USER_VERSION}. Use a compatible Runtime or restore a verified backup."
+        (0..=CURRENT).contains(&version),
+        "Unsupported local memory database version {version}; this Runtime supports version {CURRENT}. Use a compatible Runtime or restore a verified backup."
     );
-    Ok(())
+    Ok(version)
 }
-
 #[cfg(test)]
 mod tests {
     use super::super::LocalStore;

@@ -154,6 +154,20 @@ impl CurrentUser {
         self.verify_handle_as(handle, None, self.managed_admin_default)
     }
 
+    /// Restoration creates its own protected child; it does not broaden or
+    /// require rewriting the existing profile's discretionary ACL.
+    pub(super) fn verify_legacy_profile_owner(&self, handle: HANDLE) -> io::Result<()> {
+        use windows_sys::Win32::Security::GetSecurityDescriptorOwner;
+        let descriptor = descriptor_from_handle(handle)?;
+        let mut owner = null_mut();
+        let mut ignored = 0;
+        win(unsafe { GetSecurityDescriptorOwner(descriptor.0 .0, &mut owner, &mut ignored) })?;
+        let admins = KnownSid::new(WinBuiltinAdministratorsSid)?;
+        check(
+            owner_matches(same(self.sid, owner), false, self.managed_admin_default, same(admins.ptr(), owner)),
+            "Windows restore profile does not belong to the operating system user",
+        )
+    }
     pub(super) fn verify_new_managed_directory(&self, handle: HANDLE) -> io::Result<()> {
         // CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE; no inherited ACE.
         self.verify_handle_as(handle, Some(3), false)

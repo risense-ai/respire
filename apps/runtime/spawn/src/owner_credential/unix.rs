@@ -366,3 +366,6 @@ pub use model_removal::ModelRemovalRoot;
 
 #[path = "unix_local_spaces.rs"]
 pub(super) mod local_spaces;
+
+#[path = "unix_migration_copy.rs"]
+pub(super) mod migration_copy;

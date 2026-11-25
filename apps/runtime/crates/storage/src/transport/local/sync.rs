@@ -52,8 +52,13 @@ impl LocalStore {
     /// Move the current remote state out of the transport history before reclaiming it.
     pub(super) fn initialize_sync_storage(&self) -> Result<()> {
         let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
-        let columns = self
-            .connection
+        Self::initialize_sync_schema(&tx)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub(super) fn initialize_sync_schema(connection: &rusqlite::Connection) -> Result<()> {
+        let columns = connection
             .prepare("PRAGMA table_info(sync_remote_heads)")?
             .query_map([], |r| r.get::<_, String>(1))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -63,13 +68,17 @@ impl LocalStore {
             ("decode_error", "TEXT NOT NULL DEFAULT ''"),
         ] {
             if !columns.iter().any(|column| column == name) {
-                self.connection.execute_batch(&format!(
+                connection.execute_batch(&format!(
                     "ALTER TABLE sync_remote_heads ADD COLUMN {name} {declaration}"
                 ))?;
             }
         }
-        self.connection.execute_batch(include_str!("sync_revision_schema.sql"))?;
-        self.connection.execute(
+        connection.execute_batch(include_str!("sync_revision_schema.sql"))?;
+        Self::backfill_sync_heads(connection)
+    }
+
+    pub(super) fn backfill_sync_heads(connection: &rusqlite::Connection) -> Result<()> {
+        connection.execute(
             "UPDATE sync_remote_heads AS h SET (wire,op_id,decode_error)=(
                 SELECT i.wire,i.op_id,i.decode_error FROM sync_inbox i
                 WHERE i.epoch=(SELECT value FROM meta WHERE key='sync_v2_epoch')
@@ -81,7 +90,6 @@ impl LocalStore {
             )",
             [],
         )?;
-        tx.commit()?;
         Ok(())
     }
 

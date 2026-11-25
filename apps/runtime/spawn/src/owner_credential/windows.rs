@@ -461,3 +461,9 @@ fn rename_relative(input: HANDLE, directory: HANDLE, leaf: &OsStr, flags: u32) -
 #[cfg(test)]
 #[path = "windows_tests.rs"]
 mod tests;
+
+#[path = "windows_migration_copy.rs"]
+pub(super) mod migration_copy;
+
+#[path = "windows_restore_stage.rs"]
+pub(super) mod restore_stage;

@@ -178,7 +178,11 @@
     #[test]
     fn index_update_is_local_and_reset_keeps_pending_history() -> Result<()> {
         let dir = tempfile::tempdir()?;
-        let path = dir.path().join("a.db");
+        #[cfg(windows)]
+        let profile = respire_spawn::owner_credential::LocalSpaceNamespace::make_fixture_installation(dir.path())?;
+        #[cfg(not(windows))]
+        let profile = dir.path().canonicalize()?;
+        let path = profile.join("a.db");
         let s = LocalStore::open(&path)?;
         let mut b = tomb("a", "2026-09-19T00:00:00.001Z");
         b.deleted = false;

@@ -72,7 +72,36 @@ pub fn sync_directory(path: &Path) -> io::Result<()> {
 }
 
 #[cfg(windows)]
+pub(crate) fn replace_private_restore_file(source: &Path, destination: &Path) -> io::Result<()> {
+    let source_parent = fs::canonicalize(source.parent().ok_or_else(|| io::Error::other("missing restore stage parent"))?)?;
+    let destination_parent = fs::canonicalize(destination.parent().ok_or_else(|| io::Error::other("missing restore target parent"))?)?;
+    if source_parent.parent() != Some(destination_parent.as_path()) {
+        return Err(io::Error::other("restore stage is not a direct child of the pinned profile"));
+    }
+    let source = source_parent.join(source.file_name().ok_or_else(|| io::Error::other("missing staged filename"))?);
+    let destination = destination_parent.join(destination.file_name().ok_or_else(|| io::Error::other("missing live filename"))?);
+    // Flags below never allow a cross-volume copy/deletion fallback.
+    move_windows_paths(&source, &destination, true)
+}
+
+#[cfg(windows)]
 fn move_windows(source: &Path, destination: &Path, parent: &Path, replace: bool) -> io::Result<()> {
+    // The checked canonical parent carries Windows' long-path prefix; the target may not exist.
+    let source = parent.join(
+        source
+            .file_name()
+            .ok_or_else(|| io::Error::other("source has no file name"))?,
+    );
+    let destination = parent.join(
+        destination
+            .file_name()
+            .ok_or_else(|| io::Error::other("destination has no file name"))?,
+    );
+    move_windows_paths(&source, &destination, replace)
+}
+
+#[cfg(windows)]
+fn move_windows_paths(source: &Path, destination: &Path, replace: bool) -> io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::{
         MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
@@ -88,19 +117,8 @@ fn move_windows(source: &Path, destination: &Path, parent: &Path, replace: bool)
         value.push(0);
         Ok(value)
     };
-    // The checked canonical parent carries Windows' long-path prefix; the target may not exist.
-    let source = parent.join(
-        source
-            .file_name()
-            .ok_or_else(|| io::Error::other("source has no file name"))?,
-    );
-    let destination = parent.join(
-        destination
-            .file_name()
-            .ok_or_else(|| io::Error::other("destination has no file name"))?,
-    );
-    let source = wide(&source)?;
-    let destination = wide(&destination)?;
+    let source = wide(source)?;
+    let destination = wide(destination)?;
     let flags = MOVEFILE_WRITE_THROUGH
         | if replace {
             MOVEFILE_REPLACE_EXISTING

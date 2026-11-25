@@ -390,7 +390,7 @@ jobs:
           grep -Fx -- 'Owner handshake: native scoped proof, six routes, denials, legacy RPC/MCP, and scoped stop passed.' "$log"
           if grep -F -- 'no Runtime launched' "$log"; then exit 1; fi
 
-      - name: Verify the native macOS device-local catalog
+      - name: Verify the native macOS device-local catalog and SQLite migration fence
         if: runner.os == 'macOS'
         shell: bash
         env:
@@ -408,6 +408,15 @@ jobs:
             grep -Fx -- "test $case_name ... ok" "$log"
             grep -F -- 'test result: ok. 1 passed; 0 failed; 0 ignored;' "$log"
           done
+
+          case_name=transport::local::migration_backup::tests::migration_backup_keeps_writer_fence_against_a_separate_process
+          log="$RUNNER_TEMP/migration-writer-fence-native.log"
+          unset RESPIRE_GOLDEN_LOCK_CHILD_DB
+          cargo +1.95.0 test --locked --manifest-path apps/runtime/Cargo.toml \
+            --target "$EXPECTED_HOST" --target-dir "$RUNNER_TEMP/owner-handshake-target" \
+            -p respire_storage --lib "$case_name" -- --exact --test-threads=1 --format pretty 2>&1 | tee "$log"
+          grep -Fx -- "test $case_name ... ok" "$log"
+          grep -F -- 'test result: ok. 1 passed; 0 failed; 0 ignored;' "$log"
 
   runtime-ci:
     name: runtime-ci
