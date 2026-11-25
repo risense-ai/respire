@@ -191,6 +191,11 @@ pub fn run_query_log(
             ],
         );
         result.details = serde_json::to_value(&s)?;
+        // Existing callers still get valid cumulative counts if the optional
+        // local-day breakdown is unavailable on a historical store.
+        if let Ok(daily) = store.query_log_daily_stats() {
+            result.details["daily"] = serde_json::to_value(daily)?;
+        }
         result.items.extend(s.top.iter().map(|(id, c)| {
             OutputItem::new(
                 "top adopted",

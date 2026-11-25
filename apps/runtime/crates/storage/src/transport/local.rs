@@ -455,6 +455,7 @@ impl LocalStore {
 }
 
 mod diagnostics;
+mod query_log_daily;
 mod entries;
 mod schema;
 
