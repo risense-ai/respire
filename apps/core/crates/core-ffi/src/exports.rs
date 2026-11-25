@@ -10,6 +10,9 @@ mod deepen_abi_tests {
     include!("deepen_abi_tests.rs");
 }
 
+#[cfg(test)]
+mod schema_parity_tests;
+
 type HostRequest = unsafe extern "C" fn(*mut std::ffi::c_void, *const u8, usize, *mut Buffer) -> i32;
 type HostRelease = unsafe extern "C" fn(*mut std::ffi::c_void, *mut Buffer);
 
