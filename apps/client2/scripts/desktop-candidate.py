@@ -9,6 +9,7 @@ from pathlib import Path
 import re
 import stat
 import subprocess
+import sys
 import tempfile
 import zipfile
 
@@ -26,6 +27,9 @@ FILES = ASSETS | {"SHA256SUMS", "LICENSE.txt", "THIRD_PARTY_NOTICES.txt",
                   "client-updates.json", "release-notes.md"}
 IMMUTABLE_FILES = FILES - {"client-updates.json"}
 SCOPE = "package_checks"
+# The mirrored update index is byte-identical in both repositories. Its URLs
+# describe the legacy release location, not the job that built the candidate.
+LEGACY_UPDATE_REPOSITORY = "risense-ai/respire-client2"
 SHA = re.compile(r"[0-9a-f]{40}")
 VERSION = re.compile(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?")
 
@@ -55,6 +59,10 @@ def write(path, value):
 def record_digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"),
                                      ensure_ascii=False).encode("utf-8")).hexdigest()
+
+
+def update_url(version, filename):
+    return f"https://github.com/{LEGACY_UPDATE_REPOSITORY}/releases/download/v{version}/{filename}"
 
 
 def discovery_index(root, version):
@@ -102,7 +110,7 @@ def verify_discovery(root, manifest, update, published):
             "DEV discovery must retain exactly six desktop targets")
     for asset in dev["artifacts"]:
         require(set(asset) == {"filename", "url", "size", "sha256"}
-                and asset["url"] == f"https://github.com/{manifest['producer']['repository']}/releases/download/v{dev['version']}/{asset['filename']}"
+                and asset["url"] == update_url(dev["version"], asset["filename"])
                 and type(asset["size"]) is int and asset["size"] > 0
                 and len(base64.b64decode(asset["sha256"], validate=True)) == 32,
                 "DEV discovery asset identity differs")
@@ -191,7 +199,7 @@ def verify(root, sealed=False, published_discovery=False):
     verify_discovery(root, manifest, update, published_discovery)
     release = update["dev" if "-" in manifest["version"] else "stable"]
     expected_updates = [{"filename": names[0],
-        "url": f"https://github.com/{expected_producer['repository']}/releases/download/v{manifest['version']}/{names[0]}",
+        "url": update_url(manifest["version"], names[0]),
         "size": manifest["files"][names[0]]["size"],
         "sha256": base64.b64encode(bytes.fromhex(manifest["files"][names[0]]["sha256"])).decode()}
         for names in TARGETS.values()]
@@ -230,16 +238,18 @@ def create_manifest(root):
 
 def self_check():
     # Metadata fixtures only: this does not issue native package-check evidence.
-    env = {"GITHUB_REPOSITORY": "risense-ai/respire-client2", "GITHUB_RUN_ID": "1",
+    env = {"GITHUB_REPOSITORY": "risense-ai/respire", "GITHUB_RUN_ID": "1",
            "GITHUB_RUN_ATTEMPT": "1", "INPUT_RUN_ID": "", "INPUT_ATTEMPT": "",
            "CANDIDATE_VERSION": "1.0.0", "CANDIDATE_SOURCE":
            subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()}
     previous = {key: os.environ.get(key) for key in env}
     os.environ.update(env)
-    def rejected(callback):
+    def rejected(callback, message=None):
         try:
             callback()
-        except ValueError:
+        except ValueError as error:
+            if message is not None:
+                require(str(error) == message, f"Unexpected rejection: {error}")
             return
         raise AssertionError("Metadata mutation was accepted")
     try:
@@ -251,12 +261,17 @@ def self_check():
                 f"{digest(root / name)}  {name}\n" for name in sorted(ASSETS)), encoding="utf-8")
             stable = {"version": "1.0.0", "notes": (root / "release-notes.md").read_text(),
                 "publishedAt": "2026-01-01T00:00:00Z", "artifacts": [{"filename": names[0],
-                "url": f"https://github.com/{env['GITHUB_REPOSITORY']}/releases/download/v1.0.0/{names[0]}",
+                "url": f"https://github.com/risense-ai/respire-client2/releases/download/v1.0.0/{names[0]}",
                 "sha256": base64.b64encode(bytes.fromhex(digest(root / names[0]))).decode(),
                 "size": (root / names[0]).stat().st_size} for names in TARGETS.values()]}
             write(root / "client-updates.json", {"schemaVersion": 1, "stable": stable, "dev": stable})
             create_manifest(root)
             manifest = read(root / "candidate.json")
+            require(manifest["producer"]["repository"] == "risense-ai/respire",
+                    "Legacy locator changed the actual candidate producer")
+            os.environ["GITHUB_REPOSITORY"] = "risense-ai/respire-client2"
+            rejected(lambda: verify(root), "Candidate source/version/producer/six-target binding differs")
+            os.environ["GITHUB_REPOSITORY"] = env["GITHUB_REPOSITORY"]
             write(root / "package-checks.json", [{"scope": SCOPE, "target": target, "status": "passed",
                 "candidate_sha256": digest(root / "candidate.json"), "producer": manifest["producer"]}
                 for target in TARGETS])
@@ -270,6 +285,11 @@ def self_check():
             write(root / "client-updates.json", update)
             rejected(lambda: verify(root, True))  # Promotion still requires initial bytes.
             verify(root, True, True)  # Existing clients' stable URL can discover DEV.
+            legacy_url = update["dev"]["artifacts"][0]["url"]
+            update["dev"]["artifacts"][0]["url"] = legacy_url.replace("/respire-client2/", "/respire/")
+            write(root / "client-updates.json", update)
+            rejected(lambda: verify(root, True, True), "DEV discovery asset identity differs")
+            update["dev"]["artifacts"][0]["url"] = legacy_url
             update["stable"]["notes"] += "changed"
             write(root / "client-updates.json", update)
             rejected(lambda: verify(root, True, True))
@@ -296,17 +316,27 @@ def self_check():
             dev_root.mkdir()
             for name in IMMUTABLE_FILES:
                 (dev_root / name).write_bytes((root / name).read_bytes())
-            write(dev_root / "client-updates.json", {"schemaVersion": 1, "dev": update["dev"]})
             os.environ["CANDIDATE_VERSION"] = "2.0.0-dev.1"
+            subprocess.run([sys.executable, str(Path(__file__).with_name("update-manifest.py")),
+                            "v2.0.0-dev.1", str(dev_root), str(dev_root / "release-notes.md"),
+                            str(dev_root / "client-updates.json"), "6"], check=True)
             create_manifest(dev_root)
             rejected(lambda: verify(dev_root, published_discovery=True))
+            wrong_update = read(dev_root / "client-updates.json")
+            asset = wrong_update["dev"]["artifacts"][0]
+            asset["url"] = asset["url"].replace("/respire-client2/", "/respire/")
+            write(dev_root / "client-updates.json", wrong_update)
+            wrong_candidate = read(dev_root / "candidate.json")
+            wrong_candidate["discovery_index"] = discovery_index(dev_root, wrong_candidate["version"])
+            write(dev_root / "candidate.json", wrong_candidate)
+            rejected(lambda: verify(dev_root), "Six-target update manifest differs")
     finally:
         for key, value in previous.items():
             if value is None:
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = value
-    print("PASS stable-to-DEV discovery; strict initial bytes, stable record, six targets, products and receipts")
+    print("PASS stable-to-DEV discovery; strict initial bytes, six targets, products, producer and legacy URLs")
 
 
 def main():

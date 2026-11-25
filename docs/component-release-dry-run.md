@@ -84,25 +84,47 @@ No hosted build, package signing, publication, registry call, release upload
 or protected environment action is performed by these local commands. Native
 checks cannot be replaced by the synthetic assembly regression.
 
-## Hosted Runtime dry-run targets
+## Unified hosted dry run
 
-`runtime-release-dry-run.yml` builds the locked Windows x64 and Linux GNU x64 Runtime in
-fresh native runner directories. On an eligible same-repository PR to main, a
-maintainer opts in with `native-release-dry-run`; this uses the ordinary PR
-integration SHA with a read-only token, no repository checkout credentials,
-and uploads only the run-bound smoke envelope. Fork PRs do not run this job.
-Workflow dispatch on trusted main can also retain exactly three verified
-assets per target as short-lived workflow artifacts; no release, tag, package registry,
-or deployment is touched. PR evidence does not replace the exact reviewed main
-commit's native evidence.
+The repository keeps three workflows. The existing
+`runtime-release-dry-run.yml` hosts the Runtime, CLI and Client2 matrices under
+one read-only workflow. A maintainer can opt in a same-repository PR to
+`main` with `native-release-dry-run`. The jobs check out the exact PR integration
+SHA without persisting checkout credentials. Fork PRs do not run the native
+jobs. Manual dry runs use the trusted `main` ref. A successful PR dry run does
+not replace evidence from a later exact reviewed `main` commit.
 
-Linux GNU x64 uses the pinned GNU provider preparation on Ubuntu 22.04. Its
-ELF image must resolve the bundled ONNX SONAME through an exact $ORIGIN loader
-path, without a build-directory loader override. The same packaged smoke runs
-after extraction, with no inherited loader injection variables.
+Jobs upload short-lived Actions artifacts, not GitHub Release assets. Producer
+payloads, native receipts and final byte-parity receipts have distinct names
+bound to the run ID and attempt. Consumers accept only artifacts from that exact
+run and attempt; a partial rerun must not pull from an earlier attempt to fill
+gaps. There are no tag writes, registry calls, protected environments,
+deployment or publication paths. Component-prefixed tag strings only select
+the expected inventory and version; no such tag is created.
 
-This is two of eight Runtime targets, not a release fan-out. Windows ARM64,
-macOS Intel/ARM64, Linux GNU ARM64, and Linux musl x64/ARM64 still need their
-own package smoke and provenance. The two musl lanes additionally need verified
-static ORT inputs for their architecture. The CLI and Client2 native matrices
-and complete same-run artifact assembly are separate prerequisites.
+- **Runtime:** the candidate matrix contains Windows x64/ARM64, Linux GNU
+  x64/ARM64 and macOS ARM64. On GNU Linux, the pinned provider must resolve from
+  the package through an exact `$ORIGIN` loader path without a loader override.
+  New lanes require their own real packaged smoke and source-bound receipts.
+  macOS Intel and both Linux musl targets are excluded pending verified,
+  target-specific ONNX Runtime inputs; the musl packages require static
+  archives. No incomplete Runtime target set is assembled or reported as a
+  complete Runtime dry run.
+- **CLI:** eight native jobs produce the binary and provenance pair for each
+  supported target. The no-publish packing job checks the same-attempt pairs
+  and verifies the contents of the nine actual npm tarballs before local
+  assembly. The planner inventory alone is not package acceptance.
+- **Client2:** six native builds supply six app artifacts, two Windows
+  installers and the macOS ARM64 DMG. The candidate binds those nine files to
+  their checksums and update manifest. Six native acceptance jobs check the
+  matching desktop artifacts; the applicable jobs also exercise the installed
+  Windows app or an app copied out of the mounted macOS image. Final assembly
+  requires the complete set of same-attempt native checks.
+
+The hosted consumer uses `assemble-component-ci.mjs` with absolute payload
+directories and a fresh output path under `RUNNER_TEMP`. It reuses the local
+assembler and writes `component-release-receipt.json` for byte-identical
+monorepo and legacy layouts. This receipt does not attest to native execution;
+retain the separate native evidence. Missing files, failed verification or
+missing receipts prevent a complete component result. The matrix and expected
+inventory are not evidence that the newly added hosted jobs have passed.
