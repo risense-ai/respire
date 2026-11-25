@@ -59,6 +59,47 @@ pub use windows::model_removal::ModelRemovalRoot;
 pub use windows::model_stage::{same_model_file, ModelStage};
 #[cfg(windows)]
 pub use windows::{create_owner_credential, read_owner_credential, OwnerCredential};
+#[cfg(windows)]
+pub use windows::local_spaces::LocalSpaceNamespace;
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub use unix::local_spaces::LocalSpaceNamespace;
+
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+fn is_local_space_id(id: &str) -> bool {
+    id.len() == 32 && id.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+// The names returned here are candidates, not authorization. Each receipt is
+// opened and proved separately through its retained owner-verified directory.
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+fn candidate_local_ids(directory: &std::path::Path) -> io::Result<Vec<String>> {
+    const MAX_SCAN: usize = 512;
+    let mut ids = Vec::new();
+    for (index, entry) in std::fs::read_dir(directory)?.enumerate() {
+        if index >= MAX_SCAN {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "local catalog scan limit exceeded"));
+        }
+        if let Some(id) = entry?.file_name().to_str().and_then(|name| name.strip_prefix("local-")) {
+            if is_local_space_id(id) {
+                ids.push(id.to_owned());
+            }
+        }
+    }
+    ids.sort_unstable();
+    Ok(ids)
+}
+
+
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+const LOCAL_SPACE_STAGE_FILES: &[&str] = &[
+    "onememory.db", "onememory.db-wal", "onememory.db-shm", "onememory.db-journal",
+    "lock.db", "lock.db-wal", "lock.db-shm", "lock.db-journal",
+    "owner.receipt", ".owner-receipt.pending",
+];
+
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+const LOCAL_SPACE_STAGING_SLOTS: u8 = 16;
 
 pub mod model_proof;
 pub mod proof;

@@ -7,6 +7,9 @@ description = "Start the respire runtime without inheriting the caller's pipes"
 license-file = "../LICENSE"
 publish = false
 
+[features]
+test-private-space-root = []
+
 [dependencies]
 getrandom = "0.3"
 hmac = "0.12"

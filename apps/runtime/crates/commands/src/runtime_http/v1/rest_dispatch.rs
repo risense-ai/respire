@@ -12,6 +12,45 @@ use tokio::sync::oneshot;
 
 use super::{owner_control, transport, transport::RestScope, Problem, V1Result};
 
+
+#[path = "device_space_publication.rs"]
+mod device_space_publication;
+use device_space_publication::{await_publication, Admission, COMMIT_WAIT};
+
+struct AbandonPreparation {
+    admission: Arc<Admission>,
+    cancelled: Arc<AtomicBool>,
+}
+
+impl Drop for AbandonPreparation {
+    fn drop(&mut self) {
+        if self.admission.abandon() {
+            self.cancelled.store(true, Ordering::Release);
+        }
+    }
+}
+
+/// Prepare normally. Only the final native publication competes with timeout
+/// or disconnect; an admitted caller receives a receipt or an unknown outcome.
+pub(super) async fn submit_device_space_create<T, F>(scope: RestScope, run: F) -> V1Result<T>
+where
+    T: Send + 'static,
+    F: for<'a> FnOnce(&LibraryContext<'a>, &Admission) -> V1Result<T> + Send + 'static,
+{
+    let deadline = Instant::now() + REQUEST_WAIT;
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let admission = Arc::new(Admission::default());
+    let _abandon = AbandonPreparation {
+        admission: Arc::clone(&admission),
+        cancelled: Arc::clone(&cancelled),
+    };
+    let worker = Arc::clone(&admission);
+    let receiver = enqueue(scope, Access::Write, deadline, cancelled, move |ctx| {
+        run(ctx, &worker)
+    })?;
+    await_publication(&admission, receiver, deadline, COMMIT_WAIT).await
+}
+
 const REQUEST_WAIT: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Copy)]
@@ -27,6 +66,16 @@ pub(super) struct LibraryContext<'a> {
     pub(super) ownership: &'a LibraryLock,
     pub(super) library: respire_app::auth::RuntimeLibrary<'a>,
     pub(super) scope: &'a RestScope,
+    deadline: Instant,
+    cancelled: &'a AtomicBool,
+}
+
+impl LibraryContext<'_> {
+    pub(super) fn may_commit(&self) -> bool {
+        Instant::now() < self.deadline
+            && !self.cancelled.load(Ordering::Acquire)
+            && self.scope.bearer_is_current()
+    }
 }
 
 type Completion = Box<dyn for<'a> FnOnce(V1Result<LibraryContext<'a>>) + Send>;
@@ -164,6 +213,8 @@ pub(super) fn service(work: Work, store: Option<&LocalStore>, ownership: &Librar
                         store,
                         ownership,
                         scope: &scope,
+                        deadline,
+                        cancelled: &cancelled,
                         library,
                     })
                 })();

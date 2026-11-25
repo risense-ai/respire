@@ -22,7 +22,7 @@ pub fn set_index_root(root: &std::path::Path) -> Result<()> {
 
 /// Scope the optional owner-selected index root to one synchronous worker request.
 /// An absent root means no local index access, not the previous request's root.
-pub(crate) fn with_index_root<T>(
+pub fn with_index_root<T>(
     root: Option<&std::path::Path>,
     run: impl FnOnce() -> Result<T>,
 ) -> Result<T> {

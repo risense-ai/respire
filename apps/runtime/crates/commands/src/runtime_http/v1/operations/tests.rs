@@ -46,16 +46,17 @@ fn scoped_deepen_on_production_router() -> Result<()> {
 pub(super) fn production_router_fixture(test: &'static str) -> Result<()> {
     if std::env::var_os(CHILD).is_none() {
         let directory = tempfile::tempdir()?;
+        let fixture_root = space_members_tests::fixture_root(directory.path(), test == TEST)?;
         if test != TEST {
-            let profile = directory.path().join("accounts").join("outline-fixture");
+            let profile = fixture_root.join("accounts").join("outline-fixture");
             fs::create_dir_all(&profile)?;
-            fs::write(directory.path().join("client.json"), serde_json::to_vec(&json!({"data_dir": profile}))?)?;
+            fs::write(fixture_root.join("client.json"), serde_json::to_vec(&json!({"data_dir": profile}))?)?;
         }
         let result = Command::new(std::env::current_exe()?)
             .args(["--exact", test, "--nocapture"])
             .env(CHILD, "1")
             .env("RSRS_CORE_TEST_MODE", "1")
-            .env("RSRS_DATA_DIR", directory.path())
+            .env("RSRS_DATA_DIR", &fixture_root)
             .env_remove("RSRS_DEFAULT_DATA_DIR")
             .env_remove("RSRS_RPC_TOKEN")
             .env_remove("RSRS_LANG")
