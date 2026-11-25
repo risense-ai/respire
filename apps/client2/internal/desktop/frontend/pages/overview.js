@@ -1,4 +1,5 @@
 import { messages as i18nMessages } from "../ui/i18n/messages.js";
+import { t } from "../ui/i18n.js";
 import {
   $,
   all,
@@ -112,7 +113,7 @@ export function overview(root, ctx) {
     const note = selection ? "" : snapshot.note || "";
     summaryRoot.innerHTML =
       heading(
-        i18nMessages.me8705434968b58fd,
+        t(i18nMessages.me8705434968b58fd),
         i18nMessages.md4138a10d95dbb7a,
         `${i18nMessages.mdea3a195d4b5e4d1}`,
       ) +
