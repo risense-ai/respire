@@ -57,10 +57,10 @@ impl ModelRemovalRoot {
     }
 
     fn check_directories(&self) -> io::Result<()> {
-        let user = CurrentUser::query()?;
+        let user = CurrentUser::query_managed()?;
         checked_directory(self.base.as_raw_handle())?;
         checked_directory(self.model.as_raw_handle())?;
-        user.verify_handle(self.base.as_raw_handle(), false)?;
+        user.verify_managed_base(self.base.as_raw_handle())?;
         user.verify_handle(self.model.as_raw_handle(), false)
     }
 

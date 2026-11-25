@@ -405,6 +405,8 @@ fn mark_delete(handle: HANDLE) -> io::Result<()> {
 
 #[path = "windows_model_removal.rs"]
 pub(super) mod model_removal;
+#[path = "windows_model_namespace.rs"]
+pub(super) mod model_namespace;
 #[path = "windows_model_stage.rs"]
 pub(super) mod model_stage;
 
