@@ -30,30 +30,7 @@ impl MigrationCopy {
     }
 
     pub fn source_identity(&self, leaf: &str) -> io::Result<[u64; 2]> {
-        super::super::validate_migration_leaf(leaf)?;
-        let leaf = CString::new(leaf).map_err(|_| denied())?;
-        let mut value = MaybeUninit::<libc::stat>::uninit();
-        // SAFETY: the live directory descriptor and C leaf are retained. Do
-        // not open/close a SQLite inode: classic POSIX locks are process-wide.
-        if unsafe {
-            libc::fstatat(
-                self.parent.as_raw_fd(),
-                leaf.as_ptr(),
-                value.as_mut_ptr(),
-                libc::AT_SYMLINK_NOFOLLOW,
-            )
-        } != 0
-        {
-            return Err(io::Error::last_os_error());
-        }
-        let value = unsafe { value.assume_init() };
-        if value.st_mode & libc::S_IFMT != libc::S_IFREG
-            || value.st_nlink != 1
-            || value.st_uid != unsafe { libc::geteuid() }
-        {
-            return Err(denied());
-        }
-        Ok([value.st_dev as u64, value.st_ino as u64])
+        source_at(&self.parent, leaf)
     }
 
     pub fn path(&self) -> &Path {
@@ -85,4 +62,50 @@ impl Drop for MigrationCopy {
             unsafe { libc::unlinkat(parent, self.pending.as_ptr(), 0) };
         }
     }
+}
+
+/// A read-only protected directory. Retain only through source copy; obtain
+/// a fresh directory witness for each later snapshot-liveness check.
+pub struct MigrationSource(File);
+
+impl MigrationSource {
+    pub fn open(path: &Path, _pin_for_copy: bool) -> io::Result<Self> {
+        open_base(path).map(Self)
+    }
+
+    pub fn identity(&self) -> io::Result<[u64; 2]> {
+        let metadata = self.0.metadata()?;
+        Ok([metadata.dev(), metadata.ino()])
+    }
+
+    pub fn file_identity(&self, leaf: &str) -> io::Result<[u64; 2]> {
+        source_at(&self.0, leaf)
+    }
+}
+
+fn source_at(parent: &File, leaf: &str) -> io::Result<[u64; 2]> {
+    super::super::validate_migration_leaf(leaf)?;
+    let leaf = CString::new(leaf).map_err(|_| denied())?;
+    let mut value = MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: the live directory descriptor and C leaf are retained. Do
+    // not open/close a SQLite inode: classic POSIX locks are process-wide.
+    if unsafe {
+        libc::fstatat(
+            parent.as_raw_fd(),
+            leaf.as_ptr(),
+            value.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    } != 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    let value = unsafe { value.assume_init() };
+    if value.st_mode & libc::S_IFMT != libc::S_IFREG
+        || value.st_nlink != 1
+        || value.st_uid != unsafe { libc::geteuid() }
+    {
+        return Err(denied());
+    }
+    Ok([value.st_dev as u64, value.st_ino as u64])
 }

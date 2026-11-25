@@ -78,10 +78,22 @@ pub(super) async fn check(base: Router, root: &Path, token: &Path, urk: [u8; 32]
 
     let mut retired = request(&app, "GET", &endpoint, Some(TOKEN)).await?.into_body().into_data_stream();
     assert!(tokio::time::timeout(WAIT, retired.next()).await?.context("archive header missing")??.starts_with(b"RSRSBKP"));
+    assert_eq!(account_stage_count(root)?, 1, "child output belongs to the verified owner root");
     assert_eq!(send(&app, "DELETE", &child_route, Some(TOKEN), None).await?.status(), StatusCode::NO_CONTENT);
     let frame = tokio::time::timeout(WAIT, retired.next()).await?.context("retired-space stream falsely ended cleanly")?;
     assert!(frame.is_err());
     assert!(tokio::time::timeout(WAIT, retired.next()).await?.is_none());
     assert_eq!(request(&app, "GET", &endpoint, Some(TOKEN)).await?.status(), StatusCode::NOT_FOUND);
+    assert_eq!(account_stage_count(root)?, 0, "consumer release cleans only its private output");
     Ok(())
+}
+
+fn account_stage_count(profile: &Path) -> Result<usize> {
+    let mut count = 0;
+    for entry in fs::read_dir(profile)? {
+        if entry?.file_name().to_string_lossy().starts_with(".backup-export-") {
+            count += 1;
+        }
+    }
+    Ok(count)
 }

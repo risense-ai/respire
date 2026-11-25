@@ -46,7 +46,7 @@ pub(super) async fn get(bound: SocketAddr, peer: SocketAddr, request: Request) -
     let permit = ADMISSION.try_acquire().map_err(|_| transport::unavailable())?;
     let source = rest_dispatch::submit(scope.clone(), Access::Read, move |ctx| {
         reads::with_memory_store(ctx, selected, |store, _| {
-            store.prepare_backup_export().map_err(|_| transport::unavailable())
+            store.prepare_backup_export(&ctx.scope.canonical_profile).map_err(|_| transport::unavailable())
         })
     }).await?;
     let cancelled = Arc::new(AtomicBool::new(false));

@@ -22,7 +22,7 @@ fn old_snapshot_policy_and_current_vault_authenticate_detached_native_export() -
     let store = detached_fixture(&profile)?;
     let keys = SessionKeys::from_urk([7; 32])?;
     let authority = RuntimeLibrary(&keys, "alice", &profile);
-    let draft = BackupExportDraft::new(store.prepare_backup_export()?.copy(|| Ok(()))?)?;
+    let draft = BackupExportDraft::new(store.prepare_backup_export(&profile)?.copy(|| Ok(()))?)?;
     let proof = authority.prove_backup_snapshot(&draft)?;
     let pending = draft.prepare(proof, || Ok(()))?;
     let stream = authority.authenticate_backup_export(pending)?;
@@ -50,7 +50,7 @@ fn wrong_vault_cannot_authorize_prepared_bytes_even_for_the_same_account() -> Re
     let other = SessionKeys::from_urk([6; 32])?;
     let first = RuntimeLibrary(&keys, "alice", &profile);
     let changed = RuntimeLibrary(&other, "alice", &profile);
-    let draft = BackupExportDraft::new(store.prepare_backup_export()?.copy(|| Ok(()))?)?;
+    let draft = BackupExportDraft::new(store.prepare_backup_export(&profile)?.copy(|| Ok(()))?)?;
     let proof = first.prove_backup_snapshot(&draft)?;
     let pending = draft.prepare(proof, || Ok(()))?;
     let _error = changed.authenticate_backup_export(pending).err().context("changed Vault unexpectedly authorized archive")?;
@@ -65,7 +65,7 @@ fn revocation_before_chunk_release_cannot_resume_or_leak_the_chunk() -> Result<(
     let store = detached_fixture(&profile)?;
     let keys = SessionKeys::from_urk([7; 32])?;
     let authority = RuntimeLibrary(&keys, "alice", &profile);
-    let draft = BackupExportDraft::new(store.prepare_backup_export()?.copy(|| Ok(()))?)?;
+    let draft = BackupExportDraft::new(store.prepare_backup_export(&profile)?.copy(|| Ok(()))?)?;
     let proof = authority.prove_backup_snapshot(&draft)?;
     let mut stream = authority.authenticate_backup_export(draft.prepare(proof, || Ok(()))?)?;
     let head = stream.next_verified(|| Ok(()))?.context("missing archive header")?;

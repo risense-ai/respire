@@ -105,9 +105,9 @@ pub mod model_proof;
 pub mod proof;
 
 #[cfg(windows)]
-pub use windows::migration_copy::MigrationCopy;
+pub use windows::migration_copy::{MigrationCopy, MigrationSource};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-pub use unix::migration_copy::MigrationCopy;
+pub use unix::migration_copy::{MigrationCopy, MigrationSource};
 
 #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 fn validate_migration_leaf(name: &str) -> io::Result<()> {

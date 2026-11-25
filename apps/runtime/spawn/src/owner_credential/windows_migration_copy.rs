@@ -53,19 +53,7 @@ impl MigrationCopy {
     }
 
     pub fn source_identity(&self, leaf: &str) -> io::Result<[u64; 2]> {
-        super::super::validate_migration_leaf(leaf)?;
-        let handle = relative_open(
-            self.parent.as_raw_handle(),
-            OsStr::new(leaf),
-            META,
-            SHARE,
-            None,
-            FILE_OPEN,
-            FILE_NON_DIRECTORY_FILE,
-        )?;
-        checked_file(handle.as_raw_handle(), None)?;
-        let (volume, high, low) = identity(handle.as_raw_handle())?;
-        Ok([u64::from(volume), (u64::from(high) << 32) | u64::from(low)])
+        source_at(&self.parent, leaf)
     }
     pub fn path(&self) -> &Path {
         &self.path
@@ -117,4 +105,45 @@ impl Drop for MigrationCopy {
             }
         }
     }
+}
+
+/// Copy pins the source against rename. Later proof checks allow deletion
+/// and are dropped before handing any bytes to the body consumer.
+pub struct MigrationSource(OwnedHandle);
+
+impl MigrationSource {
+    pub fn open(path: &Path, pin_for_copy: bool) -> io::Result<Self> {
+        let sharing = if pin_for_copy { FILE_SHARE_READ | FILE_SHARE_WRITE } else { SHARE };
+        let directory = pinned_base_with_sharing(path, sharing, true)?;
+        CurrentUser::query_managed()?.verify_managed_base(directory.as_raw_handle())?;
+        Ok(Self(directory))
+    }
+
+    pub fn identity(&self) -> io::Result<[u64; 2]> {
+        id_pair(self.0.as_raw_handle())
+    }
+
+    pub fn file_identity(&self, leaf: &str) -> io::Result<[u64; 2]> {
+        source_at(&self.0, leaf)
+    }
+}
+
+fn id_pair(handle: HANDLE) -> io::Result<[u64; 2]> {
+    let (volume, high, low) = identity(handle)?;
+    Ok([u64::from(volume), (u64::from(high) << 32) | u64::from(low)])
+}
+
+fn source_at(parent: &OwnedHandle, leaf: &str) -> io::Result<[u64; 2]> {
+    super::super::validate_migration_leaf(leaf)?;
+    let handle = relative_open(
+        parent.as_raw_handle(),
+        OsStr::new(leaf),
+        META,
+        SHARE,
+        None,
+        FILE_OPEN,
+        FILE_NON_DIRECTORY_FILE,
+    )?;
+    checked_file(handle.as_raw_handle(), None)?;
+    id_pair(handle.as_raw_handle())
 }

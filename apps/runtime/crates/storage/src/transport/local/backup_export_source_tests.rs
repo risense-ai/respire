@@ -28,7 +28,7 @@ fn fixture() -> Result<(tempfile::TempDir, LocalStore)> {
 #[test]
 fn real_concurrent_wal_write_does_not_change_exported_snapshot() -> Result<()> {
     let (dir, store) = fixture()?;
-    let source = store.prepare_backup_export()?;
+    let source = store.prepare_backup_export(&dir.path().canonicalize()?)?;
     let (ready, snapshot_admitted) = sync_channel(0);
     let (resume, copied) = sync_channel(0);
     let worker = thread::spawn(move || {
@@ -64,10 +64,10 @@ fn revocation_after_capture_and_small_budget_remove_only_owned_stage() -> Result
     let (dir, store) = fixture()?;
     let unrelated = dir.path().join("unrelated.db");
     fs::write(&unrelated, b"fixture contents")?;
-    let source = store.prepare_backup_export()?;
+    let source = store.prepare_backup_export(&dir.path().canonicalize()?)?;
     assert!(source.copy_with_limit(1, || Ok(())).is_err());
     assert!(stage_names(dir.path())?.is_empty());
-    let source = store.prepare_backup_export()?;
+    let source = store.prepare_backup_export(&dir.path().canonicalize()?)?;
     let mut checks = 0;
     let error = source.copy(|| {
         checks += 1;
@@ -87,13 +87,39 @@ fn moved_space_no_longer_releases_its_retained_stage_path() -> Result<()> {
     let profile = parent.path().canonicalize()?.join("child");
     fs::create_dir(&profile)?;
     let store = LocalStore::open(&profile.join("test.db"))?;
-    let copy = store.prepare_backup_export()?.copy(|| Ok(()))?;
-    assert_eq!(stage_names(&profile)?.len(), 1);
-    let retired = parent.path().join("retired");
+    let account_root = parent.path().canonicalize()?;
+    let copy = store.prepare_backup_export(&account_root)?.copy(|| Ok(()))?;
+    assert_eq!(copy.checked_path()?.parent(), Some(account_root.as_path()));
+    assert_eq!(stage_names(&account_root)?.len(), 1);
+    assert!(stage_names(&profile)?.is_empty());
+    let retired = account_root.join("retired");
     fs::rename(&profile, &retired)?;
     assert!(copy.checked_path().is_err());
+    fs::create_dir(&profile)?;
+    let new_store = LocalStore::open(&profile.join("test.db"))?;
+    assert!(copy.checked_path().is_err(), "new directory cannot inherit the retired source");
     drop(copy);
+    assert!(stage_names(&account_root)?.is_empty());
     assert!(stage_names(&retired)?.is_empty());
     assert!(retired.join("test.db").is_file());
+    assert!(profile.join("test.db").is_file());
+    drop(new_store);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn replaced_stage_is_not_removed_as_if_it_were_the_owned_copy() -> Result<()> {
+    let (dir, store) = fixture()?;
+    let account = dir.path().canonicalize()?;
+    let copy = store.prepare_backup_export(&account)?.copy(|| Ok(()))?;
+    let stage = copy.checked_path()?;
+    let moved = account.join("owned-moved-stage");
+    fs::rename(&stage, &moved)?;
+    fs::write(&stage, b"independent replacement")?;
+    assert!(copy.checked_path().is_err());
+    drop(copy);
+    assert_eq!(fs::read(stage)?, b"independent replacement");
+    assert!(moved.is_file());
     Ok(())
 }

@@ -168,6 +168,7 @@ impl BackupExportReader {
                 );
             }
         }
+        self.copy.checked_path()?;
         check()?;
         Ok(Some(bytes))
     }

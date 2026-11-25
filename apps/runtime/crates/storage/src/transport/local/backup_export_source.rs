@@ -2,7 +2,7 @@
 //! a worker. A raw copy is private and may contain grants; it is not an export.
 use super::{Connection, LocalStore, OpenFlags};
 use anyhow::{ensure, Context, Result};
-use respire_spawn::owner_credential::MigrationCopy;
+use respire_spawn::owner_credential::{MigrationCopy, MigrationSource};
 use rusqlite::backup::{Backup, StepResult};
 use std::{
     path::{Path, PathBuf},
@@ -19,8 +19,8 @@ pub struct BackupExportSource {
     stage: MigrationCopy,
     stage_leaf: String,
     stage_identity: [u64; 2],
-    source_leaf: String,
-    source_identity: [u64; 2],
+    source: SourceIdentity,
+    source_pin: MigrationSource,
 }
 
 /// Owns the native identity-checked private stage until the caller drops it.
@@ -29,15 +29,36 @@ pub struct BackupExportCopy {
     stage: MigrationCopy,
     leaf: String,
     identity: [u64; 2],
-    source: PathBuf,
-    source_leaf: String,
-    source_identity: [u64; 2],
+    source: SourceIdentity,
+}
+
+struct SourceIdentity {
+    path: PathBuf,
+    leaf: String,
+    directory: [u64; 2],
+    file: [u64; 2],
+}
+
+impl SourceIdentity {
+    fn check_live(&self, check_wal: bool) -> Result<()> {
+        let parent = self.path.parent().context("backup source lost its directory")?;
+        let current = MigrationSource::open(parent, false)?;
+        ensure!(
+            current.identity()? == self.directory && current.file_identity(&self.leaf)? == self.file,
+            "backup source generation is no longer named"
+        );
+        if check_wal {
+            check_companions(&current, &self.leaf)?;
+        }
+        Ok(())
+    }
 }
 
 impl LocalStore {
     /// Short admission only. Select the store from the verified owner scope
-    /// before calling; no HTTP path or caller-supplied name enters this API.
-    pub fn prepare_backup_export(&self) -> Result<BackupExportSource> {
+    /// before calling; `stage_parent` is the verified owner account root,
+    /// not the selected child, and never comes from an HTTP path.
+    pub fn prepare_backup_export(&self, stage_parent: &Path) -> Result<BackupExportSource> {
         let database = Path::new(self.connection.path().context("backup requires an on-disk store")?);
         let parent = database
             .parent()
@@ -50,18 +71,24 @@ impl LocalStore {
             .to_owned();
         ensure!(parent.join(&source_leaf) == database, "backup store path is not canonical");
         let stage_leaf = format!(".backup-export-{}.pending", uuid::Uuid::new_v4().simple());
-        let stage = MigrationCopy::create(&parent, &stage_leaf)?;
-        let source_identity = stage.source_identity(&source_leaf)?;
+        ensure!(stage_parent.canonicalize()? == stage_parent, "backup stage root is not canonical");
+        let stage = MigrationCopy::create(stage_parent, &stage_leaf)?;
         let stage_identity = stage.source_identity(&stage_leaf)?;
-        check_companions(&stage, &source_leaf)?;
-        let source = parent.join(&source_leaf);
+        let source_pin = MigrationSource::open(&parent, true)?;
+        let source = SourceIdentity {
+            path: parent.join(&source_leaf),
+            directory: source_pin.identity()?,
+            file: source_pin.file_identity(&source_leaf)?,
+            leaf: source_leaf,
+        };
+        check_companions(&source_pin, &source.leaf)?;
         let reader = Connection::open_with_flags(
-            &source,
+            &source.path,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
         )?;
         reader.busy_timeout(Duration::ZERO)?;
         let pinned = BackupExportSource {
-            reader, stage, stage_leaf, stage_identity, source_leaf, source_identity,
+            reader, stage, stage_leaf, stage_identity, source, source_pin,
         };
         pinned.check_paths()?;
         Ok(pinned)
@@ -71,11 +98,11 @@ impl LocalStore {
 impl BackupExportSource {
     fn check_paths(&self) -> Result<()> {
         ensure!(
-            self.stage.source_identity(&self.source_leaf)? == self.source_identity
+            self.source_pin.file_identity(&self.source.leaf)? == self.source.file
                 && self.stage.source_identity(&self.stage_leaf)? == self.stage_identity,
             "backup source or stage changed"
         );
-        check_companions(&self.stage, &self.source_leaf)
+        self.source.check_live(true)
     }
 
     /// Run only off the owner dispatcher, under an outer resource permit.
@@ -127,11 +154,11 @@ impl BackupExportSource {
         ensure!(integrity == "ok", "backup stage failed SQLite quick_check");
         stage.close().map_err(|(_, error)| error)?;
         gate()?;
-        let source = PathBuf::from(self.reader.path().context("backup source lost its path")?);
+        // Do not retain a selected child file or directory in the response.
+        drop(self.reader);
+        drop(self.source_pin);
         Ok(BackupExportCopy {
-            source,
-            source_leaf: self.source_leaf,
-            source_identity: self.source_identity,
+            source: self.source,
             stage: self.stage, leaf: self.stage_leaf, identity: self.stage_identity,
         })
     }
@@ -139,29 +166,25 @@ impl BackupExportSource {
 
 impl BackupExportCopy {
     pub fn source_database(&self) -> &Path {
-        &self.source
+        &self.source.path
     }
 
     /// Retain this owner while validating or sanitizing. No path from a client
     /// may address a staged copy, and it is never a restore authorization.
     pub fn checked_path(&self) -> Result<PathBuf> {
-        // A retained dirfd can continue to resolve a stage after normal
-        // child-space retirement moved its namespace. Do not stream then.
         let path = self.stage.path();
         ensure!(
-            path.canonicalize()? == path
-                && self.source.canonicalize()? == self.source
-                && self.stage.source_identity(&self.leaf)? == self.identity
-                && self.stage.source_identity(&self.source_leaf)? == self.source_identity,
-            "backup source or stage changed"
+            path.canonicalize()? == path && self.stage.source_identity(&self.leaf)? == self.identity,
+            "backup stage changed"
         );
+        self.source.check_live(false)?;
         Ok(path.to_owned())
     }
 }
 
-fn check_companions(stage: &MigrationCopy, leaf: &str) -> Result<()> {
+fn check_companions(source: &MigrationSource, leaf: &str) -> Result<()> {
     for extension in ["-wal", "-shm", "-journal"] {
-        match stage.source_identity(&format!("{leaf}{extension}")) {
+        match source.file_identity(&format!("{leaf}{extension}")) {
             Ok(_) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
