@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "ceilings": {
+    "apps/core/vendor/tokenizers/src/models/bpe/model.rs": 1171,
+    "apps/core/vendor/tokenizers/src/models/bpe/parity_trainer.rs": 2228,
+    "apps/core/vendor/tokenizers/src/models/bpe/trainer.rs": 868,
+    "apps/core/vendor/tokenizers/src/models/unigram/lattice.rs": 691,
+    "apps/core/vendor/tokenizers/src/models/unigram/model.rs": 705,
+    "apps/core/vendor/tokenizers/src/models/unigram/trainer.rs": 825,
+    "apps/core/vendor/tokenizers/src/pre_tokenizers/unicode_scripts/scripts.rs": 2095,
+    "apps/core/vendor/tokenizers/src/processors/template.rs": 1156,
+    "apps/core/vendor/tokenizers/src/tokenizer/added_vocabulary.rs": 1197,
+    "apps/core/vendor/tokenizers/src/tokenizer/encoding.rs": 909,
+    "apps/core/vendor/tokenizers/src/tokenizer/mod.rs": 1846,
+    "apps/core/vendor/tokenizers/src/tokenizer/normalizer.rs": 2311
+  }
+}
