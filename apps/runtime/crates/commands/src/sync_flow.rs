@@ -218,23 +218,29 @@ pub fn sync_tracked_boundary(
     };
     let result = respire_app::sync::sync_controlled(session, local, remote, &control,
         rpc::worker_active().then_some(boundary));
-    {
-        let mut guard = SYNC_LIVE.lock().unwrap_or_else(|err| err.into_inner());
-        match &result {
-            Ok(stats) => {
-                guard.phase = "ok".to_owned();
-                guard.pulled = stats.pulled as u64;
-                guard.pushed = stats.pushed as u64;
-                guard.remote_alive = stats.remote_alive as u64;
-                guard.pending = stats.pending;
-                guard.conflicts = stats.conflicts;
-                guard.error.clear();
-            }
-            Err(error) => {
-                guard.phase = "err".to_owned();
-                guard.error = format!("{error:#}");
-            }
+    record_sync_result(Some(&result));
+    result
+}
+
+pub(crate) fn record_sync_result(result: Option<&Result<SyncStats>>) {
+    let mut guard = SYNC_LIVE.lock().unwrap_or_else(|err| err.into_inner());
+    match result {
+        Some(Ok(stats)) => {
+            guard.phase = "ok".to_owned();
+            guard.pulled = stats.pulled as u64;
+            guard.pushed = stats.pushed as u64;
+            guard.remote_alive = stats.remote_alive as u64;
+            guard.pending = stats.pending;
+            guard.conflicts = stats.conflicts;
+            guard.error.clear();
+        }
+        Some(Err(error)) => {
+            guard.phase = "err".to_owned();
+            guard.error = format!("{error:#}");
+        }
+        None => {
+            guard.phase = "idle".to_owned();
+            guard.error.clear();
         }
     }
-    result
 }

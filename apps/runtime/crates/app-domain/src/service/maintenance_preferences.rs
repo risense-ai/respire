@@ -153,6 +153,7 @@ pub fn validate_agent_runtime_setting(key: &str, value: &serde_json::Value) -> R
 }
 
 pub fn write_agent_config_key(key: &str, value: &serde_json::Value) -> Result<()> {
+    host_config_transaction::ensure_no_host_config_transaction()?;
     let key = key.trim();
     validate_agent_runtime_setting(key, value)?;
     if matches!(key, "memory_off" | "readonly") {

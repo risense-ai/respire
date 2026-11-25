@@ -24,6 +24,18 @@ impl super::LocalStore {
         read_revision(&self.connection)
     }
 
+    /// Tree links visible to the serving owner, without reading memory contents.
+    pub fn owner_tree_links(&self, owner: &str) -> Result<Vec<(String, String)>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, parent_id FROM memories
+             WHERE user = ?1 AND deleted = 0 AND id <> ''
+               AND COALESCE(importance, '') <> 'trivial'
+             ORDER BY id",
+        )?;
+        let rows = statement.query_map([owner], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// Read only active ID/parent pairs; callers must validate the snapshot revision.
     pub fn active_tree_links(&self) -> Result<Vec<(String, String)>> {
         let mut statement = self.connection.prepare(

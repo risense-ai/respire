@@ -4,7 +4,6 @@ use axum::{
     extract::{ConnectInfo, Request, State},
     http::{Method, StatusCode, Uri},
     response::Response,
-    routing::{on, MethodFilter},
     Router,
 };
 use std::{
@@ -21,16 +20,13 @@ use super::{
 };
 
 pub(super) fn routes(bound: SocketAddr) -> Router {
-    Router::new()
-        .route("/v1/grants", on(MethodFilter::GET, list_grants))
-        .route("/v1/grants/{grantId}", on(MethodFilter::DELETE, revoke))
-        .route("/v1/stats", on(MethodFilter::GET, stats))
-        .route("/v1/query-log", on(MethodFilter::GET, query_log))
-        .route(
-            "/v1/memories/{memoryId}/reviews",
-            on(MethodFilter::GET, reviews),
-        )
-        .route("/v1/sync/conflicts", on(MethodFilter::GET, conflicts))
+    use super::registration::{bind, RouteSpec, Verb};
+    let router = bind(Router::new(), RouteSpec::new(Verb::Get, "/v1/grants", "listAccessGrants"), list_grants);
+    let router = bind(router, RouteSpec::new(Verb::Delete, "/v1/grants/{grantId}", "revokeAccessGrant"), revoke);
+    let router = bind(router, RouteSpec::new(Verb::Get, "/v1/stats", "getLibraryStats"), stats);
+    let router = bind(router, RouteSpec::new(Verb::Get, "/v1/query-log", "getQueryLog"), query_log);
+    let router = bind(router, RouteSpec::new(Verb::Get, "/v1/memories/{memoryId}/reviews", "listMemoryReviews"), reviews);
+    bind(router, RouteSpec::new(Verb::Get, "/v1/sync/conflicts", "listSyncConflicts"), conflicts)
         .method_not_allowed_fallback(super::method_not_allowed)
         .with_state(bound)
 }
@@ -144,34 +140,7 @@ fn segment(uri: &Uri, prefix: &str, suffix: &str) -> V1Result<String> {
     decode(raw, false)
 }
 
-/// Decode exactly once and reject malformed percent escapes and UTF-8.
-/// '+' means space in a form query only, not in a path identifier.
-fn decode(raw: &str, form: bool) -> V1Result<String> {
-    let mut output = Vec::with_capacity(raw.len());
-    let mut input = raw.bytes();
-    let hex = |byte: u8| match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
-    };
-    while let Some(byte) = input.next() {
-        output.push(match byte {
-            b'%' => {
-                let high = input.next().and_then(hex).ok_or_else(invalid)?;
-                let low = input.next().and_then(hex).ok_or_else(invalid)?;
-                (high << 4) | low
-            }
-            b'+' if form => b' ',
-            _ => byte,
-        });
-    }
-    let value = String::from_utf8(output).map_err(|_| invalid())?;
-    if value.chars().any(char::is_control) {
-        return Err(invalid());
-    }
-    Ok(value)
-}
+use super::transport::decode;
 
 async fn handle(
     endpoint: Endpoint,

@@ -101,6 +101,7 @@ fn execute(progress: &Mutex<RpcResponse<ResultEnvelope>>, events: &mpsc::SyncSen
 type ControlFailure = (&'static str, &'static str);
 
 mod dispatch;
+mod offline_setting;
 use dispatch::receive_and_execute;
 
 

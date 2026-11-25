@@ -73,6 +73,31 @@ pub fn recovery_state() -> Result<respire_protocol::host_control::HostLoginRecov
     })
 }
 
+/// Public fields from the selected local session and the durable transaction journal.
+pub fn host_account_status(profile: &Path) -> Result<Value> {
+    let session: Option<Value> = read_original(profile)?.as_deref().map(serde_json::from_slice).transpose()?;
+    let journal = load_journal_metadata()?;
+    let state = match journal.active.as_ref() {
+        None => "none",
+        Some(active) => {
+            let login_pending = active.operation_id.as_ref().is_some_and(|id| {
+                journal.operations.iter().any(|record| {
+                    &record.operation_id == id
+                        && record.account.as_ref().is_some_and(|account| !account.register)
+                        && matches!(record.phase, AuthPhase::LoginInput | AuthPhase::RemotePending
+                            | AuthPhase::Authorized | AuthPhase::Prepared | AuthPhase::AwaitingVerification)
+                })
+            });
+            if login_pending { "login_pending" } else { "recovery_pending" }
+        }
+    };
+    let account = session.as_ref().and_then(|session| session["user"].as_str()).filter(|user| !user.trim().is_empty());
+    let signed_in = account.is_some() && session.as_ref().is_some_and(|session| {
+        session["token"].as_str().is_some_and(|token| !token.trim().is_empty())
+    });
+    Ok(json!({"signed_in": signed_in, "account_id": account, "transaction_state": state}))
+}
+
 pub fn auth_recovery_pending() -> Result<bool> {
     let journal = load_journal_metadata()?;
     let Some(active) = journal.active.as_ref() else { return Ok(false); };

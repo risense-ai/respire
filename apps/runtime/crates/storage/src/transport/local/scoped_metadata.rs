@@ -2,6 +2,94 @@ use super::LocalStore;
 use anyhow::Result;
 use rusqlite::params;
 
+impl LocalStore {
+    pub fn active_diary_tracks(&self, id: &str, title: &str) -> Result<Vec<crate::memory::model::StoredMemory>> {
+        let sql = format!(
+            "{} WHERE deleted = 0 AND (id = ?1 OR title = ?2)",
+            super::catalog::MEMORY_SELECT
+        );
+        let mut statement = self.connection.prepare(&sql)?;
+        let rows = statement.query_map(params![id, title], Self::row_to_memory)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn active_diary_entries(
+        &self,
+        date: Option<&str>,
+        day_of: impl Fn(&str) -> String,
+    ) -> Result<Vec<crate::memory::model::StoredMemory>> {
+        let sql = format!(
+            "{} WHERE deleted = 0 AND importance = 'trivial' ORDER BY created_at DESC, id",
+            super::catalog::MEMORY_SELECT
+        );
+        let mut statement = self.connection.prepare(&sql)?;
+        let mut rows = statement.query([])?;
+        let mut entries = Vec::new();
+        while let Some(row) = rows.next()? {
+            let created: &str = row.get_ref(13)?.as_str()?;
+            if date.is_none_or(|date| day_of(created) == date) {
+                entries.push(Self::row_to_memory(row)?);
+            }
+        }
+        Ok(entries)
+    }
+
+    /// The caller must hold verified authority for this entire active library.
+    pub fn active_memory_exact(
+        &self,
+        full_id: &str,
+    ) -> Result<Option<crate::memory::model::StoredMemory>> {
+        use rusqlite::OptionalExtension;
+        let sql = format!(
+            "{} WHERE deleted = 0 AND id = ?1",
+            super::catalog::MEMORY_SELECT
+        );
+        Ok(self.connection.query_row(&sql, [full_id], Self::row_to_memory).optional()?)
+    }
+
+    /// Tombstone exactly one ID; REST identifiers never use the legacy prefix resolver.
+    /// The caller must hold verified write authority for this active library.
+    pub fn forget_memory_exact(&self, full_id: &str) -> Result<bool> {
+        self.write_transaction(|| {
+            let stamp = self.edit_stamp(full_id)?;
+            Ok(self.connection.execute(
+                "UPDATE memories SET deleted = 1, updated_at = ?2, dirty = 1 WHERE id = ?1 AND deleted = 0",
+                params![full_id, stamp],
+            )? > 0)
+        })
+    }
+
+    /// Seek using the update index; its implicit rowid suffix breaks equal timestamps.
+    /// The caller must hold verified authority for this entire active library.
+    pub fn active_memory_page(
+        &self,
+        limit: usize,
+        after: Option<(&str, i64)>,
+    ) -> Result<Vec<(i64, crate::memory::model::StoredMemory)>> {
+        anyhow::ensure!((1..=201).contains(&limit), "invalid memory page size");
+        let select = super::catalog::MEMORY_SELECT.replacen(" FROM memories", ", rowid AS page_row_id FROM memories", 1);
+        let filter = if after.is_some() {
+            " AND (updated_at, rowid) < (?2, ?3)"
+        } else {
+            ""
+        };
+        let sql = format!(
+            "{select} WHERE deleted = 0{filter} ORDER BY updated_at DESC, rowid DESC LIMIT ?1"
+        );
+        let mut statement = self.connection.prepare(&sql)?;
+        let limit = i64::try_from(limit)?;
+        let mut rows = match after {
+            Some((stamp, row_id)) => statement.query(params![limit, stamp, row_id])?,
+            None => statement.query([limit])?,
+        };
+        let mut page = Vec::new();
+        while let Some(row) = rows.next()? {
+            page.push((row.get("page_row_id")?, Self::row_to_memory(row)?));
+        }
+        Ok(page)
+    }
+}
+
 pub struct ScopedQueryLogRow {
     pub id: i64,
     pub recorded_at: String,
@@ -130,6 +218,48 @@ mod tests {
         let (page, totals) = store.scoped_query_log(200)?;
         assert!(page.is_empty());
         assert_eq!(totals.total, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn active_memory_reads_use_full_ids_tombstones_and_stable_ties() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let store = LocalStore::open(&temp.path().join("library.db"))?;
+        for (id, stamp) in [("abc-older", "1"), ("abc-first", "2"), ("abc-last", "2")] {
+            let mut row = crate::memory::model::StoredMemory::new_pending(id.into(), "owner".into());
+            row.updated_at = stamp.into();
+            store.put_inner(&row, false)?;
+        }
+        store.connection.execute("UPDATE memories SET deleted=1 WHERE id='abc-older'", [])?;
+
+        assert!(store.active_memory_exact("abc")?.is_none());
+        assert!(store.active_memory_exact("abc-older")?.is_none());
+        assert!(store.active_memory_exact("abc-first")?.is_some());
+        let first = store.active_memory_page(1, None)?;
+        let (row_id, first) = first.first().ok_or_else(|| anyhow::anyhow!("empty first page"))?;
+        assert_eq!(first.id, "abc-last");
+        let next = store.active_memory_page(201, Some((&first.updated_at, *row_id)))?;
+        assert_eq!(next.iter().map(|(_, row)| row.id.as_str()).collect::<Vec<_>>(), ["abc-first"]);
+        assert!(store.active_memory_page(202, None).is_err());
+        assert!(!store.forget_memory_exact("abc")?);
+        assert!(!store.forget_memory_exact("abc-%")?);
+        assert!(!store.forget_memory_exact("missing")?);
+        assert!(store.active_memory_exact("abc-first")?.is_some());
+        store.connection.execute(
+            "UPDATE memories SET updated_at = '2026-01-01T00:00:00Z' WHERE id = 'abc-first'", [],
+        )?;
+        assert!(store.forget_memory_exact("abc-first")?);
+        assert!(!store.forget_memory_exact("abc-first")?);
+        assert!(store.active_memory_exact("abc-first")?.is_none());
+        assert!(store.active_memory_exact("abc-last")?.is_some());
+        let (deleted, dirty, stamp): (bool, bool, String) = store.connection.query_row(
+            "SELECT deleted, dirty, updated_at FROM memories WHERE id = 'abc-first'",
+            [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        assert!(deleted && dirty);
+        assert!(crate::transport::timestamp_after(Some(&stamp)).is_ok());
+        assert!(stamp.as_str() > "2026-01-01T00:00:00Z");
+        assert!(store.sync_counts()?.0 > 0);
         Ok(())
     }
 

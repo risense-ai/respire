@@ -183,7 +183,7 @@ pub(super) fn service(work: Work, store: Option<&LocalStore>, ownership: &Librar
         return;
     }
     let result = crate::rpc_serve::with_verified_owner_store_scope(
-        |account, profile, instance, generation, vault_epoch| {
+        |account, profile, instance, generation, vault_epoch, _| {
             let live = binding(account, profile, instance, generation, vault_epoch);
             if live != owner {
                 return Err(unauthorized());

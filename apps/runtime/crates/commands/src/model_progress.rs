@@ -77,10 +77,15 @@ fn check_progress_at(progress: &Progress, now: Instant) -> Result<()> {
 impl Operation {
     /// Reserve cancellation/progress before acknowledging a queued task.
     pub fn reserve_task(id: String) -> Result<Self> {
+        Self::try_reserve_task(id)?.ok_or_else(|| anyhow!("another model operation is running"))
+    }
+
+    pub(crate) fn try_reserve_task(id: String) -> Result<Option<Self>> {
         let _scope = TaskScope::new(Some(id));
-        let operation = Self::try_begin_inner("queued", true, true)?
-            .ok_or_else(|| anyhow!("another model operation is running"))?;
-        TRACKED.set(false);
+        let operation = Self::try_begin_inner("queued", true, true)?;
+        if operation.is_some() {
+            TRACKED.set(false);
+        }
         Ok(operation)
     }
     pub fn enter_thread(&self) {

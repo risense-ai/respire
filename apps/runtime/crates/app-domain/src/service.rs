@@ -20,8 +20,10 @@ use crate::sync::{remote_configured, sync_all};
 use crate::transport::local::LocalStore;
 use crate::transport::MemoryTransport;
 
+mod host_config_transaction;
+pub use host_config_transaction::{recover_host_config, HostConfigTransaction};
 mod deepen;
-pub use deepen::{deepen_plan, DeepenAuto, DeepenRoot};
+pub use deepen::{deepen_plan, deepen_suggestions, scoped_deepen_plan, DeepenAuto, DeepenRoot};
 mod merge;
 pub use merge::{merge_entries, merge_entries_with_metadata, merge_entries_with_metadata_revision};
 

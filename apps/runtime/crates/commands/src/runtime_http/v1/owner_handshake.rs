@@ -18,17 +18,16 @@ use super::owner_scope::{Denied, OwnerBinding, OwnerLeaseRegistry};
 use axum::http::request::Parts;
 
 pub(super) fn routes(bound: SocketAddr) -> axum::Router {
-    use axum::{
-        extract::{ConnectInfo, Request},
-        routing::post,
-    };
-    axum::Router::new().route(
-        "/v1/auth/handshake",
-        post(
-            move |ConnectInfo(crate::network::Peer(peer)): ConnectInfo<crate::network::Peer>,
-                  request: Request| { serve(request, peer, bound) },
-        ),
+    use super::registration::{bind, RouteSpec, Verb};
+    use axum::extract::{ConnectInfo, Request};
+
+    bind(
+        axum::Router::new(),
+        RouteSpec::new(Verb::Post, "/v1/auth/handshake", "exchangePrivateOwnerProof"),
+        move |ConnectInfo(crate::network::Peer(peer)): ConnectInfo<crate::network::Peer>,
+              request: Request| serve(request, peer, bound),
     )
+    .method_not_allowed_fallback(super::method_not_allowed)
 }
 
 async fn serve(request: axum::extract::Request, peer: SocketAddr, bound: SocketAddr) -> Response {

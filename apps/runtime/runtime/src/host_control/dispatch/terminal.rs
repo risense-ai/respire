@@ -99,6 +99,9 @@ pub(super) fn dispatch(
             serde_json::to_value(result).map_err(|_| ("auth_outcome_unknown", "auth result encoding failed"))?, Vec::new()));
         return Ok(());
     }
+    if request.method == offline_setting::METHOD {
+        return offline_setting::dispatch(grant, &request, response, control_ready);
+    }
     let (params, model_params) = validate_request(&request)?;
     let verify_binding = if request.method == HostControlOperation::MemoryRevision.method() {
         crate::startup_identity::verify_memory_revision_binding

@@ -71,6 +71,67 @@ impl SyncControl for DirectSync {
         action()
     }
 }
+/// The dispatcher lends the active store and vault for one local sync phase.
+pub struct SyncLocal<'a> {
+    store: &'a LocalStore,
+    keys: &'a SessionKeys,
+}
+
+impl<'a> SyncLocal<'a> {
+    pub(crate) fn new(store: &'a LocalStore, keys: &'a SessionKeys) -> Self {
+        Self { store, keys }
+    }
+
+    pub fn begin_epoch(&self, epoch: &str) -> Result<bool> {
+        self.store.begin_sync_epoch_requeued(epoch)
+    }
+}
+
+pub trait SyncAccess {
+    fn progress(&self, _phase: &str) {}
+    fn local<T: Send + 'static>(
+        &self,
+        action: impl FnOnce(SyncLocal<'_>) -> Result<T> + Send + 'static,
+    ) -> Result<T>;
+    fn remote<T>(&self, action: impl FnOnce() -> Result<T>) -> Result<T>;
+
+    fn begin_epoch(&self, epoch: String) -> Result<bool>;
+}
+
+struct DirectAccess<'a, C> {
+    store: &'a LocalStore,
+    keys: &'a SessionKeys,
+    control: &'a C,
+}
+
+impl<C: SyncControl> SyncAccess for DirectAccess<'_, C> {
+    fn progress(&self, phase: &str) {
+        self.control.progress(phase);
+    }
+
+    fn local<T: Send + 'static>(
+        &self,
+        action: impl FnOnce(SyncLocal<'_>) -> Result<T> + Send + 'static,
+    ) -> Result<T> {
+        self.control
+            .local(|| action(SyncLocal::new(self.store, self.keys)))
+    }
+
+    fn remote<T>(&self, action: impl FnOnce() -> Result<T>) -> Result<T> {
+        self.control.remote(action)
+    }
+
+    fn begin_epoch(&self, epoch: String) -> Result<bool> {
+        self.control.local(|| {
+            let requeued = self.store.begin_sync_epoch_requeued(&epoch)?;
+            if requeued {
+                self.control.boundary_changed()?;
+            }
+            Ok(requeued)
+        })
+    }
+}
+
 pub fn sync_all(
     keys: &SessionKeys,
     local: &LocalStore,
@@ -85,21 +146,34 @@ pub fn sync_controlled(
     control: &impl SyncControl,
     boundary: Option<i64>,
 ) -> Result<SyncStats> {
-    control.local(|| {
-        local.ensure_snapshot_sync_allowed()?;
-        crate::metadata_gate::ensure_sync_allowed(local)?;
-        local.maintain_sync_storage()
-    })?;
+    sync_with_access(
+        remote,
+        &DirectAccess {
+            store: local,
+            keys,
+            control,
+        },
+        boundary,
+    )
+}
+
+pub fn sync_with_access(
+    remote: &impl MemoryTransport,
+    control: &impl SyncAccess,
+    boundary: Option<i64>,
+) -> Result<SyncStats> {
+    control.local(check_local)?;
     let captured_boundary = boundary.is_some();
     let mut boundary = match boundary {
         Some(value) => value,
-        None => control.local(|| local.outgoing_boundary())?,
+        None => control.local(move |local| local.store.outgoing_boundary())?,
     };
     let started = std::time::Instant::now();
     let mut stats = SyncStats::default();
-    let cached_epoch = control.local(|| local.meta_get("sync_v2_epoch"))?;
+    let cached_epoch = control.local(move |local| local.store.meta_get("sync_v2_epoch"))?;
     control.progress("capabilities");
-    let cached_support = control.local(|| local.meta_get("sync_v2_resolution_support"))?;
+    let cached_support =
+        control.local(move |local| local.store.meta_get("sync_v2_resolution_support"))?;
     let capability =
         if let Some(epoch) = cached_epoch.filter(|_| cached_support.as_deref() == Some("1")) {
             // Once negotiated, use v2 directly. A 404/epoch error must not downgrade.
@@ -117,21 +191,15 @@ pub fn sync_controlled(
         if !cap.protocols.contains(&2) {
             anyhow::bail!("server does not offer a compatible sync protocol");
         }
-        let requeued = control.local(|| {
-            let requeued = local.begin_sync_epoch_requeued(&cap.epoch)?;
-            if requeued {
-                control.boundary_changed()?;
-            }
-            Ok(requeued)
-        })?;
+        let requeued = control.begin_epoch(cap.epoch.clone())?;
         if requeued && captured_boundary {
             anyhow::bail!(SyncBoundaryChanged);
         }
         if !captured_boundary {
-            boundary = control.local(|| local.outgoing_boundary())?;
+            boundary = control.local(move |local| local.store.outgoing_boundary())?;
         }
-        control.local(|| {
-            local.meta_set(
+        control.local(move |local| {
+            local.store.meta_set(
                 "sync_v2_resolution_support",
                 if cap.conflict_resolution { "1" } else { "0" },
             )
@@ -139,15 +207,13 @@ pub fn sync_controlled(
         stats.resolution_supported = cap.conflict_resolution;
         stats.protocol = 2;
         let snapshot = control
-            .local(|| local.meta_get("sync_v2_snapshot_done"))?
+            .local(move |local| local.store.meta_get("sync_v2_snapshot_done"))?
             .as_deref()
             != Some("1");
-        pull_pages(
-            keys, local, remote, control, &cap.epoch, snapshot, &mut stats,
-        )?;
+        pull_pages(remote, control, &cap.epoch, snapshot, &mut stats)?;
         let mut had_outgoing = false;
         loop {
-            let items = control.local(|| local.outgoing_through(boundary))?;
+            let items = control.local(move |local| local.store.outgoing_through(boundary))?;
             if items.is_empty() {
                 break;
             }
@@ -159,36 +225,46 @@ pub fn sync_controlled(
             control.progress("push");
             let reply = control.remote(|| remote.push_v2(&request))?;
             control.progress("apply");
-            stats.pushed +=
-                control.local(|| local.acknowledge(&request.items, &reply.results, false))?;
+            stats.pushed += control.local(move |local| {
+                local
+                    .store
+                    .acknowledge(&request.items, &reply.results, false)
+            })?;
         }
         if had_outgoing {
-            pull_pages(keys, local, remote, control, &cap.epoch, false, &mut stats)?;
+            pull_pages(remote, control, &cap.epoch, false, &mut stats)?;
         }
         let mut materialized_after = String::new();
         control.progress("materialize");
-        while let Some(next) =
-            control.local(|| local.materialize_received_batch(keys, &materialized_after))?
-        {
+        while let Some(next) = control.local({
+            let after = materialized_after.clone();
+            move |local| local.store.materialize_received_batch(local.keys, &after)
+        })? {
             materialized_after = next;
         }
         if cap.conflict_resolution {
-            pull_resolution_pages(local, remote, control, &cap.epoch)?;
+            pull_resolution_pages(remote, control, &cap.epoch)?;
         }
         let mut classified_after = 0;
         control.progress("conflicts");
-        while let Some(next) = control.local(|| {
-            local.classify_conflicts_batch(keys, cap.conflict_resolution, classified_after)
+        while let Some(next) = control.local(move |local| {
+            local.store.classify_conflicts_batch(
+                local.keys,
+                cap.conflict_resolution,
+                classified_after,
+            )
         })? {
             classified_after = next;
         }
         if cap.conflict_resolution {
             let mut sent = false;
             let mut resolution_after = 0;
-            let resolution_until = control.local(|| local.resolution_boundary())?;
+            let resolution_until = control.local(move |local| local.store.resolution_boundary())?;
             loop {
-                let items = control.local(|| {
-                    local.outgoing_resolutions_through(resolution_after, resolution_until)
+                let items = control.local(move |local| {
+                    local
+                        .store
+                        .outgoing_resolutions_through(resolution_after, resolution_until)
                 })?;
                 if items.is_empty() {
                     break;
@@ -201,38 +277,51 @@ pub fn sync_controlled(
                     resolution_after = last.conflict_rev;
                 }
                 let reply = control.remote(|| remote.resolve_conflicts(&request))?;
-                control
-                    .local(|| local.acknowledge_resolutions(&cap.epoch, &request.items, &reply))?;
+                control.local(move |local| {
+                    local
+                        .store
+                        .acknowledge_resolutions(&request.epoch, &request.items, &reply)
+                })?;
                 sent = true;
             }
             if sent {
-                pull_resolution_pages(local, remote, control, &cap.epoch)?;
+                pull_resolution_pages(remote, control, &cap.epoch)?;
             }
             // A processed explicit decision can release a protected diary
             // working branch. Apply that decision in this sync, not a later one.
             let mut after = String::new();
             control.progress("materialize");
-            while let Some(next) = control.local(|| local.materialize_received_batch(keys, &after))? {
+            while let Some(next) = control.local({
+                let cursor = after.clone();
+                move |local| local.store.materialize_received_batch(local.keys, &cursor)
+            })? {
                 after = next;
             }
         }
     } else {
-        if control.local(|| local.meta_get("sync_v2_epoch"))?.is_some() {
+        if control
+            .local(move |local| local.store.meta_get("sync_v2_epoch"))?
+            .is_some()
+        {
             anyhow::bail!("server sync capability degraded; refusing silent fallback; pending local changes kept");
         }
         stats.protocol = 1;
         let cursor = control
-            .local(|| local.meta_get("sync_cursor"))?
+            .local(move |local| local.store.meta_get("sync_cursor"))?
             .and_then(|s| s.parse().ok());
         control.progress("pull");
         let reply = control.remote(|| remote.fetch_rev(cursor))?;
         stats.remote_total = reply.total as usize;
         stats.remote_alive = reply.alive as usize;
         control.progress("apply");
-        stats.pulled += control.local(|| local.apply_legacy(keys, reply.blobs, reply.cursor))?;
+        stats.pulled += control.local(move |local| {
+            local
+                .store
+                .apply_legacy(local.keys, reply.blobs, reply.cursor)
+        })?;
         let mut sent = false;
         loop {
-            let items = control.local(|| local.outgoing_through(boundary))?;
+            let items = control.local(move |local| local.store.outgoing_through(boundary))?;
             if items.is_empty() {
                 break;
             }
@@ -253,30 +342,31 @@ pub fn sync_controlled(
                     head_rev: 0,
                 })
                 .collect();
-            stats.pushed += control.local(|| local.acknowledge(&items, &receipts, true))?;
+            stats.pushed +=
+                control.local(move |local| local.store.acknowledge(&items, &receipts, true))?;
         }
         if sent {
             control.progress("pull");
             let again = control.remote(|| remote.fetch_rev(Some(reply.cursor)))?;
             stats.remote_total = again.total as usize;
             stats.remote_alive = again.alive as usize;
-            stats.pulled +=
-                control.local(|| local.apply_legacy(keys, again.blobs, again.cursor))?;
+            stats.pulled += control.local(move |local| {
+                local
+                    .store
+                    .apply_legacy(local.keys, again.blobs, again.cursor)
+            })?;
         }
     }
     control.progress("verify");
-    control.local(|| {
-        local.ensure_snapshot_sync_allowed()?;
-        crate::metadata_gate::ensure_sync_allowed(local)?;
-        local.maintain_sync_storage()
-    })?;
-    (stats.pending, stats.conflicts, stats.undecodable) = control.local(|| local.sync_counts())?;
+    control.local(check_local)?;
+    (stats.pending, stats.conflicts, stats.undecodable) =
+        control.local(move |local| local.store.sync_counts())?;
     (
         stats.conflict_history,
         stats.processed_conflicts,
         stats.historical_conflicts,
         stats.resolving_conflicts,
-    ) = control.local(|| local.conflict_metrics())?;
+    ) = control.local(move |local| local.store.conflict_metrics())?;
     if crate::env::var_os("RSRS_SYNC_TIMING").is_some() {
         eprintln!(
             "sync protocol={} elapsed_ms={} pulled={} pushed={} pending={} conflicts={}",
@@ -291,14 +381,19 @@ pub fn sync_controlled(
     Ok(stats)
 }
 
+fn check_local(local: SyncLocal<'_>) -> Result<()> {
+    local.store.ensure_snapshot_sync_allowed()?;
+    crate::metadata_gate::ensure_sync_allowed(local.store)?;
+    local.store.maintain_sync_storage()
+}
+
 fn pull_resolution_pages(
-    local: &LocalStore,
     remote: &impl MemoryTransport,
-    control: &impl SyncControl,
+    control: &impl SyncAccess,
     epoch: &str,
 ) -> Result<()> {
     let mut after = control
-        .local(|| local.meta_get("sync_v2_resolution_cursor"))?
+        .local(move |local| local.store.meta_get("sync_v2_resolution_cursor"))?
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
     let mut until = None;
@@ -307,10 +402,11 @@ fn pull_resolution_pages(
         if page.epoch != epoch || until.is_some_and(|h| h != page.until) {
             anyhow::bail!("resolution snapshot changed");
         }
-        control.local(|| local.apply_resolution_page(&page))?;
         after = page.cursor;
         until = Some(page.until);
-        if !page.has_more {
+        let has_more = page.has_more;
+        control.local(move |local| local.store.apply_resolution_page(&page))?;
+        if !has_more {
             break;
         }
     }
@@ -323,10 +419,8 @@ fn merge_blobs(keys: &SessionKeys, local: &LocalStore, blobs: Vec<StoredMemory>)
 }
 
 fn pull_pages(
-    keys: &SessionKeys,
-    local: &LocalStore,
     remote: &impl MemoryTransport,
-    control: &impl SyncControl,
+    control: &impl SyncAccess,
     epoch: &str,
     snapshot: bool,
     stats: &mut SyncStats,
@@ -337,12 +431,12 @@ fn pull_pages(
         "sync_v2_cursor"
     };
     let mut after = control
-        .local(|| local.meta_get(key))?
+        .local(move |local| local.store.meta_get(key))?
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
     let mut until = if snapshot {
         control
-            .local(|| local.meta_get("sync_v2_snapshot_until"))?
+            .local(move |local| local.store.meta_get("sync_v2_snapshot_until"))?
             .and_then(|s| s.parse().ok())
     } else {
         None
@@ -360,9 +454,9 @@ fn pull_pages(
             {
                 restarted = true;
                 if snapshot {
-                    control.local(|| {
-                        local.meta_set("sync_v2_snapshot_cursor", "0")?;
-                        local.meta_set("sync_v2_snapshot_until", "")
+                    control.local(move |local| {
+                        local.store.meta_set("sync_v2_snapshot_cursor", "0")?;
+                        local.store.meta_set("sync_v2_snapshot_until", "")
                     })?;
                     after = 0;
                 }
@@ -375,12 +469,14 @@ fn pull_pages(
             anyhow::bail!("server page snapshot changed");
         }
         control.progress("apply");
-        stats.pulled += control.local(|| local.apply_page(keys, &page, snapshot))?;
         stats.remote_total = page.total as usize;
         stats.remote_alive = page.alive as usize;
         after = page.cursor;
         until = Some(page.until);
-        if !page.has_more {
+        let has_more = page.has_more;
+        stats.pulled +=
+            control.local(move |local| local.store.apply_page(local.keys, &page, snapshot))?;
+        if !has_more {
             break;
         }
     }
@@ -410,8 +506,8 @@ pub fn build_remote_from_env() -> Result<RemoteTransport> {
     let addr = crate::env::var("RSRS_ADDR").map_err(|_| {
         anyhow::anyhow!("sync needs RSRS_ADDR (server address) or a prior register/login")
     })?;
-    let token = crate::env::var("RSRS_TOKEN")
-        .map_err(|_| anyhow::anyhow!("sync needs RSRS_TOKEN"))?;
+    let token =
+        crate::env::var("RSRS_TOKEN").map_err(|_| anyhow::anyhow!("sync needs RSRS_TOKEN"))?;
     Ok(RemoteTransport::new(
         crate::transport::remote::RemoteConfig {
             address: addr,

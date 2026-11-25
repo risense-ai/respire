@@ -4,12 +4,17 @@ use axum::{
     http::{self, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{any, get},
+    routing::any,
     Router,
 };
 use std::net::SocketAddr;
 
 mod compatibility;
+mod diary;
+mod host_config;
+mod host_config_patch;
+mod models;
+pub(crate) mod operations;
 pub(super) mod owner_control;
 mod owner_handshake;
 mod owner_native;
@@ -20,6 +25,15 @@ mod owner_scope;
 mod private_model_install;
 mod private_model_route;
 mod problem;
+mod reads;
+mod recall;
+mod registration;
+mod rest_dispatch;
+mod transport;
+mod writes;
+#[cfg(test)]
+mod route_parity;
+use registration::{bind, RouteSpec, Verb};
 use problem::{Problem, V1Result};
 
 #[derive(Clone)]
@@ -29,9 +43,9 @@ pub(super) struct V1State {
 
 pub(super) fn router(bound: SocketAddr) -> Router {
     let state = V1State { bound };
-    Router::new()
+    const HEALTH: RouteSpec = RouteSpec::new(Verb::Get, "/v1/health", "getHealth");
+    bind(Router::new(), HEALTH, health)
         // Explicit routes are merged here by operation-owning modules.
-        .route("/v1/health", get(health))
         .route("/v1", any(not_found))
         .route("/v1/", any(not_found))
         .route("/v1/{*unmatched}", any(not_found))
@@ -42,13 +56,22 @@ pub(super) fn router(bound: SocketAddr) -> Router {
         .merge(owner_routes::routes(bound))
         .merge(private_model_route::routes(bound))
         .merge(private_model_install::routes(bound))
+        .merge(reads::routes(bound))
+        .merge(host_config::routes(bound))
+        .merge(recall::routes(bound))
+        .merge(diary::routes(bound))
+        .merge(writes::routes(bound))
+        .merge(operations::routes(bound))
 }
 
 async fn health() -> V1Result<Response> {
-    let (identity, scoped_auth) = owner_control::bounded_blocking(|| {
+    let (identity, scoped_auth, operations) = owner_control::bounded_blocking(|| {
+        let identity = crate::rpc_serve::v1_health_identity();
+        let ready = matches!(identity, Some(("ready", _)));
         Ok((
-            crate::rpc_serve::v1_health_identity(),
-            owner_control::capable(),
+            identity,
+            ready && owner_control::capable(),
+            ready && owner_control::dispatch_live() && transport::has_live_scope(),
         ))
     })
     .await?;
@@ -59,10 +82,17 @@ async fn health() -> V1Result<Response> {
             "Runtime unavailable",
         ));
     };
+    let mut capabilities = Vec::new();
+    if operations {
+        capabilities.push("sse.operations.v1");
+    }
+    if scoped_auth {
+        capabilities.push("auth.handshake.v1");
+    }
     let payload = serde_json::json!({
         "status": status,
         "instance_id": instance_id,
-        "capabilities": if scoped_auth { &["auth.handshake.v1"][..] } else { &[] }
+        "capabilities": capabilities
     });
     Ok((
         [(http::header::CONTENT_TYPE, "application/json")],

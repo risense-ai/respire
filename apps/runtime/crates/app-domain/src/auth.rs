@@ -196,16 +196,106 @@ pub fn with_runtime_session_owner<T>(
     canonical_profile: &std::path::Path,
     action: impl FnOnce(&str, uuid::Uuid) -> T,
 ) -> Result<Option<T>> {
-    let unlocked = RUNTIME_SESSION.lock().map_err(|_| anyhow!("runtime session lock poisoned"))?;
-    let Some(session) = unlocked.as_ref() else { return Ok(None); };
-    let Some(owner) = session.owner.as_deref() else { return Ok(None); };
-    if session.profile != canonical_profile
-        || crate::service::data_dir().canonicalize()? != canonical_profile
-        || session.session != session_digest(&read_session_json()?)?
+    with_runtime_library(canonical_profile, |owner, epoch, _| action(owner, epoch))
+}
+
+fn current_runtime_session(session: &RuntimeSession, profile: &std::path::Path) -> Result<bool> {
+    Ok(session.profile == profile
+        && crate::service::data_dir().canonicalize()? == profile
+        && session.session == session_digest(&read_session_json()?)?)
+}
+
+#[path = "auth/recall.rs"]
+mod recall;
+#[path = "auth/deepen.rs"]
+mod deepen;
+pub use deepen::PlannedOutline;
+#[path = "auth/runtime_library.rs"]
+mod runtime_library;
+pub use runtime_library::{with_runtime_library, ModelSwitchVault, RuntimeLibrary};
+
+pub struct RuntimeMemoryPage {
+    pub entries: Vec<crate::MemoryEntry>,
+    pub next: Option<(String, i64)>,
+}
+
+impl RuntimeLibrary<'_> {
+    pub fn sync_access<'a>(&'a self, store: &'a crate::transport::local::LocalStore)
+        -> crate::sync::SyncLocal<'a>
     {
-        return Ok(None);
+        crate::sync::SyncLocal::new(store, self.0)
     }
-    Ok(Some(action(owner, session.authority_epoch)))
+
+    pub fn memory_exact(&self, store: &crate::transport::local::LocalStore, id: &str)
+        -> Result<Option<crate::MemoryEntry>>
+    {
+        store.active_memory_exact(id)?.map(|row| crate::MemoryEngine::open(self.0, &row)).transpose()
+    }
+
+    pub fn create_memory(&self, store: &crate::transport::local::LocalStore, entry: &crate::MemoryEntry)
+        -> Result<()>
+    {
+        self.commit_memory(store, entry, &entry.user, None)
+    }
+
+    pub fn update_memory_exact(
+        &self,
+        store: &crate::transport::local::LocalStore,
+        id: &str,
+        edit: impl FnOnce(&mut crate::MemoryEntry),
+    ) -> Result<Option<crate::MemoryEntry>> {
+        let Some(current) = store.active_memory_exact(id)? else { return Ok(None); };
+        let mut entry = crate::MemoryEngine::open(self.0, &current)?;
+        edit(&mut entry);
+        entry.updated_at = store.edit_stamp(id)?;
+        self.commit_memory(store, &entry, &current.user, Some(&current.ciphertext))?;
+        Ok(Some(entry))
+    }
+
+    fn commit_memory(&self, store: &crate::transport::local::LocalStore,
+        entry: &crate::MemoryEntry, storage_user: &str, previous: Option<&str>) -> Result<()>
+    {
+        crate::metadata_gate::ensure_write(store, entry)?;
+        crate::metadata_gate::ensure_sources(self.0, store, entry)?;
+        let sealed = crate::MemoryEngine::seal_for_indexing(self.0, entry, storage_user)?;
+        anyhow::ensure!(store.put_checked(&sealed, previous)?, "memory write was not committed");
+        Ok(())
+    }
+
+    pub fn memory_page(&self, store: &crate::transport::local::LocalStore,
+        limit: usize, after: Option<(&str, i64)>) -> Result<RuntimeMemoryPage>
+    {
+        anyhow::ensure!((1..=200).contains(&limit), "invalid memory page size");
+        let rows = store.active_memory_page(limit + 1, after)?;
+        let next = (rows.len() > limit)
+            .then(|| (rows[limit - 1].1.updated_at.clone(), rows[limit - 1].0));
+        let entries = rows.into_iter().take(limit)
+            .map(|(_, row)| crate::MemoryEngine::open(self.0, &row))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(RuntimeMemoryPage { entries, next })
+    }
+
+    pub fn diary_entries(&self, store: &crate::transport::local::LocalStore,
+        date: Option<&str>, day_of: impl Fn(&str) -> String) -> Result<Vec<crate::MemoryEntry>>
+    {
+        store.active_diary_entries(date, day_of)?.iter()
+            .map(|row| crate::MemoryEngine::open(self.0, row)).collect()
+    }
+
+    pub fn open_memory(&self, row: &crate::StoredMemory) -> Result<crate::MemoryEntry> {
+        crate::MemoryEngine::open(self.0, row)
+    }
+
+    pub fn append_diary(&self, store: &crate::transport::local::LocalStore, entry: &crate::MemoryEntry,
+        previous: &crate::StoredMemory, duplicates: &[&crate::StoredMemory]) -> Result<()>
+    {
+        crate::metadata_gate::ensure_write(store, entry)?;
+        crate::metadata_gate::ensure_sources(self.0, store, entry)?;
+        let sealed = crate::MemoryEngine::seal_for_indexing(self.0, entry, &previous.user)?;
+        anyhow::ensure!(store.put_diary_checked(&sealed, &previous.ciphertext, duplicates)?,
+            "diary write was not committed");
+        Ok(())
+    }
 }
 
 pub fn clear_runtime_session() -> Result<()> {

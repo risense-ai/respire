@@ -48,15 +48,11 @@
                     // for legacy tracks created before deterministic IDs were used.
                     let now_local = chrono::Local::now();
                     let day = now_local.format("%Y-%m-%d").to_string();
-                    let track_title = format!("\u{6d3b}\u{52a8}\u{8f68}\u{8ff9} {day}");
                     let line = format!("\u{3010}{}\u{3011}{}", now_local.format("%H:%M"), content.trim());
                     let all = store.all(false)?;
                     let user = current_user();
-                    let track_id = uuid::Uuid::new_v5(
-                        &uuid::Uuid::NAMESPACE_URL,
-                        format!("activity-track/{user}/{day}").as_bytes(),
-                    )
-                    .to_string();
+                    let (track_id, track_title) = diary_track_identity(&user, &day);
+                    let marker = diary_track_marker(&day);
                     let tracks = select_diary_tracks(&all, &track_id, &track_title, |memory| {
                         let author = MemoryEngine::open(&session, memory)?.user;
                         Ok(author == user || profile_owner.as_deref() == Some(author.as_str()))
@@ -69,7 +65,7 @@
                         for t in &tracks {
                             let full = MemoryEngine::open(&session, t)?;
                             for row in full.content.lines() {
-                                if row.trim() == format!("\u{3010}\u{6d3b}\u{52a8}\u{8f68}\u{8ff9}\u{3011}{day}")
+                                if row.trim() == marker
                                     || row.trim().is_empty()
                                 {
                                     continue;
@@ -116,7 +112,7 @@
                     }
                     // No track for today: create with a deterministic id (same id across devices that day; sync converges), then the generic create path
                     id = track_id;
-                    content = format!("\u{3010}\u{6d3b}\u{52a8}\u{8f68}\u{8ff9}\u{3011}{day}\n{line}");
+                    content = format!("{marker}\n{line}");
                     title = track_title;
                 } else {
                     content = respire_app::taxonomy::diary_content(&content);
