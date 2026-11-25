@@ -146,6 +146,8 @@ func TestInstallRuntimeIndependently(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			name := r.URL.Path
 			switch {
+			case name == "/repos/risense-ai/respire/releases" && r.URL.Query().Get("per_page") == "100" && r.URL.Query().Get("page") == "1":
+				_, _ = io.WriteString(w, "[]")
 			case name == "/repos/risense-ai/respire-cli/releases" && r.URL.Query().Get("per_page") == "20":
 				if denyCLI.Load() {
 					t.Error("Runtime installation queried a CLI release")

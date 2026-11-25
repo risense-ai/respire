@@ -59,8 +59,9 @@ fn paths_and_mirrors_fail_closed() -> Result<()> {
     assert!(download_origins(Some("https://unapproved.invalid")).is_err());
     let version = "2.0.0-dev.4";
     let name = "runtime-build-x86_64-unknown-linux-gnu.json";
-    let official = release_asset(RELEASE_BASE, &format!("v{version}/{name}"));
-    assert_eq!(official_asset_identity(&official), Some((version, name)));
+    let source = RuntimeReleaseSource::Legacy;
+    let official = source.browser_url(RELEASE_BASE, version, name);
+    assert_eq!(official_asset_identity(&official), Some((source, version, name)));
     for url in [
         format!("{MIRROR_PREFIX}/{official}"),
         format!("{official}?redirect=1"),
@@ -72,7 +73,7 @@ fn paths_and_mirrors_fail_closed() -> Result<()> {
     let asset = serde_json::json!({"id":1,"name":name,"size":32,"state":"uploaded", "digest":format!("sha256:{}", "a".repeat(64))});
     let release = serde_json::json!({"tag_name":format!("v{version}"),"draft":false,"assets":[asset.clone()]});
     assert_eq!(
-        public_asset(serde_json::from_value(release.clone())?, version, name, 32)?.id,
+        public_asset(serde_json::from_value(release.clone())?, source, version, name, 32)?.id,
         1
     );
     let mut invalid = Vec::new();
@@ -99,7 +100,7 @@ fn paths_and_mirrors_fail_closed() -> Result<()> {
         invalid.push(changed);
     }
     for changed in invalid {
-        assert!(public_asset(serde_json::from_value(changed)?, version, name, 32).is_err());
+        assert!(public_asset(serde_json::from_value(changed)?, source, version, name, 32).is_err());
     }
     Ok(())
 }

@@ -35,9 +35,11 @@ pub(super) fn save_receipt(manifest: &ManagedManifest) -> Result<()> {
 
 fn release_manifest(version: &str) -> Result<ManagedManifest> {
     let triple = release_triple()?;
-    let bytes = fetch_metadata(&release_asset(
+    let release = resolve_runtime_release(Some(version), default_runtime_channel())?;
+    let bytes = fetch_metadata(&release.source.browser_url(
         RELEASE_BASE,
-        &format!("v{version}/runtime-build-{triple}.json"),
+        &release.version,
+        &format!("runtime-build-{triple}.json"),
     ))?;
     let metadata: BuildMetadata = serde_json::from_slice(&bytes)?;
     metadata.validate(version, &triple)?;

@@ -34,6 +34,7 @@ type ReleaseInfo struct {
 	Draft      bool           `json:"draft"`
 	Prerelease bool           `json:"prerelease"`
 	Assets     []ReleaseAsset `json:"assets"`
+	component  string
 }
 
 // Compat is the CLI compatibility window a Runtime release declares.
@@ -225,16 +226,25 @@ func SelectRelease(list []ReleaseInfo, channel string) (ReleaseInfo, error) {
 // ReleaseAssetURL resolves the browser_download_url of an asset, rejecting
 // assets whose URL does not match the canonical download prefix for repo/tag.
 func ReleaseAssetURL(r ReleaseInfo, repo, name string) (string, error) {
-	prefix := "https://github.com/risense-ai/" + repo + "/releases/download/" + r.Tag + "/"
-	for _, a := range r.Assets {
-		if a.Name == name {
-			if a.URL != prefix+name {
-				return "", errors.New("unexpected release artifact URL")
-			}
-			return a.URL, nil
-		}
+	actual, err := r.assetRepository(repo)
+	if err != nil {
+		return "", err
 	}
-	return "", fmt.Errorf(i18n.Messagea74eaaa4a7bc2bf4, repo, Platform(), name)
+	prefix := "https://github.com/risense-ai/" + actual + "/releases/download/" + r.Tag + "/"
+	found := ""
+	for _, asset := range r.Assets {
+		if asset.Name != name {
+			continue
+		}
+		if found != "" || asset.URL != prefix+name {
+			return "", errors.New("unexpected or duplicate release artifact URL")
+		}
+		found = asset.URL
+	}
+	if found == "" {
+		return "", fmt.Errorf(i18n.Messagea74eaaa4a7bc2bf4, actual, Platform(), name)
+	}
+	return found, nil
 }
 
 func (m *Manager) fetchJSON(ctx context.Context, url string, v any) error {
@@ -331,31 +341,31 @@ func (m *Manager) LatestRuntime(ctx context.Context) (ReleaseInfo, RuntimeMetada
 	if err != nil {
 		return ReleaseInfo{}, RuntimeMetadata{}, err
 	}
-	list, err := m.fetchReleaseList(ctx, runtimeRepo, channel)
+	latest, err := m.latestComponentRelease(ctx, "runtime", runtimeRepo, channel)
 	if err != nil {
 		return ReleaseInfo{}, RuntimeMetadata{}, err
-	}
-	if channel == "stable" && (list[0].Prerelease || semver.Prerelease(list[0].Tag) != "") {
-		return ReleaseInfo{}, RuntimeMetadata{}, errors.New("stable channel returned a prerelease")
-	}
-	latest, err := SelectRelease(list, channel)
-	if err != nil {
-		return ReleaseInfo{}, RuntimeMetadata{}, errors.New("no published Runtime release")
 	}
 	var raw json.RawMessage
 	url, err := ReleaseAssetURL(latest, runtimeRepo, "runtime-build-"+target+".json")
 	if err != nil {
 		return latest, RuntimeMetadata{}, err
 	}
-	if err = m.fetchJSON(ctx, url, &raw); err != nil {
+	if err = m.componentMetadata(ctx, latest, url, &raw); err != nil {
 		return latest, RuntimeMetadata{}, err
 	}
 	meta, err := NormalizeRuntimeMetadata(raw)
 	if err != nil {
 		return latest, RuntimeMetadata{}, err
 	}
-	if err = CheckRuntimeMetadata(meta, latest.Tag, target); err != nil {
+	if err = CheckRuntimeMetadata(meta, latest.MetadataTag(), target); err != nil {
 		return latest, meta, err
+	}
+	if latest.component != "" {
+		for _, asset := range []string{meta.Binary, runtimeArchive(target)} {
+			if _, err := ReleaseAssetURL(latest, runtimeRepo, asset); err != nil {
+				return latest, meta, err
+			}
+		}
 	}
 	return latest, meta, nil
 }
@@ -369,28 +379,26 @@ func (m *Manager) LatestCLIBuild(ctx context.Context) (ReleaseInfo, CLIMetadata,
 	if err != nil {
 		return ReleaseInfo{}, CLIMetadata{}, err
 	}
-	list, err := m.fetchReleaseList(ctx, cliRepo, channel)
+	latest, err := m.latestComponentRelease(ctx, "cli", cliRepo, channel)
 	if err != nil {
 		return ReleaseInfo{}, CLIMetadata{}, err
-	}
-	if channel == "stable" && (list[0].Prerelease || semver.Prerelease(list[0].Tag) != "") {
-		return ReleaseInfo{}, CLIMetadata{}, errors.New("stable channel returned a prerelease")
-	}
-	latest, err := SelectRelease(list, channel)
-	if err != nil {
-		return ReleaseInfo{}, CLIMetadata{}, errors.New("no published CLI release")
 	}
 	var raw json.RawMessage
 	url, err := ReleaseAssetURL(latest, cliRepo, "cli-build-"+cliTarget+".json")
 	if err != nil {
 		return latest, CLIMetadata{}, err
 	}
-	if err = m.fetchJSON(ctx, url, &raw); err != nil {
+	if err = m.componentMetadata(ctx, latest, url, &raw); err != nil {
 		return latest, CLIMetadata{}, err
 	}
-	meta, err := NormalizeCLIMetadata(raw, latest.Tag, cliTarget)
+	meta, err := NormalizeCLIMetadata(raw, latest.MetadataTag(), cliTarget)
 	if err != nil {
 		return latest, meta, err
+	}
+	if latest.component != "" {
+		if _, err := ReleaseAssetURL(latest, cliRepo, meta.Binary); err != nil {
+			return latest, meta, err
+		}
 	}
 	return latest, meta, nil
 }

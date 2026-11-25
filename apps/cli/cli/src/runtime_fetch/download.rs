@@ -1,7 +1,3 @@
-fn release_asset(origin: &str, path: &str) -> String {
-    format!("{origin}/{RUNTIME_REPO}/releases/download/{path}")
-}
-
 /// Normalize a user-supplied mirror into a prefix origin, using the same rules
 /// as the model installer: http/https origin only, bare hosts default to
 /// https, and credentials, paths, queries or fragments are rejected.
@@ -118,40 +114,6 @@ pub(crate) fn default_runtime_channel_name() -> &'static str {
     runtime_channel_name(default_runtime_channel())
 }
 
-fn latest_runtime_release(channel: RuntimeChannel) -> Result<String> {
-    #[derive(Deserialize)]
-    struct Release {
-        tag_name: String,
-        draft: bool,
-        prerelease: bool,
-        published_at: Option<String>,
-    }
-
-    let mut latest: Option<String> = None;
-    for page in 1.. {
-        let url = format!("https://api.github.com/repos/{RUNTIME_REPO}/releases?per_page=100&page={page}");
-        let releases: Vec<Release> = serde_json::from_slice(&fetch_metadata(&url)?)
-            .context("invalid Runtime release listing")?;
-        let last_page = releases.len() < 100;
-        for release in releases {
-            let Some(version) = release.tag_name.strip_prefix('v') else { continue };
-            let matches_channel = match channel {
-                RuntimeChannel::Stable => !release.prerelease && !version.contains('-'),
-                RuntimeChannel::Dev => release.prerelease && version.contains("-dev."),
-            };
-            if !release.draft && release.published_at.is_some() && matches_channel && valid_version(version)
-                && latest.as_deref().is_none_or(|previous| semver_cmp(version, previous).is_gt())
-            {
-                latest = Some(version.to_owned());
-            }
-        }
-        if last_page {
-            break;
-        }
-    }
-    latest.with_context(|| format!("no public Runtime release in the {} channel", runtime_channel_name(channel)))
-}
-
 #[derive(Deserialize)]
 struct PublicAsset {
     id: u64,
@@ -161,22 +123,33 @@ struct PublicAsset {
     digest: String,
 }
 
-fn official_asset_identity(url: &str) -> Option<(&str, &str)> {
-    let path =
-        url.strip_prefix("https://github.com/risense-ai/respire-runtime/releases/download/v")?;
-    let (version, name) = path.split_once('/')?;
-    (valid_version(version) && safe_metadata_path(name) && !name.contains(['/', '?', '#', '%']))
-        .then_some((version, name))
+fn official_asset_identity(url: &str) -> Option<(RuntimeReleaseSource, &str, &str)> {
+    for source in [RuntimeReleaseSource::Monorepo, RuntimeReleaseSource::Legacy] {
+        let prefix = format!(
+            "{RELEASE_BASE}/{}/releases/download/{}",
+            source.repository(),
+            source.tag_prefix()
+        );
+        let Some(path) = url.strip_prefix(&prefix) else {
+            continue;
+        };
+        let (version, name) = path.split_once('/')?;
+        return (valid_version(version)
+            && safe_metadata_path(name)
+            && !name.contains(['/', '?', '#', '%']))
+        .then_some((source, version, name));
+    }
+    None
 }
-
 fn public_asset(
     release: PublicRelease,
+    source: RuntimeReleaseSource,
     version: &str,
     name: &str,
     limit: u64,
 ) -> Result<PublicAsset> {
     anyhow::ensure!(
-        !release.draft && release.tag_name == format!("v{version}"),
+        !release.draft && release.tag_name == source.tag(version),
         "invalid official Runtime release identity"
     );
     let mut matches = release
@@ -222,12 +195,12 @@ fn release_response(
             if !matches!(&error, ureq::Error::Status(429 | 502 | 503 | 504, _)) {
                 return Err(error.into());
             }
-            let Some((version, name)) = official_asset_identity(url) else {
+            let Some((source, version, name)) = official_asset_identity(url) else {
                 return Err(error.into());
             };
-            let api = format!("https://api.github.com/repos/{RUNTIME_REPO}/releases");
+            let api = source.api();
             let response = download_agent(DownloadTimeouts::default())
-                .get(&format!("{api}/tags/v{version}"))
+                .get(&format!("{api}/tags/{}", source.tag(version)))
                 .set("Accept", "application/vnd.github+json")
                 .set("User-Agent", "respire-cli")
                 .timeout(Duration::from_secs(30))
@@ -241,7 +214,13 @@ fn release_response(
                 bytes.len() <= MAX_METADATA_BYTES,
                 "official Runtime release metadata too large"
             );
-            let asset = public_asset(serde_json::from_slice(&bytes)?, version, name, limit)?;
+            let asset = public_asset(
+                serde_json::from_slice(&bytes)?,
+                source,
+                version,
+                name,
+                limit,
+            )?;
             let request = download_agent(DownloadTimeouts::default())
                 .get(&format!("{api}/assets/{}", asset.id))
                 .set("Accept", "application/octet-stream")

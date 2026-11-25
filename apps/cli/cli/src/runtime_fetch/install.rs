@@ -43,18 +43,13 @@ fn download_runtime_release(
             return Ok(binary);
         }
     }
-    let required = match pin {
-        Some(version) => version.to_owned(),
-        None => latest_runtime_release(channel)?,
-    };
+    let release = resolve_runtime_release(pin, channel)?;
+    let required = release.version;
     let _operation = model_progress::Operation::begin_download()?;
     let metadata_name = format!("runtime-build-{triple}.json");
     let origins = download_origins(mirror)?;
     // Mirrors carry archives only; metadata remains bound to the official source.
-    let metadata_bytes = fetch_metadata(&release_asset(
-        RELEASE_BASE,
-        &format!("v{required}/{metadata_name}"),
-    ))?;
+    let metadata_bytes = fetch_metadata(&release.source.browser_url(RELEASE_BASE, &required, &metadata_name))?;
     let metadata: BuildMetadata =
         serde_json::from_slice(&metadata_bytes).context("invalid runtime release metadata")?;
     metadata.validate(&required, &triple)?;
@@ -71,7 +66,7 @@ fn download_runtime_release(
                 .unwrap_or_else(|| format!("rsrs-runtime-{triple}.tar.gz"));
             let archive = stage.join(&archive_name);
             let actual = download_archive(
-                &release_asset(origin, &format!("v{required}/{archive_name}")),
+                &release.source.browser_url(origin, &required, &archive_name),
                 &archive,
             )?;
             anyhow::ensure!(
