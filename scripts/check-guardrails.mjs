@@ -7,40 +7,15 @@
 // 4. apps/client2/go.mod forbids go-sqlite3 or any sqlite3 driver;
 // 5. contracts/sync.lock.json exists and matches contracts/runtime-api/openapi.yaml SHA-256;
 // 6. .github/workflows/*.yml count <= 5;
-// 7. Zero CJK characters outside dedicated UI i18n files/fixtures.
+// 7. Zero CJK outside exact reviewed data in tracked text.
 
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { checkZeroCjk } from "./check-zero-cjk.mjs";
 
 const root = process.cwd();
 const errors = [];
-
-const CJK_REGEX = /[\u3000-\u303F\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF\uFF00-\uFFEF]/;
-const I18N_EXEMPT_REGEXES = [
-  /(^|\/)i18n(\/|\.js$|\.ts$|\.json$)/,
-  /(^|\/)locales\//,
-  /_zh(-CN|-TW)?\.(json|js|ts)$/,
-  /\.zh(-CN|-TW)?\.(json|js|ts)$/,
-  /^test-cases\/fixtures\/i18n\//,
-];
-const TEXT_EXTENSIONS = new Set([
-  ".md",
-  ".yml",
-  ".yaml",
-  ".mjs",
-  ".js",
-  ".ts",
-  ".json",
-  ".html",
-  ".css",
-  ".sh",
-  ".ps1",
-  ".txt",
-  ".toml",
-  ".rs",
-  ".go",
-]);
 
 function walkFiles(dir, predicate, acc = []) {
   if (!fs.existsSync(dir)) return acc;
@@ -150,22 +125,13 @@ if (fs.existsSync(workflowsDir)) {
   }
 }
 
-// 7. Strict Zero-CJK scan outside UI i18n paths
-const textFiles = walkFiles(root, (name) => {
-  const ext = path.extname(name).toLowerCase();
-  return TEXT_EXTENSIONS.has(ext) || name === ".gitattributes" || name === ".gitignore";
-});
-
-for (const file of textFiles) {
-  const relUnix = path.relative(root, file).replace(/\\/g, "/");
-  if (I18N_EXEMPT_REGEXES.some((re) => re.test(relUnix))) continue;
-  const lines = fs.readFileSync(file, "utf8").split(/\r?\n/);
-  for (let i = 0; i < lines.length; i += 1) {
-    if (CJK_REGEX.test(lines[i])) {
-      errors.push(`Non-i18n CJK text forbidden: ${relUnix}:${i + 1}`);
-      break;
-    }
-  }
+// 7. Scan all Git-tracked text and typed binary assets, without i18n path wildcards.
+let cjk;
+try {
+  cjk = checkZeroCjk(root);
+  errors.push(...cjk.reports);
+} catch (error) {
+  errors.push("Zero-CJK failed: " + error.message);
 }
 
 if (errors.length > 0) {
@@ -176,4 +142,4 @@ if (errors.length > 0) {
   process.exit(1);
 }
 
-console.log(`Respire guardrails passed (0 violations across ${textFiles.length} scanned files).`);
+console.log(`Respire guardrails passed (0 violations across ${cjk.textFiles} tracked text files; ${cjk.assets} typed assets; ${cjk.reviewed} reviewed CJK data files).`);

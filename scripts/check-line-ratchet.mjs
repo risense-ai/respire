@@ -7,7 +7,7 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const LIMIT = 600;
-const ANCHOR = "0d37248329500f4daadf70812882707a4a221147";
+const ANCHOR = "d8e6612ddc253ee99ae2d583823b54a4843f9cff";
 const MANIFEST = "scripts/line-ratchet-baseline.json";
 const TREE_LIMIT = 16 * 1024 * 1024;
 const BLOB_LIMIT = 128 * 1024 * 1024;

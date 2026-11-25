@@ -1,0 +1,287 @@
+{
+  "schema": 1,
+  "files": [
+    {
+      "path": "apps/cli/cli/test-cases/fixtures/i18n/synthetic-path.txt",
+      "lines": 1,
+      "sha256": "cb19faa56bfcd3659ee688399b984edd53c3405974b2578a0c60997fb6eddb7b",
+      "reason": "Synthetic compatibility fixture"
+    },
+    {
+      "path": "apps/cli/crates/commands/src/i18n/cli_zh.rs",
+      "lines": 24,
+      "sha256": "55a4cde3a9a8f1a2431927a418ff9a6cbe317b0e0c8ca65f059e6132e74fa6be",
+      "reason": "Translated UI catalog"
+    },
+    {
+      "path": "apps/cli/docs/i18n/respire-lite.md",
+      "lines": 1,
+      "sha256": "bcc510cd32c81e674ef88134e886d35d5ca69d44e194a5e549d7f67f4a553545",
+      "reason": "Approved localized embedded prompt"
+    },
+    {
+      "path": "apps/cli/docs/i18n/respire.md",
+      "lines": 1,
+      "sha256": "fa2d3d0ee00a352cb30b954d0c2d25f08e03da62aec70fccd5e3df9330df2d9b",
+      "reason": "Approved localized embedded prompt"
+    },
+    {
+      "path": "apps/client2/internal/desktop/frontend/ui/i18n.js",
+      "lines": 77,
+      "sha256": "f68847c16f431c9c68677b8aac0df6a8e8c1fed37b79f4dd0cdf0ca0ec83eea1",
+      "reason": "Translated UI catalog"
+    },
+    {
+      "path": "apps/client2/internal/desktop/frontend/ui/i18n/messages01.js",
+      "lines": 401,
+      "sha256": "95d20ffb1c95fe48399c55d3f454c3eafdf846cffa4c56cd39433de116af3f29",
+      "reason": "Translated UI catalog"
+    },
+    {
+      "path": "apps/client2/internal/desktop/frontend/ui/i18n/messages02.js",
+      "lines": 400,
+      "sha256": "b1111eb894eac3c41befa86b0c1bf1f3d35afb49210883c1759651eeb90a4266",
+      "reason": "Translated UI catalog"
+    },
+    {
+      "path": "apps/client2/internal/desktop/frontend/ui/i18n/messages03.js",
+      "lines": 400,
+      "sha256": "e90e6e95ada8f308bb267476f6bae8c2302710c20bc388956a8939c2ae7b9cac",
+      "reason": "Translated UI catalog"
+    },
+    {
+      "path": "apps/client2/internal/desktop/frontend/ui/i18n/messages04.js",
+      "lines": 23,
+      "sha256": "fa92c0e565a6cfddccbb4698d8ced049ff7aaece570e3ad15c651e09d05020db",
+      "reason": "Translated UI catalog"
+    },
+    {
+      "path": "apps/client2/internal/desktop/frontend/ui/i18n/translations1.js",
+      "lines": 348,
+      "sha256": "bece40354a98f7cbd192dba7764c8047156c458616de64f32cebd510d6e7f2ab",
+      "reason": "Translated UI catalog"
+    },
+    {
+      "path": "apps/client2/internal/desktop/frontend/ui/i18n/translations2.js",
+      "lines": 360,
+      "sha256": "03b0042d5e142d1e7263db49e01eca67164c6ef4dc3c1e2754d6d52db8a80bdc",
+      "reason": "Translated UI catalog"
+    },
+    {
+      "path": "apps/client2/internal/desktop/frontend/ui/i18n/translations3.js",
+      "lines": 323,
+      "sha256": "fc45515dff545bbf77c1b78c2200ad25369048430f830f074959d0f5f25f2214",
+      "reason": "Translated UI catalog"
+    },
+    {
+      "path": "apps/client2/internal/desktop/i18n/zh-CN/inject/respire-lite.md",
+      "lines": 50,
+      "sha256": "51b6bc0a221d457069467e20941e036faee3b0815e5d34c5df15c6ed70d0447e",
+      "reason": "Approved localized embedded prompt"
+    },
+    {
+      "path": "apps/client2/internal/desktop/i18n/zh-CN/inject/respire-off.md",
+      "lines": 14,
+      "sha256": "7de38263aab7330b0c31bd0a06da8a25a716e10ca99b8459bac87834cffb2ae2",
+      "reason": "Approved localized embedded prompt"
+    },
+    {
+      "path": "apps/client2/internal/desktop/i18n/zh-CN/inject/respire-readonly.md",
+      "lines": 37,
+      "sha256": "03c4ab96dc8f46e86c74e8c5f3abee6b758c353fab7fc8c20d244b6ffb98b8a5",
+      "reason": "Approved localized embedded prompt"
+    },
+    {
+      "path": "apps/client2/internal/desktop/i18n/zh-CN/inject/respire-workbuddy-ref.md",
+      "lines": 14,
+      "sha256": "3ed94176b87a4469a179e7ee6a66f13cfaa22171dcccac3dc3cd95ae0e2e41fc",
+      "reason": "Approved localized embedded prompt"
+    },
+    {
+      "path": "apps/client2/internal/desktop/i18n/zh-CN/inject/respire.md",
+      "lines": 168,
+      "sha256": "bc2a0c5623b06da84eda661962c14c43eb5cd0ba9a92c1f59d2390d9037d016f",
+      "reason": "Approved localized embedded prompt"
+    },
+    {
+      "path": "apps/client2/internal/i18n/messages_01.go",
+      "lines": 550,
+      "sha256": "190423b5fa3857accd5f3cf3b00191d7308258bd4559d5fdbfc31d9bdab5df65",
+      "reason": "Translated UI catalog"
+    },
+    {
+      "path": "apps/client2/internal/i18n/messages_02.go",
+      "lines": 244,
+      "sha256": "94cb9a85579b8aca6b563e74fdbaa820e9f441e1f1646194ae5363a2bb0a87fe",
+      "reason": "Translated UI catalog"
+    },
+    {
+      "path": "apps/client2/scripts/locales/zh-CN/ChineseSimplified.isl",
+      "lines": 289,
+      "sha256": "5a08c03eb3abb4a67c06bed740915782642234bef8919d7adde62dcd058ac80b",
+      "reason": "Localized installer and release data"
+    },
+    {
+      "path": "apps/client2/scripts/locales/zh-CN/diagnostic-log-patterns.json",
+      "lines": 8,
+      "sha256": "450b4929116719e0fee4ff573a2352d20d37fde6260ac4c6d1542caf0d042b2d",
+      "reason": "Localized installer and release data"
+    },
+    {
+      "path": "apps/client2/scripts/locales/zh-CN/release-notes.sh",
+      "lines": 10,
+      "sha256": "8a933a1eb0b84b0e2aed94e7948e6aee720e8ac832fa77b2a9943cd21abc07f2",
+      "reason": "Localized installer and release data"
+    },
+    {
+      "path": "apps/core/crates/core-ffi/src/i18n/legacy_notation.rs",
+      "lines": 4,
+      "sha256": "e2f00d17d1d5728c5e6a0815d158a6e8f6083d3843ce76f0fb76443d526ad75e",
+      "reason": "Core legacy wire and retrieval data"
+    },
+    {
+      "path": "apps/core/crates/core-ffi/src/i18n/legacy_taxonomy.rs",
+      "lines": 23,
+      "sha256": "488148bdf9cf04ed71762f482389c0c7f20e0e140c0a00b872b94daf26dbe371",
+      "reason": "Core legacy wire and retrieval data"
+    },
+    {
+      "path": "apps/core/crates/core-ffi/src/i18n/legacy_taxonomy_tag.txt",
+      "lines": 1,
+      "sha256": "d407fa723d02d47d8c8b4394b1e13033d72106ca10644e2b35e8e6fde74be07b",
+      "reason": "Core legacy wire and retrieval data"
+    },
+    {
+      "path": "apps/core/crates/core-ffi/src/i18n/test_data.rs",
+      "lines": 22,
+      "sha256": "8a9c88367bfedc1682508db6f27a7a0c07795bc9b045c919eacb3a738beac945",
+      "reason": "Synthetic compatibility fixture"
+    },
+    {
+      "path": "apps/core/crates/memory-core/src/i18n/fixtures.rs",
+      "lines": 71,
+      "sha256": "af1de3dfb184c25942be866fcd21ba9404699c652d21c23c2c269366da31cf5f",
+      "reason": "Synthetic compatibility fixture"
+    },
+    {
+      "path": "apps/core/crates/memory-core/src/i18n/query_terms.rs",
+      "lines": 11,
+      "sha256": "9b67fb9e7d57a9e27447c75984651b1bc47c93fa41a30e8ea7437cbc35aca34e",
+      "reason": "Core legacy wire and retrieval data"
+    },
+    {
+      "path": "apps/core/crates/memory-core/tests/fixtures/i18n/legacy_text.rs",
+      "lines": 4,
+      "sha256": "a15be4a021ef2391368c850f94fb5ff7f3f1e97f68ee87667f5b9da204d24faa",
+      "reason": "Synthetic compatibility fixture"
+    },
+    {
+      "path": "apps/core/crates/protocol/src/i18n/zh.rs",
+      "lines": 12,
+      "sha256": "51fa7871fe880f82e8ed210021d56e9eb9c4168e8393055e16a8e163b7603272",
+      "reason": "Core legacy wire and retrieval data"
+    },
+    {
+      "path": "apps/core/vendor/tokenizers/src/decoders/byte_fallback.rs",
+      "lines": 3,
+      "sha256": "f57f73fc29ab797230e8c458760eb5f0eebcaa93610a08a865ad3595a30809ba",
+      "reason": "Imported tokenizer multilingual test data"
+    },
+    {
+      "path": "apps/core/vendor/tokenizers/src/models/bpe/trainer.rs",
+      "lines": 28,
+      "sha256": "be052c26cd1d098ececfc8931d7ddca2e5891f710e114af2cab059ee5e839351",
+      "reason": "Imported tokenizer multilingual test data"
+    },
+    {
+      "path": "apps/core/vendor/tokenizers/src/models/unigram/lattice.rs",
+      "lines": 10,
+      "sha256": "b7a66e8f46c480315ae18c6c94757ec39cbbaf6efde12b9802fe6e5f9f4820a8",
+      "reason": "Imported tokenizer multilingual test data"
+    },
+    {
+      "path": "apps/core/vendor/tokenizers/src/models/unigram/model.rs",
+      "lines": 3,
+      "sha256": "d99b3a5e1960bea435575c29ae26be52cd54b4b10d91412ec0937d08dde98eb1",
+      "reason": "Imported tokenizer multilingual test data"
+    },
+    {
+      "path": "apps/core/vendor/tokenizers/src/models/unigram/trainer.rs",
+      "lines": 4,
+      "sha256": "c4529f1694c5c54c8eafe3adf862fde49109661612fcde25b7bfa00893784a10",
+      "reason": "Imported tokenizer multilingual test data"
+    },
+    {
+      "path": "apps/core/vendor/tokenizers/src/normalizers/byte_level.rs",
+      "lines": 1,
+      "sha256": "5ad4a0670b91d5d2b33a2a01278f41bae9885de49f2ccefbd2d8dc660ac2032c",
+      "reason": "Imported tokenizer multilingual test data"
+    },
+    {
+      "path": "apps/core/vendor/tokenizers/src/normalizers/strip.rs",
+      "lines": 2,
+      "sha256": "8ceb306f331da6313801da0336802487ad2ad1b802191e731f4705ac301728f3",
+      "reason": "Imported tokenizer multilingual test data"
+    },
+    {
+      "path": "apps/core/vendor/tokenizers/src/pre_tokenizers/bert.rs",
+      "lines": 5,
+      "sha256": "3c42e84deaeb603c30b0cf03bb123bbd6f759632c921408473f5e2e1c467876a",
+      "reason": "Imported tokenizer multilingual test data"
+    },
+    {
+      "path": "apps/core/vendor/tokenizers/src/pre_tokenizers/unicode_scripts/pre_tokenizer.rs",
+      "lines": 11,
+      "sha256": "464c66a0bd0fb51f4ed56873aa1f4cef13dabe7eebc0bc56f142d9faf2a470d1",
+      "reason": "Imported tokenizer multilingual test data"
+    },
+    {
+      "path": "apps/core/vendor/tokenizers/src/pre_tokenizers/unicode_scripts/scripts.rs",
+      "lines": 5,
+      "sha256": "46956d13bb88ee9b2d6b65adb1736f67cff9ad4eff36c0e9078f117167ad597d",
+      "reason": "Imported tokenizer multilingual test data"
+    },
+    {
+      "path": "apps/core/vendor/tokenizers/src/tokenizer/added_vocabulary.rs",
+      "lines": 2,
+      "sha256": "a4ad2273b735a0eae38e5f22f54a763bb823af98c4ce1f5973261df74802a75b",
+      "reason": "Imported tokenizer multilingual test data"
+    },
+    {
+      "path": "apps/core/vendor/tokenizers/src/tokenizer/normalizer.rs",
+      "lines": 6,
+      "sha256": "68f2e3eb035e1b82eef337893acdd8fdf16554e0bceae5761f996fcadc3eae53",
+      "reason": "Imported tokenizer multilingual test data"
+    },
+    {
+      "path": "apps/core/vendor/tokenizers/tests/stream.rs",
+      "lines": 8,
+      "sha256": "154d88c221cd828398a1ef7b8c4e8171af3ca36d0abd21df57ffd478eb56c273",
+      "reason": "Imported tokenizer multilingual test data"
+    },
+    {
+      "path": "apps/core/vendor/tokenizers/tests/unigram.rs",
+      "lines": 14,
+      "sha256": "62afa17eb04fff461f5c2a26403d8285f35d4be54c61d49a0b7aea228afe749a",
+      "reason": "Imported tokenizer multilingual test data"
+    },
+    {
+      "path": "apps/runtime/crates/commands/examples/cli_business_tests/diary_identity/i18n/stop_messages.rs",
+      "lines": 2,
+      "sha256": "8463ee58522a5cbf2cd3b6721679e7b1292dbe498414ac2425d961f9fd81c274",
+      "reason": "Synthetic compatibility fixture"
+    },
+    {
+      "path": "apps/runtime/docs/i18n/respire-lite.md",
+      "lines": 1,
+      "sha256": "bcc510cd32c81e674ef88134e886d35d5ca69d44e194a5e549d7f67f4a553545",
+      "reason": "Approved localized embedded prompt"
+    },
+    {
+      "path": "apps/runtime/docs/i18n/respire.md",
+      "lines": 1,
+      "sha256": "fa2d3d0ee00a352cb30b954d0c2d25f08e03da62aec70fccd5e3df9330df2d9b",
+      "reason": "Approved localized embedded prompt"
+    }
+  ]
+}

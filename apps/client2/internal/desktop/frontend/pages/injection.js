@@ -187,7 +187,7 @@ export function injection(root, ctx) {
 <button class="ag-detail" data-detail="${h(t.id)}" aria-expanded="${
       open ? "true" : "false"
     }${i18nMessages.md36602baf054ee60}${
-      open ? "︿" : "﹀"
+      open ? "\uFE3F" : "\uFE40"
     }</span></button>
 <label class="ag-switch"><input type="checkbox" data-toggle="${h(
       t.id,
