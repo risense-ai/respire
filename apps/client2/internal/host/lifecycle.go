@@ -137,5 +137,8 @@ func (m *Manager) Stop(ownedOnly bool) error {
 	if ownedOnly && !m.Owns(h.Exe) {
 		return errors.New(i18n.Message44d4204db8b80209)
 	}
+	if m.hostAuthority == nil && m.startupControl != nil {
+		return m.stopSelectedDetached(ctx, h)
+	}
 	return m.stopManaged(ctx, h)
 }

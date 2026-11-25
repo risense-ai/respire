@@ -347,3 +347,37 @@ func TestRealRuntimeColdLaunch(t *testing.T) {
 		t.Fatalf("discovery rewrote endpoint publication: %v", err)
 	}
 }
+
+func TestRealRuntimeStandaloneStop(t *testing.T) {
+	manager, info := realRuntimeManager(t)
+	ctx := realRuntimeContext(t)
+	health, err := manager.startDetached(ctx, info)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopped := false
+	t.Cleanup(func() {
+		if !stopped {
+			cleanupRealRuntime(t, manager, info)
+		}
+	})
+	if manager.hostAuthority != nil || manager.startupControl == nil {
+		t.Fatal("test did not use the production standalone Runtime path")
+	}
+	wrong := health
+	wrong.ProcessStartID += "-mismatch"
+	if err := manager.stopSelectedDetached(ctx, wrong); err == nil {
+		t.Fatal("wrong process identity was allowed to request Stop")
+	}
+	current, _, err := manager.Health(ctx)
+	if err != nil || current != health {
+		t.Fatalf("invalid Stop changed servicing process: %v", err)
+	}
+	if err := manager.Stop(true); err != nil {
+		t.Fatalf("owned standalone Stop failed: %v", err)
+	}
+	stopped = true
+	if err := requireClosedRuntimePort(ctx, strings.TrimPrefix(manager.Endpoint, "http://")); err != nil {
+		t.Fatal(err)
+	}
+}

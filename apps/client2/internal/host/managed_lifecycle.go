@@ -45,6 +45,41 @@ func (m *Manager) stopManaged(ctx context.Context, h HealthInfo) error {
 	return errors.New(i18n.Message7612dd2e3c38e61f)
 }
 
+// Ordinary standalone Stop needs no Go-side library lease or mutation. Keep
+// upgrade/maintenance transactions on their existing guarded path.
+func (m *Manager) stopSelectedDetached(ctx context.Context, h HealthInfo) error {
+	if h.ManagedID != "" {
+		return errors.New(i18n.Messagecbef8ccc12ad43e6)
+	}
+	selected, err := m.Installed()
+	if err != nil {
+		return err
+	}
+	if err := m.verifyRuntimeSelection(selected); err != nil {
+		return err
+	}
+	_, profile, account, err := m.startupScope()
+	if err != nil {
+		return err
+	}
+	if err := m.verifyScopedRuntimeOwner(ctx, h, selected, profile, account); err != nil {
+		return err
+	}
+	if err := m.stopDetached(ctx, h); err != nil {
+		return err
+	}
+	// The accepted-and-drained receipt proves only the original instance
+	// exited. Do not consider (or issue Stop to) a replacement successfully.
+	_, _, err = m.Health(ctx)
+	if IsUnavailable(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return errors.New(i18n.Message7612dd2e3c38e61f)
+}
+
 var runtimeInstanceID = regexp.MustCompile(`^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$`)
 
 func (m *Manager) stopDetached(ctx context.Context, h HealthInfo) error {
