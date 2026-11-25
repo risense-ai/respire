@@ -106,11 +106,12 @@ jobs:
   guardrails:
     name: guardrails
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 12
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Setup Node.js
@@ -119,7 +120,37 @@ jobs:
           node-version: "22"
 
       - name: Run architecture & Zero-CJK guardrails
-        run: node scripts/check-guardrails.mjs
+        run: |
+          node --test scripts/check-zero-cjk.test.mjs
+          node scripts/check-guardrails.mjs
+
+      - name: Verify tracked source line count ratchet
+        shell: bash
+        env:
+          RATCHET_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          set -euo pipefail
+          base="$RATCHET_BASE"
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            base=$(git rev-parse HEAD^)
+          fi
+          node --test scripts/check-line-ratchet.test.mjs
+          node scripts/check-line-ratchet.mjs --base "$base"
+
+          rustup toolchain install 1.95.0 --profile minimal
+          export CARGO_TARGET_DIR="$RUNNER_TEMP/respire-panic-guard"
+          cargo +1.95.0 test --locked --manifest-path scripts/rust-panic-guard/Cargo.toml
+          cargo +1.95.0 build --locked --manifest-path scripts/rust-panic-guard/Cargo.toml
+          export RESPIRE_RUST_PANIC_PARSER="$CARGO_TARGET_DIR/debug/respire-rust-panic-guard"
+          node --test scripts/check-rust-panic.test.mjs
+          node scripts/check-rust-panic.mjs --base "$base" --head "$(git rev-parse HEAD)" --parser "$RESPIRE_RUST_PANIC_PARSER"
+
+      - name: Verify locked Core dependency graph
+        env:
+          RUSTUP_TOOLCHAIN: 1.95.0
+        run: |
+          node --test scripts/check-core-dependencies.test.mjs
+          node scripts/check-core-dependencies.mjs
 
   contract-check:
     name: contract-check
@@ -372,6 +403,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Install Rust
@@ -381,9 +413,14 @@ jobs:
         with:
           node-version: "22"
 
+      - name: Install pinned parser for Runtime registration check
+        working-directory: packages/runtime-sdk-ts
+        run: npm ci --ignore-scripts
+
       - name: Build and link Runtime with Core from this checkout
         shell: bash
         env:
+          ROUTE_GAP_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
           TARGET: ${{ matrix.target }}
           RUSTUP_TOOLCHAIN: "1.95.0"
         run: |
@@ -397,6 +434,12 @@ jobs:
           mkdir -- "$RSRS_DATA_DIR"
           # Existing storage and migration tests opt into synthetic Core inference.
           RSRS_CORE_TEST_MODE=1 cargo test --manifest-path apps/runtime/Cargo.toml --locked --workspace --lib --tests --bins
+          node --test apps/runtime/scripts/test-v1-route-parity.test.mjs
+          route_gap_base="$ROUTE_GAP_BASE"
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            route_gap_base=$(git rev-parse HEAD^)
+          fi
+          RSRS_CORE_TEST_MODE=1 node apps/runtime/scripts/test-v1-route-parity.mjs --reviewed-gap-ratchet --base "$route_gap_base"
 
   cli-ci:
     name: cli-ci
