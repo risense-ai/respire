@@ -116,6 +116,19 @@ impl LocalSpaceNamespace {
     }
 
     pub fn receipt(&self, id: &str) -> io::Result<Option<Vec<u8>>> {
+        self.with_receipt(id, None::<fn(&[u8]) -> bool>, |_, receipt| receipt)
+    }
+
+    /// Keep the verified native directory open for the synchronous operation.
+    pub fn with_library_receipt<T>(
+        &self, id: &str, authorize: impl FnOnce(&[u8]) -> bool, use_path: impl FnOnce(&Path) -> T,
+    ) -> io::Result<Option<T>> {
+        self.with_receipt(id, Some(authorize), |path, _| use_path(path))
+    }
+
+    fn with_receipt<T>(
+        &self, id: &str, authorize: Option<impl FnOnce(&[u8]) -> bool>, use_path: impl FnOnce(&Path, Vec<u8>) -> T,
+    ) -> io::Result<Option<T>> {
         self.verify()?;
         let name = CString::new(format!("local-{}", checked_id(id)?)).map_err(|_| denied())?;
         let directory = match open_directory(self.catalog.as_raw_fd(), &name) {
@@ -128,7 +141,20 @@ impl LocalSpaceNamespace {
         if !identity.still_names(self.catalog.as_raw_fd(), &name) {
             return Err(denied());
         }
-        Ok(record)
+        if let (Some(receipt), Some(authorize)) = (record.as_deref(), authorize) {
+            if !authorize(receipt) {
+                return Ok(None);
+            }
+            verify_library_files(directory.as_raw_fd())?;
+        }
+        let result = record.map(|bytes| {
+            use_path(&self.path.join(std::ffi::OsStr::from_bytes(name.to_bytes())), bytes)
+        });
+        if !identity.still_names(self.catalog.as_raw_fd(), &name) {
+            return Err(denied());
+        }
+        self.verify()?;
+        Ok(result)
     }
 
     pub fn candidates(&self) -> io::Result<Vec<String>> {
@@ -145,6 +171,31 @@ impl LocalSpaceNamespace {
         }
         Ok(())
     }
+}
+
+fn verify_library_files(directory: RawFd) -> io::Result<()> {
+    for (leaf, required) in [
+        (c"onememory.db", true), (c"lock.db", true), (c"lock.db-journal", false),
+        (c"onememory.db-journal", false), (c"onememory.db-wal", false), (c"onememory.db-shm", false),
+    ] {
+        // O_NONBLOCK also keeps malformed non-regular entries from stalling.
+        let file = match named_file(directory, leaf, libc::O_RDONLY | libc::O_NONBLOCK, 0) {
+            Ok(file) => file,
+            Err(error) if !required && error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        let stat = file.metadata()?;
+        if !stat.is_file() || stat.nlink() != 1 || stat.uid() != unsafe { libc::geteuid() }
+            || stat.mode() & 0o022 != 0
+        {
+            return Err(denied());
+        }
+        reject_extended_acl(&file)?;
+        if !Identity::from_metadata(&stat).still_names(directory, leaf) {
+            return Err(denied());
+        }
+    }
+    Ok(())
 }
 
 impl FreshLocalSpace {

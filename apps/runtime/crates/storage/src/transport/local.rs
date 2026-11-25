@@ -147,19 +147,33 @@ impl LocalStore {
 
     /// Connect to a library already initialized by its runtime owner, without recovery writes.
     pub fn open_existing(path: &Path) -> Result<Self> {
-        if let Some(parent) = path.parent() {
-            respire_core_sdk::set_index_root(&std::fs::canonicalize(parent)?)?;
+        Self::open_existing_impl(path, None)
+    }
+
+    /// A published device library is already initialized. Its caller holds
+    /// the space ownership lock and supplies a scoped Core index root.
+    pub fn open_existing_device_space(path: &Path) -> Result<Self> {
+        Self::open_existing_impl(path, Some(std::time::Duration::from_millis(150)))
+    }
+
+    fn open_existing_impl(path: &Path, budget: Option<std::time::Duration>) -> Result<Self> {
+        if budget.is_none() {
+            if let Some(parent) = path.parent() {
+                respire_core_sdk::set_index_root(&std::fs::canonicalize(parent)?)?;
+            }
         }
-        let connection = Connection::open_with_flags(
-            path,
-            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )
+        let mut flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        if budget.is_some() {
+            flags |= OpenFlags::SQLITE_OPEN_NOFOLLOW;
+        }
+        let connection = Connection::open_with_flags(path, flags)
         .with_context(|| {
             format!("failed to open initialized local memory db: {}", path.display())
         })?;
         schema_version::require_supported(&connection)?;
         witness::register_witness_functions(&connection)?;
-        connection.execute_batch("PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 30000;")?;
+        connection.execute_batch("PRAGMA foreign_keys = ON;")?;
+        connection.busy_timeout(budget.unwrap_or(std::time::Duration::from_secs(30)))?;
         connection
             .prepare("SELECT seq, op_id, state FROM sync_outbox LIMIT 0")
             .context("runtime library schema is not initialized")?;

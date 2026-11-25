@@ -168,6 +168,40 @@ impl RuntimeLibrary<'_> {
         self.read_device_space(&area, installation, &key, id)
     }
 
+    /// Resolve and hold a committed device-local library, without changing
+    /// the active profile or retaining Core index state on this thread.
+    pub fn with_device_space_store<T>(
+        &self, ownership: &LibraryLock, raw: &str, current: impl Fn() -> bool,
+        run: impl FnOnce(&LocalStore) -> T,
+    ) -> Result<Option<T>> {
+        let Some(id) = id_from_path(raw) else { return Ok(None) };
+        let Some(area) = LocalSpaceNamespace::open_existing(
+            &self.device_space_installation(ownership)?,
+        )? else { return Ok(None) };
+        let Some(installation) = area.existing_installation()? else { return Ok(None) };
+        let key = crypto::derive_subkey(&self.0.urk, DOMAIN)?;
+        let candidate = id.simple().to_string();
+        area.with_library_receipt(
+            &candidate,
+            |receipt| self.verify_device_space(receipt, installation, &key, id).is_some(),
+            |path| {
+                if !current() {
+                    return Err(DeviceSpaceAuthorityChanged.into());
+                }
+                ensure!(path.canonicalize()? == path, "device local library path changed");
+                let lock = LibraryLock::try_acquire_device_space(path)?;
+                ensure!(lock.protects(path)?, "device local library ownership changed");
+                respire_core_sdk::with_index_root(Some(path), || {
+                    let store = LocalStore::open_existing_device_space(&path.join("onememory.db"))?;
+                    if !current() {
+                        return Err(DeviceSpaceAuthorityChanged.into());
+                    }
+                    Ok(run(&store))
+                })
+            },
+        )?.transpose()
+    }
+
     fn read_device_space(
         &self,
         area: &LocalSpaceNamespace,
@@ -178,27 +212,31 @@ impl RuntimeLibrary<'_> {
         let Some(receipt) = area.receipt(&id.simple().to_string())? else {
             return Ok(None);
         };
-        let Ok([nonce, sealed]) = serde_json::from_slice::<[String; 2]>(&receipt) else {
-            return Ok(None);
-        };
+        Ok(self.verify_device_space(&receipt, installation, key, id))
+    }
+
+    fn verify_device_space(
+        &self, receipt: &[u8], installation: [u8; 16], key: &[u8; 32], id: Uuid,
+    ) -> Option<DeviceSpace> {
+        let [nonce, sealed] = serde_json::from_slice::<[String; 2]>(receipt).ok()?;
         if nonce.len() != 24 || sealed.len() > 2 * (LIMIT + 16) {
-            return Ok(None);
+            return None;
         }
         let Ok(bytes) = crypto::decrypt_bytes(key, &sealed, &nonce) else {
-            return Ok(None);
+            return None;
         };
         if bytes.len() > LIMIT {
-            return Ok(None);
+            return None;
         }
         let Ok(claim) = serde_json::from_slice::<Claim>(&bytes) else {
-            return Ok(None);
+            return None;
         };
-        Ok((claim.version == 1
+        (claim.version == 1
             && claim.installation == Uuid::from_bytes(installation).to_string()
             && claim.profile == self.2
             && claim.account == self.1
             && claim.space == id.to_string()
             && valid_device_space_name(&claim.name))
-            .then(|| item(id, claim.name)))
+            .then(|| item(id, claim.name))
     }
 }

@@ -209,6 +209,10 @@ pub(super) fn space_id(ctx: &LibraryContext<'_>) -> V1Result<String> {
 }
 
 pub(super) fn check_space(ctx: &LibraryContext<'_>, requested: Option<String>) -> V1Result<()> {
+    check_requested_space(ctx, requested.as_deref())
+}
+
+fn check_requested_space(ctx: &LibraryContext<'_>, requested: Option<&str>) -> V1Result<()> {
     if let Some(requested) = requested {
         if requested != space_id(ctx)? {
             return Err(Problem::new(
@@ -221,6 +225,39 @@ pub(super) fn check_space(ctx: &LibraryContext<'_>, requested: Option<String>) -
     Ok(())
 }
 
+pub(super) fn is_device_local_space(space: Option<&str>) -> bool {
+    space.and_then(|space| space.strip_prefix("local-"))
+        .and_then(|id| uuid::Uuid::parse_str(id).ok().map(|uuid| (id, uuid)))
+        .is_some_and(|(id, uuid)| uuid.get_version_num() == 4 && uuid.simple().to_string() == id)
+}
+
+pub(super) fn with_memory_store<T>(
+    ctx: &LibraryContext<'_>,
+    requested: Option<String>,
+    run: impl FnOnce(&respire_app::transport::local::LocalStore, bool) -> V1Result<T>,
+) -> V1Result<T> {
+    if let Some(id) = requested.as_deref().filter(|id| is_device_local_space(Some(id))) {
+        return ctx.library.with_device_space_store(
+            ctx.ownership, id, || ctx.may_commit(), |store| run(store, true),
+        ).map_err(|_| {
+            if ctx.scope.bearer_is_current() { unavailable() } else { transport::unauthorized() }
+        })?.ok_or_else(|| Problem::new(StatusCode::NOT_FOUND, "space_not_found", "Space not found"))?;
+    }
+    check_space(ctx, requested)?;
+    run(ctx.store, false)
+}
+
+fn memory_page(
+    ctx: &LibraryContext<'_>, store: &respire_app::transport::local::LocalStore,
+    limit: usize, after: Option<(String, i64)>,
+) -> V1Result<Value> {
+    let after = after.as_ref().map(|(stamp, id)| (stamp.as_str(), *id));
+    let page = ctx.library.memory_page(store, limit, after).map_err(|_| unavailable())?;
+    let next = page.next.map(|key| serde_json::to_vec(&key).map(|bytes| URL_SAFE_NO_PAD.encode(bytes)))
+        .transpose().map_err(|_| unavailable())?;
+    Ok(json!({"items": page.entries.into_iter().map(item).collect::<Vec<_>>(), "next_cursor": next}))
+}
+
 pub(super) fn item(entry: respire_app::MemoryEntry) -> Value {
     json!({"id":entry.id, "content":entry.content, "title":entry.title, "tags":entry.tags,
         "category":entry.kind.as_str(), "parent_id":(!entry.parent_id.is_empty()).then_some(entry.parent_id),
@@ -229,8 +266,13 @@ pub(super) fn item(entry: respire_app::MemoryEntry) -> Value {
 
 impl Call {
     fn run(self, ctx: &LibraryContext<'_>, requested: Option<String>) -> V1Result<Value> {
-        check_space(ctx, requested)?;
+        if !matches!(self, Self::Page(..)) {
+            check_requested_space(ctx, requested.as_deref())?;
+        }
         match self {
+            Self::Page(limit, after) => with_memory_store(ctx, requested, |store, _| {
+                memory_page(ctx, store, limit, after)
+            }),
             Self::Memory(id) => ctx
                 .library
                 .memory_exact(ctx.store, &id)
@@ -243,21 +285,6 @@ impl Call {
                         "Memory not found",
                     )
                 }),
-            Self::Page(limit, after) => {
-                let after = after.as_ref().map(|(stamp, id)| (stamp.as_str(), *id));
-                let page = ctx
-                    .library
-                    .memory_page(ctx.store, limit, after)
-                    .map_err(|_| unavailable())?;
-                let next = page
-                    .next
-                    .map(|key| serde_json::to_vec(&key).map(|bytes| URL_SAFE_NO_PAD.encode(bytes)))
-                    .transpose()
-                    .map_err(|_| unavailable())?;
-                Ok(
-                    json!({"items": page.entries.into_iter().map(item).collect::<Vec<_>>(), "next_cursor":next}),
-                )
-            }
             Self::Light => {
                 let generation = ctx
                     .store

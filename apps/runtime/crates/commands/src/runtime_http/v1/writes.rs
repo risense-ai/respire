@@ -109,33 +109,49 @@ async fn create(
     if matches!(kind, Kind::Hypothesis | Kind::Reflection | Kind::SelfNote) {
         return Err(transport::invalid());
     }
-    let entry = rest_dispatch::submit(scope, Access::Write, move |ctx| {
-        super::reads::check_space(ctx, input.space_id)?;
-        if let Some(parent) = input.parent_id.as_deref() {
-            if ctx
-                .store
-                .active_memory_exact(parent)
-                .map_err(|_| transport::unavailable())?
-                .is_none()
-            {
-                return Err(missing_memory());
+    let scoped = super::reads::is_device_local_space(input.space_id.as_deref());
+    let create = move |ctx: &rest_dispatch::LibraryContext<'_>, admission: Option<&rest_dispatch::Admission>| {
+        super::reads::with_memory_store(ctx, input.space_id, |store, device_local| {
+            if let Some(parent) = input.parent_id.as_deref() {
+                if store
+                    .active_memory_exact(parent)
+                    .map_err(|_| transport::unavailable())?
+                    .is_none()
+                {
+                    return Err(missing_memory());
+                }
             }
-        }
-        let title = input
-            .title
-            .filter(|title| !title.trim().is_empty())
-            .unwrap_or_else(|| service::derive_title(&input.content));
-        let mut entry = new_entry(ctx.scope.account.clone(), title, input.content);
-        entry.parent_id = input.parent_id.unwrap_or_default();
-        entry.kind = kind;
-        entry.tags = input.tags;
-        ctx.library
-            .create_memory(ctx.store, &entry)
-            .map_err(write_failure)?;
-        notify();
-        Ok(entry)
-    })
-    .await?;
+            let title = input
+                .title
+                .filter(|title| !title.trim().is_empty())
+                .unwrap_or_else(|| service::derive_title(&input.content));
+            let mut entry = new_entry(ctx.scope.account.clone(), title, input.content);
+            entry.parent_id = input.parent_id.unwrap_or_default();
+            entry.kind = kind;
+            entry.tags = input.tags;
+            if device_local {
+                ctx.library.create_device_space_memory(store, &entry, || {
+                    ctx.may_commit() && admission.is_some_and(rest_dispatch::Admission::admit)
+                }).map_err(|error| {
+                    if ctx.scope.bearer_is_current() {
+                        write_failure(error)
+                    } else {
+                        transport::unauthorized()
+                    }
+                })?;
+            } else {
+                ctx.library.create_memory(store, &entry).map_err(write_failure)?;
+                notify();
+            }
+            Ok(entry)
+        })
+    };
+    let entry = if scoped {
+        rest_dispatch::submit_device_space_memory(scope, move |ctx, admission| create(ctx, Some(admission))).await?
+    } else {
+        rest_dispatch::submit(scope, Access::Write, move |ctx| create(ctx, None)).await?
+    };
+
     transport::json_response(StatusCode::CREATED, super::reads::item(entry))
 }
 
