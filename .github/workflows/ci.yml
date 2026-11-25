@@ -111,6 +111,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Setup Node.js
@@ -120,6 +121,19 @@ jobs:
 
       - name: Run architecture & Zero-CJK guardrails
         run: node scripts/check-guardrails.mjs
+
+      - name: Verify tracked source line count ratchet
+        shell: bash
+        env:
+          RATCHET_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          set -euo pipefail
+          base="$RATCHET_BASE"
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            base=$(git rev-parse HEAD^)
+          fi
+          node --test scripts/check-line-ratchet.test.mjs
+          node scripts/check-line-ratchet.mjs --base "$base"
 
   contract-check:
     name: contract-check
