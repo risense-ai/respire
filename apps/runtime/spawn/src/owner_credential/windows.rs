@@ -409,6 +409,8 @@ pub(super) mod model_removal;
 pub(super) mod model_namespace;
 #[path = "windows_model_stage.rs"]
 pub(super) mod model_stage;
+#[path = "windows_local_spaces.rs"]
+pub(super) mod local_spaces;
 
 fn rename_to_secret(input: &Removable, directory: &Removable, replace: bool) -> io::Result<()> {
     rename_relative(

@@ -5,7 +5,13 @@ use crate::{
 use anyhow::Result;
 
 /// Only typed library operations can use the verified vault.
-pub struct RuntimeLibrary<'a>(pub(super) &'a SessionKeys);
+pub struct RuntimeLibrary<'a>(pub(super) &'a SessionKeys, &'a str, &'a std::path::Path);
+
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+#[path = "device_spaces.rs"]
+mod device_spaces;
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+pub use device_spaces::{valid_device_space_name, DeviceSpaceAuthorityChanged};
 
 pub fn with_runtime_library<T>(
     canonical_profile: &std::path::Path,
@@ -26,7 +32,7 @@ pub fn with_runtime_library<T>(
     Ok(Some(action(
         owner,
         session.authority_epoch,
-        RuntimeLibrary(&session.keys),
+        RuntimeLibrary(&session.keys, owner, &session.profile),
     )))
 }
 

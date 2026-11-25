@@ -210,16 +210,22 @@ fn identity_tuple(file: &File) -> io::Result<(u64, u64)> {
     Ok((id.dev, id.ino))
 }
 
-fn no_replace(parent: RawFd, source: &CStr, dest: &CStr) -> io::Result<()> {
-    // SAFETY: both leaves and the retained same-directory descriptor are
-    // valid. Do not fall back to replacing rename when unsupported.
+pub(super) fn no_replace(parent: RawFd, source: &CStr, dest: &CStr) -> io::Result<()> {
+    no_replace_between(parent, source, parent, dest)
+}
+
+pub(super) fn no_replace_between(
+    source_parent: RawFd, source: &CStr, dest_parent: RawFd, dest: &CStr,
+) -> io::Result<()> {
+    // SAFETY: both leaves and retained directory descriptors are valid.
+    // Do not fall back to replacing rename when unsupported.
     #[cfg(target_os = "linux")]
     let result = unsafe {
         libc::syscall(
             libc::SYS_renameat2,
-            parent,
+            source_parent,
             source.as_ptr(),
-            parent,
+            dest_parent,
             dest.as_ptr(),
             libc::RENAME_NOREPLACE,
         )
@@ -227,9 +233,9 @@ fn no_replace(parent: RawFd, source: &CStr, dest: &CStr) -> io::Result<()> {
     #[cfg(target_os = "macos")]
     let result = unsafe {
         libc::renameatx_np(
-            parent,
+            source_parent,
             source.as_ptr(),
-            parent,
+            dest_parent,
             dest.as_ptr(),
             libc::RENAME_EXCL,
         )

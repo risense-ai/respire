@@ -169,7 +169,6 @@ impl CurrentUser {
         self.verify_descriptor(&descriptor, owner_only_flags, managed_admin_default)
     }
 
-    #[cfg(test)]
     pub(super) fn verify_inherited_model_ace(&self, handle: HANDLE) -> io::Result<()> {
         use windows_sys::Win32::Security::{GetSecurityDescriptorDacl, INHERITED_ACE};
         let descriptor = descriptor_from_handle(handle)?;

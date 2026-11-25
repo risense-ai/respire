@@ -29,6 +29,8 @@ mod reads;
 mod recall;
 mod registration;
 mod rest_dispatch;
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+mod device_spaces;
 mod transport;
 mod writes;
 #[cfg(test)]
@@ -44,7 +46,7 @@ pub(super) struct V1State {
 pub(super) fn router(bound: SocketAddr) -> Router {
     let state = V1State { bound };
     const HEALTH: RouteSpec = RouteSpec::new(Verb::Get, "/v1/health", "getHealth");
-    bind(Router::new(), HEALTH, health)
+    let router = bind(Router::new(), HEALTH, health)
         // Explicit routes are merged here by operation-owning modules.
         .route("/v1", any(not_found))
         .route("/v1/", any(not_found))
@@ -61,7 +63,10 @@ pub(super) fn router(bound: SocketAddr) -> Router {
         .merge(recall::routes(bound))
         .merge(diary::routes(bound))
         .merge(writes::routes(bound))
-        .merge(operations::routes(bound))
+        .merge(operations::routes(bound));
+    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+    let router = router.merge(device_spaces::routes(bound));
+    router
 }
 
 async fn health() -> V1Result<Response> {

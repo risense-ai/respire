@@ -50,5 +50,24 @@ pub(super) async fn check(app: &Router) -> Result<()> {
     assert_eq!(fs::read(profile.join("session.json"))?, session);
     assert_eq!(fs::read(root.join("client.json")).ok(), client);
     fs::remove_file(&members_path)?;
+    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+    if id == "main" {
+        device_space_tests::check(app, &root).await?;
+    }
     Ok(())
+}
+
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+#[path = "device_space_tests.rs"]
+mod device_space_tests;
+
+pub(super) fn fixture_root(path: &std::path::Path, secure: bool) -> Result<std::path::PathBuf> {
+    let root = path.canonicalize()?;
+    #[cfg(windows)]
+    if secure {
+        return Ok(respire_spawn::owner_credential::LocalSpaceNamespace::make_fixture_installation(&root)?);
+    }
+    #[cfg(not(windows))]
+    let _ = secure;
+    Ok(root)
 }

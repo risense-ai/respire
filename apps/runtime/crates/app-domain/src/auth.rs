@@ -213,6 +213,8 @@ pub use deepen::PlannedOutline;
 #[path = "auth/runtime_library.rs"]
 mod runtime_library;
 pub use runtime_library::{with_runtime_library, ModelSwitchVault, RuntimeLibrary};
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+pub use runtime_library::{valid_device_space_name, DeviceSpaceAuthorityChanged};
 
 pub struct RuntimeMemoryPage {
     pub entries: Vec<crate::MemoryEntry>,
