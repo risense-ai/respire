@@ -82,23 +82,35 @@ fn restore_operation_with_hook(
         "snapshot belongs to another account or library"
     );
     let source = root.join("snapshots").join(format!("{id}.db"));
-    let legacy_columns = if schema_digest(&live)? == selected.database_schema_sha256 {
+    let live_schema = schema_digest(&live)?;
+    let schemas_match = live_schema == selected.database_schema_sha256;
+    let legacy_columns = if schemas_match {
         Vec::new()
     } else {
-        // This preflight permits only known additions; the staged schema is checked in full below.
         let columns = missing_legacy_revision_triggers(&live, &source)?;
         let omitted: Vec<String> = columns.iter()
             .map(|column| format!("memory_revision_{column}_update"))
             .collect();
-        anyhow::ensure!(
-            !columns.is_empty()
-                && schema_digest_without_triggers(&live, &omitted)? == selected.database_schema_sha256,
-            "snapshot schema differs from the initialized library; explicit migration is required"
-        );
-        columns
+        if !columns.is_empty()
+            && schema_digest_without_triggers(&live, &omitted)? == selected.database_schema_sha256
+        {
+            columns
+        } else {
+            Vec::new()
+        }
     };
     crate::metadata_gate::ensure_restore_allowed(&live, &source)?;
     verify_key(&source, &selected, keys)?;
+    let mut temporary = prepare_restore_copy(root, &source, &selected, keys, &legacy_columns)?;
+    // Historical portable v0 snapshots may predate the known additive
+    // fields. Restore only if that exact detached normalization reaches
+    // the existing live shape; arbitrary changes still fail before backups.
+    if !schemas_match {
+        anyhow::ensure!(
+            schema_digest(&temporary.path)? == live_schema,
+            "snapshot schema differs from the initialized library; explicit migration is required"
+        );
+    }
     let before = create(root, account, &format!("before restore {id}"), keys)?;
     let rollback_file = format!(".snapshot-rollback-{}.db", uuid::Uuid::new_v4().simple());
     let rollback = root.join(&rollback_file);
@@ -126,50 +138,24 @@ fn restore_operation_with_hook(
     // Durable receipt exists before the first operation that can replace live.
     write_record(root, &receipt, "prepared", MAINTENANCE_FILE)?;
     write_journal(root, &receipt, "prepared")?;
-    let temporary = root.join(format!(
-        ".snapshot-restore-{}.db",
-        uuid::Uuid::new_v4().simple()
-    ));
     let mut replacement_attempted = false;
-    let mut temporary_owned = false;
     let result = (|| -> Result<()> {
         hook("after_backups")?;
-        let mut input = fs::File::open(&source)?;
-        let mut target = private_new(&temporary)?;
-        temporary_owned = true;
-        std::io::copy(&mut input, &mut target)?;
-        target.sync_all()?;
-        drop(target);
-        drop(input);
         anyhow::ensure!(
-            digest_file(&temporary)? == selected.database_sha256,
+            digest_file(&source)? == selected.database_sha256,
             "snapshot changed during restore preparation"
         );
-        verify_key(&temporary, &selected, keys)?;
-        if !legacy_columns.is_empty() {
-            install_legacy_revision_triggers(&temporary, &legacy_columns)?;
-            verify_key(&temporary, &selected, keys)?;
-            verify_witness(&temporary, &selected)?;
-            let (entries, version) = inventory(&temporary)?;
-            anyhow::ensure!(
-                entries == selected.entries && version == selected.sqlite_user_version,
-                "snapshot inventory mismatch after legacy trigger migration"
-            );
-        }
-        anyhow::ensure!(
-            schema_digest(&temporary)? == schema_digest(&live)?,
-            "snapshot schema differs from the initialized library; explicit migration is required"
-        );
-        let staged = Connection::open(&temporary)?;
+        let stage_path = &temporary.path;
+        let staged = Connection::open(stage_path).context("open verified detached snapshot for publication")?;
         staged.execute_batch("PRAGMA journal_mode=DELETE; PRAGMA secure_delete=ON;")?;
         staged.execute("INSERT INTO meta(key,value) VALUES('snapshot_sync_quarantine_v1',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             [serde_json::json!({"snapshot":id,"before_restore":receipt.before_restore}).to_string()])?;
         drop(staged);
-        inventory(&temporary)?;
+        inventory(stage_path)?;
         OpenOptions::new()
             .read(true)
             .write(true)
-            .open(&temporary)?
+            .open(stage_path)?
             .sync_all()?;
         hook("before_replace")?;
         // Read-only schema checks can recreate WAL sidecars; close them before replacing live.
@@ -177,7 +163,7 @@ fn restore_operation_with_hook(
         // A durable replacement can report an fsync error after rename, so mark
         // the attempt before calling it. Either outcome rolls back from image.
         replacement_attempted = true;
-        respire_spawn::durable::replace_file(&temporary, &live)?;
+        temporary.publish(&live).context("publish verified detached snapshot")?;
         hook("after_replace")?;
         crate::resident::clear()?;
         hook("after_cache_clear")?;
@@ -186,15 +172,7 @@ fn restore_operation_with_hook(
         Ok(())
     })();
     if let Err(error) = result {
-        let cleanup_result = if temporary_owned {
-            match fs::remove_file(&temporary) {
-                Ok(()) => Ok(()),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-                Err(error) => Err(error),
-            }
-        } else {
-            Ok(())
-        };
+        let cleanup_result = temporary.cleanup();
         let rollback_result = if replacement_attempted {
             rollback_locked(root, &receipt, ownership)
         } else {
@@ -208,6 +186,100 @@ fn restore_operation_with_hook(
         };
     }
     Ok(receipt)
+}
+
+
+struct PreparedRestoreCopy {
+    path: std::path::PathBuf,
+    #[cfg(windows)]
+    windows: Option<respire_spawn::owner_credential::PrivateRestoreStage>,
+}
+
+impl PreparedRestoreCopy {
+    fn publish(&mut self, destination: &Path) -> std::io::Result<()> {
+        #[cfg(windows)]
+        {
+            self.windows.as_mut().ok_or_else(|| std::io::Error::other("restore stage missing"))?
+                .publish_replacing(destination)
+        }
+        #[cfg(not(windows))]
+        {
+            respire_spawn::durable::replace_file(&self.path, destination)
+        }
+    }
+
+    fn cleanup(&mut self) -> std::io::Result<()> {
+        #[cfg(windows)]
+        {
+            if let Some(mut stage) = self.windows.take() { stage.cleanup()?; }
+            Ok(())
+        }
+        #[cfg(not(windows))]
+        match fs::remove_file(&self.path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            result => result,
+        }
+    }
+}
+
+impl Drop for PreparedRestoreCopy {
+    fn drop(&mut self) {
+        let _ = self.cleanup();
+    }
+}
+fn prepare_restore_copy(
+    root: &Path,
+    source: &Path,
+    selected: &Manifest,
+    keys: &crate::SessionKeys,
+    legacy_columns: &[&str],
+) -> Result<PreparedRestoreCopy> {
+    let name = format!(".snapshot-restore-{}", uuid::Uuid::new_v4().simple());
+    let mut input = fs::File::open(source)?;
+    #[cfg(windows)]
+    let (owned, mut target) = {
+        let windows = respire_spawn::owner_credential::PrivateRestoreStage::create(root, &name)?;
+        let target = windows.writer()?;
+        (PreparedRestoreCopy { path: windows.path().to_path_buf(), windows: Some(windows) }, target)
+    };
+    #[cfg(not(windows))]
+    let (owned, mut target) = {
+        let path = root.join(format!("{name}.db"));
+        let target = private_new(&path)?;
+        (PreparedRestoreCopy { path }, target)
+    };
+    std::io::copy(&mut input, &mut target)?;
+    target.sync_all()?;
+    drop(target);
+    drop(input);
+    let path = &owned.path;
+    anyhow::ensure!(
+        digest_file(path)? == selected.database_sha256,
+        "snapshot changed during restore preparation"
+    );
+    verify_key(path, selected, keys)?;
+    verify_witness(path, selected)?;
+    if !legacy_columns.is_empty() {
+        install_legacy_revision_triggers(path, legacy_columns)?;
+    }
+    crate::transport::local::validate_migration_snapshot(path)?;
+    verify_key(path, selected, keys)?;
+    if selected.witness_head.is_some() {
+        verify_witness(path, selected)?;
+    } else {
+        // A valid pre-witness file never attested entries. Initialization
+        // may create a fresh empty ledger, never fabricate an earlier chain.
+        let report = crate::transport::local::witness_checkpoint_file(path)?
+            .context("detached snapshot witness was not initialized")?;
+        anyhow::ensure!(report.intact && report.count == 0 && report.head == "0".repeat(64),
+            "unexpected legacy witness history after initialization");
+    }
+    let (entries, version) = inventory(path)?;
+    anyhow::ensure!(
+        entries == selected.entries && version == selected.sqlite_user_version,
+        "snapshot inventory mismatch after detached schema initialization"
+    );
+    Ok(owned)
 }
 
 /// Restore only this operation's original local image, including grants/outbox.

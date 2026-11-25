@@ -21,6 +21,9 @@ pub use catalog::ActiveTreeCatalog;
 mod feedback;
 pub use feedback::FeedbackCounts;
 mod schema_version;
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+mod migration_backup;
+mod startup_schema;
 mod witness;
 pub use witness::{WitnessReport,witness_checkpoint_file,register_witness_functions};
 mod conflicts;
@@ -126,21 +129,7 @@ impl LocalStore {
                 .with_context(|| format!("failed to create data dir: {}", parent.display()))?;
             respire_core_sdk::set_index_root(&std::fs::canonicalize(parent)?)?;
         }
-        let connection = Connection::open(path)
-            .with_context(|| format!("failed to open local memory db: {}", path.display()))?;
-        schema_version::require_supported(&connection)?;
-        connection.execute_batch(
-            "
-            PRAGMA journal_mode = WAL;
-            PRAGMA foreign_keys = ON;
-            PRAGMA busy_timeout = 30000;
-            ",
-        )?;
-        migrate(&connection)?;
-        connection.execute_batch(include_str!("local/sync_schema.sql"))?;
-        connection.execute_batch(include_str!("local/resident_schema.sql"))?;
-        let store = Self { connection };
-        store.initialize_sync_storage()?;
+        let store = Self { connection: startup_schema::open(path)? };
         store.maintain_sync_storage()?;
         Ok(store)
     }
@@ -473,6 +462,7 @@ mod query_log_daily;
 mod entries;
 mod schema;
 
+#[cfg(test)]
 use schema::migrate;
 pub use schema::validate_migration_snapshot;
 

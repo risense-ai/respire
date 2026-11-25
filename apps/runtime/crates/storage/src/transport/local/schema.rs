@@ -1,33 +1,70 @@
 use super::*;
 
+const METADATA_INSERT_TRIGGER: &str = "CREATE TRIGGER memory_metadata_gate_insert BEFORE INSERT ON memories
+        WHEN COALESCE((SELECT value FROM meta WHERE key='memory_metadata_v1_enabled'),'0') <> '1'
+          AND (
+            EXISTS(SELECT 1 FROM memories AS old WHERE old.id=NEW.id
+              AND (old.memory_contract IS NOT NEW.memory_contract OR old.summary IS NOT NEW.summary
+                OR old.source_refs IS NOT NEW.source_refs OR old.valid_until IS NOT NEW.valid_until
+                OR old.review_at IS NOT NEW.review_at OR old.artifact IS NOT NEW.artifact
+                OR old.verification IS NOT NEW.verification))
+            OR (NOT EXISTS(SELECT 1 FROM memories WHERE id=NEW.id)
+              AND (NEW.memory_contract IS NOT 0 OR NEW.summary IS NOT NULL
+                OR NEW.source_refs IS NOT '[]' OR NEW.valid_until IS NOT NULL
+                OR NEW.review_at IS NOT NULL OR NEW.artifact IS NOT NULL OR NEW.verification IS NOT NULL))
+          )
+        BEGIN SELECT RAISE(ABORT,'memory_metadata_v1_disabled'); END;";
+
+pub(super) fn metadata_insert_trigger_current(connection: &Connection) -> Result<bool> {
+    let sql = connection.query_row(
+        "SELECT sql FROM sqlite_schema WHERE type='trigger' AND name='memory_metadata_gate_insert'",
+        [], |row| row.get::<_, String>(0),
+    ).optional()?;
+    let expected = METADATA_INSERT_TRIGGER.trim_end_matches(';');
+    Ok(sql.is_some_and(|value| value.split_ascii_whitespace().eq(expected.split_ascii_whitespace())))
+}
+
+fn ensure_metadata_insert_trigger(connection: &Connection) -> Result<()> {
+    if !metadata_insert_trigger_current(connection)? {
+        connection.execute_batch("DROP TRIGGER IF EXISTS memory_metadata_gate_insert;")?;
+        connection.execute_batch(METADATA_INSERT_TRIGGER)?;
+    }
+    Ok(())
+}
+
 /// Validate and upgrade an existing migration staging database before publication.
 /// This does not create a database or configure the private Core index root.
 pub fn validate_migration_snapshot(path: &Path) -> Result<()> {
     let connection = Connection::open_with_flags(
         path,
-        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX | OpenFlags::SQLITE_OPEN_NOFOLLOW,
     )
     .context("failed to open existing migration staging database")?;
-    connection.execute_batch("PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 30000;")?;
-    migrate(&connection)?;
-    connection
-        .execute_batch(include_str!("sync_schema.sql"))
-        .context("migration staging sync schema is incompatible")?;
-    Ok(())
+    super::startup_schema::validate_detached(connection)
 }
 
 /// Commit schema upgrades together; any unsupported format or SQL failure leaves
 /// the original tables and rows intact.
+#[cfg(test)]
 pub(super) fn migrate(connection: &Connection) -> Result<()> {
     witness::register_witness_functions(connection)?;
     let transaction = connection.unchecked_transaction()?;
-    migrate_schema(&transaction)?;
-    transaction.execute_batch("CREATE TABLE IF NOT EXISTS recall_pairs(a TEXT NOT NULL,b TEXT NOT NULL,n INTEGER NOT NULL,PRIMARY KEY(a,b),CHECK(a<b)); CREATE INDEX IF NOT EXISTS recall_pairs_b ON recall_pairs(b);")?;
+    apply_schema_steps(&transaction)?;
     transaction.commit()?;
     Ok(())
 }
 
-fn migrate_schema(connection: &Connection) -> Result<()> {
+pub(super) fn apply_schema_steps(connection: &Connection) -> Result<()> {
+    migrate_schema(connection)?;
+    connection.execute_batch("CREATE TABLE IF NOT EXISTS recall_pairs(a TEXT NOT NULL,b TEXT NOT NULL,n INTEGER NOT NULL,PRIMARY KEY(a,b),CHECK(a<b)); CREATE INDEX IF NOT EXISTS recall_pairs_b ON recall_pairs(b);")?;
+    Ok(())
+}
+
+pub(super) fn validate_existing_memory_schema(connection: &Connection) -> Result<()> {
+    checked_legacy_columns(connection).map(|_| ())
+}
+
+fn checked_legacy_columns(connection: &Connection) -> Result<Option<Vec<(String, String, i64)>>> {
     let has_old = connection
         .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='memories'")?
         .exists([])?;
@@ -50,6 +87,14 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
                 "unsupported memory schema: missing {required}; encrypted fields cannot be reconstructed. No rows were removed"
             );
         }
+        Ok(Some(columns))
+    } else {
+        Ok(None)
+    }
+}
+
+fn migrate_schema(connection: &Connection) -> Result<()> {
+    if let Some(columns) = checked_legacy_columns(connection)? {
         // These are derived indexes or local state, not invented key material.
         // The original ciphertext, nonce, identity and timestamps stay untouched.
         for (name, declaration) in [
@@ -210,21 +255,6 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
             reason TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_review_history_entry ON review_history(entry_id,seq);
-        DROP TRIGGER IF EXISTS memory_metadata_gate_insert;
-        CREATE TRIGGER memory_metadata_gate_insert BEFORE INSERT ON memories
-        WHEN COALESCE((SELECT value FROM meta WHERE key='memory_metadata_v1_enabled'),'0') <> '1'
-          AND (
-            EXISTS(SELECT 1 FROM memories AS old WHERE old.id=NEW.id
-              AND (old.memory_contract IS NOT NEW.memory_contract OR old.summary IS NOT NEW.summary
-                OR old.source_refs IS NOT NEW.source_refs OR old.valid_until IS NOT NEW.valid_until
-                OR old.review_at IS NOT NEW.review_at OR old.artifact IS NOT NEW.artifact
-                OR old.verification IS NOT NEW.verification))
-            OR (NOT EXISTS(SELECT 1 FROM memories WHERE id=NEW.id)
-              AND (NEW.memory_contract IS NOT 0 OR NEW.summary IS NOT NULL
-                OR NEW.source_refs IS NOT '[]' OR NEW.valid_until IS NOT NULL
-                OR NEW.review_at IS NOT NULL OR NEW.artifact IS NOT NULL OR NEW.verification IS NOT NULL))
-          )
-        BEGIN SELECT RAISE(ABORT,'memory_metadata_v1_disabled'); END;
         CREATE TRIGGER IF NOT EXISTS memory_metadata_gate_update BEFORE UPDATE ON memories
         WHEN (OLD.memory_contract IS NOT NEW.memory_contract OR OLD.summary IS NOT NEW.summary
           OR OLD.source_refs IS NOT NEW.source_refs OR OLD.valid_until IS NOT NEW.valid_until
@@ -241,6 +271,7 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
             UPDATE meta SET value=lower(hex(randomblob(16))) WHERE key='memory_revision_v1';
         END;",
     )?;
+    ensure_metadata_insert_trigger(connection)?;
     // parent index: create after the column exists (new DBs already have it; old DBs add the column then reach here)
     connection.execute_batch(
         "

@@ -141,6 +141,7 @@
             completed.push((operation, status.receipt));
         }
         let live = Connection::open(root.join("rsrs.db"))?;
+        crate::transport::local::register_witness_functions(&live)?;
         live.execute("INSERT INTO memories(id,ciphertext,nonce) VALUES('after-o2','','')", [])?;
         let before_retry = fs::read(root.join(RECOVERY_FILE))?;
         let snapshot_count = list(root)?.len();
@@ -277,4 +278,62 @@
         assert_eq!(list(directory.path())?.len(), 1);
         Ok(())
     }
-
+    #[test]
+    fn repaired_v1_snapshot_staging_preserves_version_and_aborts_before_publish() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        #[cfg(windows)]
+        let root = respire_spawn::owner_credential::LocalSpaceNamespace::make_fixture_installation(directory.path())?;
+        #[cfg(not(windows))]
+        let root = directory.path().canonicalize()?;
+        let live = root.join("rsrs.db");
+        let keys = crate::SessionKeys::from_urk([7; 32])?;
+        drop(crate::transport::local::LocalStore::open(&live)?);
+        let sql = Connection::open(&live)?;
+        crate::transport::local::register_witness_functions(&sql)?;
+        let (nonce, ciphertext) = keys.encrypt_content("synthetic migrated snapshot content")?;
+        sql.execute("INSERT INTO memories(id,ciphertext,nonce) VALUES('synthetic',?1,?2)",
+            rusqlite::params![ciphertext, nonce])?;
+        sql.execute_batch("DROP INDEX idx_memories_updated; PRAGMA wal_checkpoint(TRUNCATE);")?;
+        drop(sql);
+        // This is a real protected live 0→1 repair, not a test pragma stamp.
+        drop(crate::transport::local::LocalStore::open(&live)?);
+        let marker = |path: &Path| -> Result<i64> {
+            let db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            Ok(db.pragma_query_value(None, "user_version", |row| row.get(0))?)
+        };
+        assert_eq!(marker(&live)?, 1);
+        let bundle = create(&root, "account", "repaired-v1", &keys)?;
+        let portable = root.join("snapshots").join(format!("{}.db", bundle.id));
+        let original_bundle = fs::read(&portable)?;
+        let bundle_head = bundle.witness_head.clone().context("actual witness must be in v1 bundle")?;
+        let sql = Connection::open(&live)?;
+        crate::transport::local::register_witness_functions(&sql)?;
+        sql.execute("INSERT INTO memories(id,ciphertext,nonce) VALUES('later','','')", [])?;
+        sql.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+        drop(sql);
+        let live_before = fs::read(&live)?;
+        let ownership = crate::lock::LibraryLock::acquire(&root, std::time::Duration::from_secs(1))?;
+        let fail = restore_with_hook(&root, "account", &keys, &bundle.id, &ownership, &|phase| {
+            if phase == "before_replace" {
+                anyhow::bail!("synthetic pre-publication failure");
+            }
+            Ok(())
+        }).unwrap_err();
+        assert!(format!("{fail:#}").contains("synthetic pre-publication failure"));
+        assert_eq!(fs::read(&live)?, live_before);
+        assert_eq!(fs::read(&portable)?, original_bundle);
+        assert!(ensure_no_incomplete_restore(&root).is_ok());
+        let receipt = restore_locked(&root, "account", &keys, &bundle.id, &ownership)?;
+        complete_restore(&root, &receipt)?;
+        assert_eq!(marker(&live)?, 1);
+        assert_eq!(marker(&portable)?, 1);
+        assert_eq!(fs::read(&portable)?, original_bundle);
+        let head = crate::transport::local::witness_checkpoint_file(&live)?
+            .context("restored witness missing")?;
+        assert_eq!(head.head, bundle_head);
+        let db = Connection::open_with_flags(&live, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let (encrypted, nonce): (String, String) = db.query_row("SELECT ciphertext,nonce FROM memories WHERE id='synthetic'",[],|row| Ok((row.get(0)?,row.get(1)?)))?;
+        assert_eq!(keys.decrypt_content(&encrypted, &nonce)?, "synthetic migrated snapshot content");
+        assert!(!db.prepare("SELECT 1 FROM memories WHERE id='later'")?.exists([])?);
+        Ok(())
+    }

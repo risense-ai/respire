@@ -103,3 +103,22 @@ const LOCAL_SPACE_STAGING_SLOTS: u8 = 16;
 
 pub mod model_proof;
 pub mod proof;
+
+#[cfg(windows)]
+pub use windows::migration_copy::MigrationCopy;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub use unix::migration_copy::MigrationCopy;
+
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+fn validate_migration_leaf(name: &str) -> io::Result<()> {
+    if !(1..=200).contains(&name.len()) || name == "." || name == ".."
+        || !name.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b,b'.'|b'_'|b'-'))
+        || name.ends_with('.')
+    {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid migration backup leaf"));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+pub use windows::restore_stage::PrivateRestoreStage;

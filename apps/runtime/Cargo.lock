@@ -2393,6 +2393,7 @@ dependencies = [
  "respire_core_sdk",
  "respire_crypto",
  "respire_protocol 2.0.0-dev.17",
+ "respire_spawn",
  "rusqlite",
  "serde",
  "serde_json",
