@@ -43,11 +43,11 @@ not a release workflow, native test attestation, or authorization to publish.
   Use the currently reviewed Core in-tree link and actual native sidecars.
   Assemble a standalone binary, archive, and schema-2 build report for each of
   the eight triples. Reuse `smoke-runtime-release.mjs` against the packaged
-  Runtime, not `--self-check` alone. The new monorepo lacks a safe local
-  equivalent of the old release workflow's inline per-target archive/inventory
-  staging; extract only that deterministic producer into its own small step
-  before considering the native release dry run complete. The internal build
-  metadata keeps `vX.Y.Z`; only the release lookup tag is component-prefixed.
+  Runtime, not `--self-check` alone. Use the deterministic local
+  [Runtime staging producer](runtime-component-staging.md) with each exact
+  native build. A verified native artifact and smoke are still required for
+  every target before the complete release dry run. Internal build metadata
+  keeps `vX.Y.Z`; only the release lookup tag is component-prefixed.
 - **CLI:** in a disposable checkout of `apps/cli`, use
   `node npm/scripts/set-build-version.mjs "$VERSION"` where needed, then the
   appropriate real native release build into `target/ci/<triple>/release`.
