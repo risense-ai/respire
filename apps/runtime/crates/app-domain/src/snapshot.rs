@@ -444,6 +444,8 @@ pub fn list(root: &Path) -> Result<Vec<Manifest>> {
     Ok(report.snapshots)
 }
 
+pub mod backup_archive;
+
 include!("snapshot/journal.rs");
 include!("snapshot/legacy_recovery.rs");
 include!("snapshot/restore.rs");
