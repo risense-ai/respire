@@ -13,6 +13,10 @@ use sha2::{Digest, Sha256};
 use std::{fs, net::SocketAddr, process::Command, thread, time::Duration};
 use tower::ServiceExt;
 
+#[path = "sse_cursor_tests.rs"]
+mod sse_cursor_tests;
+use sse_cursor_tests::events;
+
 #[path = "model_switch_tests.rs"]
 mod model_switch_tests;
 #[path = "host_config_tests.rs"]
@@ -213,7 +217,8 @@ pub(super) fn production_router_fixture(test: &'static str) -> Result<()> {
             let terminal = tokio::time::timeout(WAIT, cancelled.next())
                 .await?
                 .context("cancel event")??;
-            assert!(std::str::from_utf8(&terminal)?.contains("event: cancelled"));
+            sse_cursor_tests::check_reconnect(&app, &pending, &progress, &terminal, &status)
+                .await?;
             assert!(tokio::time::timeout(WAIT, cancelled.next())
                 .await?
                 .is_none());
@@ -590,11 +595,4 @@ async fn trigger(app: &Router, token: &str) -> Result<String> {
     let id = operation["operation_id"].as_str().context("operation ID")?;
     uuid::Uuid::parse_str(id)?;
     Ok(format!("/v1/operations/{id}"))
-}
-
-async fn events(app: &Router, operation: &str, token: &str) -> Result<Response> {
-    let reply = request(app, "GET", &format!("{operation}/events"), Some(token)).await?;
-    assert_eq!(reply.status(), StatusCode::OK);
-    assert_eq!(reply.headers()[header::CONTENT_TYPE], "text/event-stream");
-    Ok(reply)
 }
