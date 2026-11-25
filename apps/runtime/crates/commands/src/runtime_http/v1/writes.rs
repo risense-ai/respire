@@ -1,7 +1,7 @@
 //! Protected writes on the serving dispatcher's active library.
 use super::{
     registration::{bind, RouteSpec, Verb},
-    rest_dispatch::{self, Access},
+    rest_dispatch::{self, Admission, LibraryContext},
     transport, Problem, V1Result,
 };
 use axum::{
@@ -50,25 +50,34 @@ async fn delete(
     }
     transport::json_optional::<serde_json::Value>(body, 0).await?;
     let id = memory_id(parts.uri.path())?;
-    rest_dispatch::submit(scope, Access::Write, move |ctx| {
-        if respire_app::service::off_mode() {
-            return Err(Problem::new(
-                StatusCode::FORBIDDEN,
-                "memory_off",
-                "Memory service disabled",
-            ));
-        }
-        if !ctx
-            .store
-            .forget_memory_exact(&id)
-            .map_err(|_| transport::unavailable())?
-        {
-            return Err(missing_memory());
-        }
-        notify();
-        Ok(())
-    })
-    .await?;
+    rest_dispatch::submit_memory_write(scope, move |ctx, admission| {
+        super::reads::with_memory_store(ctx, None, |store, device_local| {
+            if respire_app::service::off_mode() {
+                return Err(Problem::new(
+                    StatusCode::FORBIDDEN, "memory_off", "Memory service disabled",
+                ));
+            }
+            if device_local {
+                if store.active_memory_exact(&id).map_err(|_| transport::unavailable())?.is_none() {
+                    return Err(missing_memory());
+                }
+                if !admit_device_write(ctx, admission) {
+                    return Err(if ctx.scope.bearer_is_current() {
+                        transport::unavailable()
+                    } else {
+                        transport::unauthorized()
+                    });
+                }
+            }
+            if !store.forget_memory_exact(&id).map_err(|_| transport::unavailable())? {
+                return Err(missing_memory());
+            }
+            if !device_local {
+                notify();
+            }
+            Ok(())
+        })
+    }).await?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -109,8 +118,7 @@ async fn create(
     if matches!(kind, Kind::Hypothesis | Kind::Reflection | Kind::SelfNote) {
         return Err(transport::invalid());
     }
-    let scoped = super::reads::is_device_local_space(input.space_id.as_deref());
-    let create = move |ctx: &rest_dispatch::LibraryContext<'_>, admission: Option<&rest_dispatch::Admission>| {
+    let entry = rest_dispatch::submit_memory_write(scope, move |ctx, admission| {
         super::reads::with_memory_store(ctx, input.space_id, |store, device_local| {
             if let Some(parent) = input.parent_id.as_deref() {
                 if store
@@ -131,7 +139,7 @@ async fn create(
             entry.tags = input.tags;
             if device_local {
                 ctx.library.create_device_space_memory(store, &entry, || {
-                    ctx.may_commit() && admission.is_some_and(rest_dispatch::Admission::admit)
+                    admit_device_write(ctx, admission)
                 }).map_err(|error| {
                     if ctx.scope.bearer_is_current() {
                         write_failure(error)
@@ -145,12 +153,7 @@ async fn create(
             }
             Ok(entry)
         })
-    };
-    let entry = if scoped {
-        rest_dispatch::submit_device_space_memory(scope, move |ctx, admission| create(ctx, Some(admission))).await?
-    } else {
-        rest_dispatch::submit(scope, Access::Write, move |ctx| create(ctx, None)).await?
-    };
+    }).await?;
 
     transport::json_response(StatusCode::CREATED, super::reads::item(entry))
 }
@@ -171,17 +174,13 @@ async fn update(
         input.content.as_deref(),
         input.tags.as_deref().unwrap_or_default(),
     )?;
-    let entry = rest_dispatch::submit(scope, Access::Write, move |ctx| {
-        if input.title.is_none() && input.content.is_none() && input.tags.is_none() {
-            return ctx
-                .library
-                .memory_exact(ctx.store, &id)
-                .map_err(|_| transport::unavailable())?
-                .ok_or_else(missing_memory);
-        }
-        let entry = ctx
-            .library
-            .update_memory_exact(ctx.store, &id, |entry| {
+    let entry = rest_dispatch::submit_memory_write(scope, move |ctx, admission| {
+        super::reads::with_memory_store(ctx, None, |store, device_local| {
+            if input.title.is_none() && input.content.is_none() && input.tags.is_none() {
+                return ctx.library.memory_exact(store, &id)
+                    .map_err(|_| transport::unavailable())?.ok_or_else(missing_memory);
+            }
+            let entry = ctx.library.update_memory_with_admission(store, &id, |entry| {
                 if let Some(title) = input.title {
                     entry.title = title;
                 }
@@ -192,14 +191,19 @@ async fn update(
                     entry.tags = tags;
                 }
                 entry.modified_by = service::device_tag();
-            })
-            .map_err(write_failure)?
-            .ok_or_else(missing_memory)?;
-        notify();
-        Ok(entry)
-    })
-    .await?;
+            }, || !device_local || admit_device_write(ctx, admission))
+                .map_err(write_failure)?.ok_or_else(missing_memory)?;
+            if !device_local {
+                notify();
+            }
+            Ok(entry)
+        })
+    }).await?;
     transport::json_response(StatusCode::OK, super::reads::item(entry))
+}
+
+pub(super) fn admit_device_write(ctx: &LibraryContext<'_>, admission: &Admission) -> bool {
+    ctx.may_commit() && admission.admit()
 }
 
 fn validate_fields(content: Option<&str>, tags: &[String]) -> V1Result<()> {

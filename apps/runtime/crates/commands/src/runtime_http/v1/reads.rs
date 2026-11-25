@@ -209,7 +209,14 @@ pub(super) fn space_id(ctx: &LibraryContext<'_>) -> V1Result<String> {
 }
 
 pub(super) fn check_space(ctx: &LibraryContext<'_>, requested: Option<String>) -> V1Result<()> {
-    check_requested_space(ctx, requested.as_deref())
+    let selected = resolve_memory_space(ctx, requested)?;
+    if is_device_local_space(selected.as_deref()) {
+        return with_memory_store(ctx, selected, |_, _| Err(Problem::new(
+            StatusCode::CONFLICT, "space_operation_unavailable",
+            "This operation is unavailable in a device-local space",
+        )));
+    }
+    check_requested_space(ctx, selected.as_deref())
 }
 
 fn check_requested_space(ctx: &LibraryContext<'_>, requested: Option<&str>) -> V1Result<()> {
@@ -231,11 +238,21 @@ pub(super) fn is_device_local_space(space: Option<&str>) -> bool {
         .is_some_and(|(id, uuid)| uuid.get_version_num() == 4 && uuid.simple().to_string() == id)
 }
 
+pub(super) fn resolve_memory_space(
+    ctx: &LibraryContext<'_>, requested: Option<String>,
+) -> V1Result<Option<String>> {
+    match requested {
+        Some(id) => Ok(Some(id)),
+        None => ctx.library.active_device_space(ctx.ownership).map_err(|_| unavailable()),
+    }
+}
+
 pub(super) fn with_memory_store<T>(
     ctx: &LibraryContext<'_>,
     requested: Option<String>,
     run: impl FnOnce(&respire_app::transport::local::LocalStore, bool) -> V1Result<T>,
 ) -> V1Result<T> {
+    let requested = resolve_memory_space(ctx, requested)?;
     if let Some(id) = requested.as_deref().filter(|id| is_device_local_space(Some(id))) {
         return ctx.library.with_device_space_store(
             ctx.ownership, id, || ctx.may_commit(), |store| run(store, true),
@@ -243,7 +260,7 @@ pub(super) fn with_memory_store<T>(
             if ctx.scope.bearer_is_current() { unavailable() } else { transport::unauthorized() }
         })?.ok_or_else(|| Problem::new(StatusCode::NOT_FOUND, "space_not_found", "Space not found"))?;
     }
-    check_space(ctx, requested)?;
+    check_requested_space(ctx, requested.as_deref())?;
     run(ctx.store, false)
 }
 
@@ -266,42 +283,36 @@ pub(super) fn item(entry: respire_app::MemoryEntry) -> Value {
 
 impl Call {
     fn run(self, ctx: &LibraryContext<'_>, requested: Option<String>) -> V1Result<Value> {
-        if !matches!(self, Self::Page(..)) {
+        if !matches!(self, Self::Memory(..) | Self::Page(..) | Self::Light | Self::Sync
+            | Self::Diary(..) | Self::OrganizeSuggestions(..)) {
             check_requested_space(ctx, requested.as_deref())?;
         }
         match self {
             Self::Page(limit, after) => with_memory_store(ctx, requested, |store, _| {
                 memory_page(ctx, store, limit, after)
             }),
-            Self::Memory(id) => ctx
-                .library
-                .memory_exact(ctx.store, &id)
-                .map_err(|_| unavailable())?
-                .map(item)
-                .ok_or_else(|| {
-                    Problem::new(
-                        StatusCode::NOT_FOUND,
-                        "memory_not_found",
-                        "Memory not found",
-                    )
-                }),
+            Self::Memory(id) => with_memory_store(ctx, None, |store, _| {
+                ctx.library.memory_exact(store, &id)
+                    .map_err(|_| unavailable())?.map(item)
+                    .ok_or_else(super::writes::missing_memory)
+            }),
             Self::Light => {
-                let generation = ctx
-                    .store
-                    .active_generation_key()
-                    .map_err(|_| unavailable())?;
-                let (total, diaries, indexed, updated) = ctx
-                    .store
-                    .light_status_counts(&generation)
-                    .map_err(|_| unavailable())?;
-                Ok(
-                    json!({"space_id":space_id(ctx)?, "memory_count":total, "diary_count":diaries,
-                    "indexed_count":indexed, "last_updated_at":updated}),
-                )
+                let selected = resolve_memory_space(ctx, requested)?;
+                let id = match &selected {
+                    Some(id) => id.clone(),
+                    None => space_id(ctx)?,
+                };
+                with_memory_store(ctx, selected, |store, _| {
+                    let generation = store.active_generation_key().map_err(|_| unavailable())?;
+                    let (total, diaries, indexed, updated) = store
+                        .light_status_counts(&generation).map_err(|_| unavailable())?;
+                    Ok(json!({"space_id": id, "memory_count": total, "diary_count": diaries,
+                        "indexed_count": indexed, "last_updated_at": updated}))
+                })
             }
-            Self::Sync => {
-                let (pending, _, _) = ctx.store.sync_counts().map_err(|_| unavailable())?;
-                let state = if !respire_app::sync::remote_configured() {
+            Self::Sync => with_memory_store(ctx, None, |store, device_local| {
+                let (pending, _, _) = store.sync_counts().map_err(|_| unavailable())?;
+                let state = if device_local || !respire_app::sync::remote_configured() {
                     "offline"
                 } else if crate::rpc_serve::SYNC_RUNNING.load(std::sync::atomic::Ordering::Acquire)
                 {
@@ -312,7 +323,7 @@ impl Call {
                     "idle"
                 };
                 Ok(json!({"state":state, "pending_outbox":pending}))
-            }
+            }),
             Self::SpaceMembers(id) => {
                 check_space(ctx, Some(id))?;
                 respire_app::login_transaction::list_space_members(&ctx.scope.canonical_profile)
@@ -322,8 +333,8 @@ impl Call {
                 .and_then(|catalog| Ok(serde_json::to_value(catalog)?))
                 .map_err(|_| unavailable()),
             Self::ActiveAssets => super::models::active_assets(ctx.store),
-            Self::OrganizeSuggestions(top) => {
-                let suggestions = service::deepen_suggestions(ctx.store, &ctx.scope.account, top)
+            Self::OrganizeSuggestions(top) => with_memory_store(ctx, requested, |store, _| {
+                let suggestions = service::deepen_suggestions(store, &ctx.scope.account, top)
                     .map_err(|_| unavailable())?
                     .into_iter()
                     .map(|(id, children)| json!({
@@ -333,17 +344,17 @@ impl Call {
                     }))
                     .collect::<Vec<_>>();
                 Ok(json!({"suggestions": suggestions}))
-            }
-            Self::Diary(date) => {
+            }),
+            Self::Diary(date) => with_memory_store(ctx, requested, |store, _| {
                 let entries = ctx
                     .library
-                    .diary_entries(ctx.store, date.as_deref(), crate::util::local_day_of)
+                    .diary_entries(store, date.as_deref(), crate::util::local_day_of)
                     .map_err(|_| unavailable())?
                     .into_iter()
                     .map(super::diary::item)
                     .collect::<Vec<_>>();
                 Ok(json!({"entries": entries}))
-            }
+            }),
         }
     }
 }
