@@ -345,12 +345,9 @@ pub(crate) fn backup_database_policy(src: &std::path::Path, dest: &std::path::Pa
     options.open(dest)?;
     let snapshot = (|| -> Result<()> {
         connection.execute("VACUUM INTO ?1", rusqlite::params![target])?;
-        let backup = rusqlite::Connection::open(dest)?;
-        let has_grants = backup
-            .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='access_grants'")?
-            .exists([])?;
-        if has_grants && strip_grants {
-            backup.execute_batch("PRAGMA secure_delete=ON; DELETE FROM access_grants; VACUUM;")?;
+        let mut backup = rusqlite::Connection::open(dest)?;
+        if strip_grants {
+            sanitize_detached_backup(&mut backup)?;
         }
         Ok(())
     })();
@@ -363,3 +360,28 @@ pub(crate) fn backup_database_policy(src: &std::path::Path, dest: &std::path::Pa
     Ok(dest.to_path_buf())
 }
 
+// This accepts only the detached, exclusively-created backup above, not the
+// serving library. A rollback image deliberately takes the other policy lane.
+fn sanitize_detached_backup(backup: &mut rusqlite::Connection) -> Result<()> {
+    let has_grants = backup
+        .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='access_grants'")?
+        .exists([])?;
+    if has_grants {
+        backup.execute_batch("PRAGMA secure_delete=ON;")?;
+        let transaction = backup.transaction()?;
+        let before = transaction.total_changes();
+        let removed = transaction.execute("DELETE FROM access_grants", [])? as u64;
+        anyhow::ensure!(transaction.total_changes() - before == removed,
+            "snapshot grant removal changed unrelated rows");
+        transaction.commit()?;
+        // Do not leave grant bytes in freelist pages of a transferable copy.
+        backup.execute_batch("VACUUM;")?;
+        anyhow::ensure!(!backup.prepare("SELECT 1 FROM access_grants LIMIT 1")?.exists([])?,
+            "snapshot still contains access grants");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+#[path = "backup_copy_tests.rs"]
+mod backup_copy_tests;
