@@ -1,4 +1,4 @@
-name: Runtime Windows x64 release dry run
+name: Runtime native release dry run
 
 on:
   workflow_dispatch:
@@ -19,17 +19,31 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  windows-x64:
+  native:
+    name: ${{ matrix.lane }}
     if: >-
       github.repository == 'risense-ai/respire' &&
       ((github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
       (github.event_name == 'pull_request' &&
       github.event.pull_request.head.repo.full_name == github.repository &&
       contains(github.event.pull_request.labels.*.name, 'native-release-dry-run')))
-    runs-on: windows-2025
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - lane: windows-x64
+            runner: windows-2025
+            target: x86_64-pc-windows-msvc
+            image: rsrs-runtime-x86_64-pc-windows-msvc.exe
+          - lane: linux-gnu-x64
+            runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            image: rsrs-runtime-x86_64-unknown-linux-gnu
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 50
     env:
       RUNTIME_COMPONENT_TAG: runtime-v2.0.0-dev.31
+      RUNTIME_DRY_RUN_LANE: ${{ matrix.lane }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -41,23 +55,23 @@ jobs:
       - name: Install pinned native Rust
         run: rustup toolchain install 1.95.0 --profile minimal
       - name: Build, stage and smoke the reviewed Runtime source
-        run: node apps/runtime/scripts/dry-run-windows-x64-release.mjs
+        run: node apps/runtime/scripts/dry-run-native-release.mjs
       - name: Keep the source-bound coverage envelope
         uses: actions/upload-artifact@v4
         with:
-          name: runtime-windows-x64-evidence-${{ github.run_id }}-${{ github.run_attempt }}
-          path: release-evidence/runtime-windows-x64.json
+          name: runtime-${{ matrix.lane }}-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release-evidence/runtime-${{ matrix.lane }}.json
           if-no-files-found: error
           retention-days: 7
       - name: Keep the verified main-branch dry-run bytes
         if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
         uses: actions/upload-artifact@v4
         with:
-          name: runtime-windows-x64-payload-${{ github.run_id }}-${{ github.run_attempt }}
+          name: runtime-${{ matrix.lane }}-payload-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            release-assets/rsrs-runtime-x86_64-pc-windows-msvc.exe
-            release-assets/rsrs-runtime-x86_64-pc-windows-msvc.tar.gz
-            release-assets/runtime-build-x86_64-pc-windows-msvc.json
+            release-assets/${{ matrix.image }}
+            release-assets/rsrs-runtime-${{ matrix.target }}.tar.gz
+            release-assets/runtime-build-${{ matrix.target }}.json
           if-no-files-found: error
           compression-level: 0
           retention-days: 3
