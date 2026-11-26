@@ -12,6 +12,7 @@ use std::{
 
 const MAGIC: &[u8; 8] = b"RSRSAC01";
 const INTENT_BYTES: usize = 96;
+const TERMINAL_LIMIT: u64 = 4096;
 const MAX_WIRE_BYTES: u64 = 4 * 1024 * 1024 * 1024 + 64 * 1024 + 12;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -211,6 +212,36 @@ impl BackupArchiveHandoff {
         remove_owned(&parent, &self.operation.leaf("intent"), record_id, Some(INTENT_BYTES as u64))?;
         parent.sync_all()
     }
+}
+
+/// Read the opaque terminal record at a fixed operation-owned name. The
+/// caller must validate its schema and bind it to the freshly authorized
+/// owner and selected library before projecting any state. Custody checks
+/// here do not grant authority to publish, restore, or reinterpret a receipt.
+pub fn read_backup_terminal(root: &Path, operation: ArchiveOperation) -> io::Result<Option<Vec<u8>>> {
+    let parent = open_base(root)?;
+    let leaf = operation.leaf("terminal");
+    let mut file = match open_leaf(&parent, &leaf) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let metadata = check(&file, 0o600, false)?;
+    let length = metadata.len();
+    if !(1..=TERMINAL_LIMIT).contains(&length) {
+        return Err(denied());
+    }
+    let mut result = Vec::with_capacity(length as usize);
+    (&mut file).take(TERMINAL_LIMIT + 1).read_to_end(&mut result)?;
+    let name = CString::new(leaf).map_err(|_| denied())?;
+    if result.len() as u64 != length
+        || check(&file, 0o600, false)?.len() != length
+        || !Identity::from_metadata(&metadata).still_names(parent.as_raw_fd(), &name)
+        || file_identity(&open_base(root)?)? != file_identity(&parent)?
+    {
+        return Err(denied());
+    }
+    Ok(Some(result))
 }
 
 struct ApprovedRead {

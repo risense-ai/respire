@@ -132,5 +132,5 @@ pub use unix::model_job::ModelJobRoot;
 
 #[cfg(target_os = "linux")]
 pub use unix::backup_archive::{
-    ArchiveOperation, BackupArchiveHandoff, PendingBackupArchive, ReadyBackupArchive,
+    read_backup_terminal, ArchiveOperation, BackupArchiveHandoff, PendingBackupArchive, ReadyBackupArchive,
 };

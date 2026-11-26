@@ -123,3 +123,42 @@ fn rejected_length_revocation_and_publication_keep_only_exact_durable_state() ->
     assert_eq!(fs::read_dir(path)?.count(), 0);
     Ok(())
 }
+
+fn publish_terminal_fixture(root: &Path, op: ArchiveOperation, bytes: &[u8]) -> io::Result<()> {
+    let mut fixture = MigrationCopy::create(root, &op.leaf("terminal-fixture"))?;
+    fixture.fill_archive(|output| output.write_all(bytes))?;
+    fixture.publish(&op.leaf("terminal"))
+}
+
+#[test]
+fn terminal_record_reads_exact_bounded_owner_file_for_that_operation() -> io::Result<()> {
+    let root = Scratch::model_fixture()?;
+    let path = root.path();
+    let op = operation(7)?;
+    let other = operation(8)?;
+    assert!(read_backup_terminal(path, op)?.is_none());
+    let record = vec![b'x'; TERMINAL_LIMIT as usize];
+    publish_terminal_fixture(path, op, &record)?;
+    assert_eq!(read_backup_terminal(path, op)?.as_deref(), Some(record.as_slice()));
+    assert!(read_backup_terminal(path, other)?.is_none());
+    fs::set_permissions(path.join(op.leaf("terminal")), fs::Permissions::from_mode(0o640))?;
+    assert!(read_backup_terminal(path, op).is_err());
+    Ok(())
+}
+
+#[test]
+fn terminal_reader_denies_oversize_and_does_not_follow_substitute_links() -> io::Result<()> {
+    let root = Scratch::model_fixture()?;
+    let path = root.path();
+    let op = operation(7)?;
+    publish_terminal_fixture(path, op, &vec![b'x'; TERMINAL_LIMIT as usize + 1])?;
+    assert!(read_backup_terminal(path, op).is_err());
+    let name = path.join(op.leaf("terminal"));
+    let unrelated = path.join("unrelated");
+    fs::rename(&name, &unrelated)?;
+    symlink(&unrelated, &name)?;
+    assert!(read_backup_terminal(path, op).is_err());
+    assert!(fs::symlink_metadata(name)?.is_symlink());
+    assert!(unrelated.is_file());
+    Ok(())
+}
