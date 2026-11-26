@@ -87,6 +87,9 @@ func (m *Manager) prepareRuntimeAccountControl(ctx context.Context, imagePath, i
 func (m *Manager) prepareRuntimeControlGrant(ctx context.Context, imagePath, imageDigest, profilePath string,
 	expectedAccount *string, ownedMaintenance []byte, phase string) (runtimeAccountControl, error) {
 	var control runtimeAccountControl
+	if err := m.requireTakeoverProfile(); err != nil {
+		return control, err
+	}
 	root, err := canonicalSessionDirectory(m.DataRoot)
 	if err != nil {
 		return control, err

@@ -84,6 +84,12 @@ func checkJunctionMigrationRejected(t *testing.T, m *Manager) {
 			t.Fatalf("migration query=%t reached transaction admission: %v", query, err)
 		}
 	}
+	if _, err := m.prepareRuntimeAccountControl(t.Context(), "", "", m.DataRoot, nil, nil); !errors.Is(err, errJunctionTakeover) {
+		t.Fatalf("private helper grant reached native preparation: %v", err)
+	}
+	if _, _, err := m.desktopOfflineKeygen(t.Context(), "desktop-"+operation, false); !errors.Is(err, errJunctionTakeover) {
+		t.Fatalf("cold keygen reached native preparation: %v", err)
+	}
 	if authority.held != nil {
 		t.Fatal("migration invoked native takeover before rejection")
 	}
