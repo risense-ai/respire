@@ -16,8 +16,9 @@ use serde::Deserialize;
 use std::net::SocketAddr;
 
 pub(super) fn routes(bound: SocketAddr) -> Router {
+    let router = bind(Router::new(), RouteSpec::new(Verb::Post, "/v1/spaces/{spaceId}/members", "inviteSpaceMember"), invite);
     let router = bind(
-        Router::new(),
+        router,
         RouteSpec::new(Verb::Post, "/v1/memories", "createMemory"),
         create,
     );
@@ -278,4 +279,32 @@ pub(super) fn new_entry(user: String, title: String, content: String) -> MemoryE
         metadata: Default::default(),
         unknown_fields: Default::default(),
     }
+}
+
+async fn invite(
+    State(bound): State<SocketAddr>,
+    ConnectInfo(crate::network::Peer(peer)): ConnectInfo<crate::network::Peer>,
+    request: Request<Body>,
+) -> V1Result<Response> {
+    let (parts, body) = request.into_parts();
+    let scope = transport::authorize(&parts, peer, bound).await?;
+    if parts.uri.query().is_some() { return Err(transport::invalid()); }
+    let path = parts.uri.path().strip_prefix("/v1/spaces/")
+        .and_then(|p| p.strip_suffix("/members")).ok_or_else(transport::invalid)?;
+    let id = transport::decode(path, false)?;
+    let input: respire_app::login_transaction::SpaceInviteRequest = transport::json(body, 2048).await?;
+    input.clone().into_host_operation().map_err(|_| transport::invalid())?;
+    let member = rest_dispatch::submit_publication(scope, move |ctx, admission| {
+        if super::reads::is_device_local_space(Some(&id)) {
+            return Err(Problem::new(StatusCode::CONFLICT, "space_offline", "An online space is required"));
+        }
+        super::reads::check_space(ctx, Some(id))?;
+        respire_app::login_transaction::pending_invite(&ctx.scope.canonical_profile, ctx.ownership,
+            &ctx.scope.account, input, || ctx.may_commit() && admission.admit())
+            .map_err(|err| if err.downcast_ref::<std::io::Error>().is_some_and(|e| e.kind() == std::io::ErrorKind::PermissionDenied) {
+                Problem::new(StatusCode::FORBIDDEN, "space_owner_required", "Space owner required")
+            } else { transport::unavailable() })?.ok_or_else(|| Problem::new(StatusCode::CONFLICT,
+                "space_offline", "An online space is required"))
+    }, || Problem::new(StatusCode::CONFLICT, "invite_outcome_unknown", "Check space membership"), false).await?;
+    transport::json_response(StatusCode::CREATED, member)
 }

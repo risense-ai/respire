@@ -74,7 +74,7 @@ where
     ), true).await
 }
 
-async fn submit_publication<T, F>(
+pub(super) async fn submit_publication<T, F>(
     scope: RestScope, run: F, unknown: fn() -> Problem, allow_original: bool,
 ) -> V1Result<T>
 where
