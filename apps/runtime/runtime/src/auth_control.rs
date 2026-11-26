@@ -91,9 +91,16 @@ impl AccountRequest {
         let key = request.idempotency_key.as_deref().context("account idempotency key is missing")?;
         if let Self::Complete(params) = self {
             ensure!(ownership.is_none(), "completion must not hold the running target's library lock");
+            let mut first = None;
             let receipt = login_transaction::control_account_complete(&params.binding.installation_root,
                 &params.binding.profile, &params.identity, id, key, params.candidate.as_ref(),
-                params.migration_password.as_deref(), verify_target_runtime)?;
+                params.migration_password.as_deref(), |receipt| {
+                    ensure!(receipt.operation_id == id, "unexpected account operation during verification");
+                    let target = receipt.target_profile.as_ref().context("receipt target is missing")?;
+                    let account = receipt.account_id.as_deref().context("receipt account is missing")?;
+                    let current = target_identity::verified_target_health(target, account)?;
+                    target_identity::check_completion_observation(&mut first, current)
+                })?;
             return login_transaction::login_reply(receipt);
         }
         let ownership = ownership.context("account library ownership is missing")?;
@@ -107,12 +114,6 @@ impl AccountRequest {
         };
         login_transaction::login_reply(receipt)
     }
-}
-
-pub(crate) fn verify_target_runtime(receipt: &HostAuthAccountResult) -> Result<()> {
-    let target = receipt.target_profile.as_ref().context("receipt target is missing")?;
-    let account = receipt.account_id.as_deref().context("receipt account is missing")?;
-    verify_ready_target_runtime(target, account)
 }
 
 pub(crate) fn verify_ready_target_runtime(target: &std::path::Path, account: &str) -> Result<()> {

@@ -34,6 +34,16 @@ pub(super) fn verified_target_health(target: &std::path::Path, account: &str) ->
     Ok(current)
 }
 
+/// Both journal callbacks in one completion must observe the same serving Runtime.
+pub(super) fn check_completion_observation(first: &mut Option<Health>, current: Health) -> Result<()> {
+    if let Some(previous) = first {
+        ensure!(same_serving_target(previous, &current), "verified Runtime changed during account completion");
+    } else {
+        *first = Some(current);
+    }
+    Ok(())
+}
+
 fn same_serving_target(before: &Health, after: &Health) -> bool {
     after.store_ready
         && before.pid == after.pid
@@ -63,6 +73,17 @@ mod tests {
             "data_dir": "/fixture/profile", "image_path": "/fixture/runtime",
             "image_sha256": "fixture-digest", "runtime_version": "fixture-version"
         })
+    }
+
+    #[test]
+    fn completion_rejects_a_replacement_generation() -> Result<()> {
+        let mut first = None;
+        check_completion_observation(&mut first, serde_json::from_value(serving())?)?;
+        check_completion_observation(&mut first, serde_json::from_value(serving())?)?;
+        let mut replacement = serving();
+        replacement["generation"] = json!(2);
+        assert!(check_completion_observation(&mut first, serde_json::from_value(replacement)?).is_err());
+        Ok(())
     }
 
     #[test]
