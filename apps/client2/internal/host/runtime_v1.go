@@ -4,8 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"slices"
+	"sync/atomic"
+	"time"
 
 	runtimesdk "github.com/risense-ai/respire/packages/runtime-sdk-go"
 )
@@ -61,7 +64,22 @@ func matchesRuntime(discovered runtimesdk.HealthResponse, health HealthInfo) boo
 
 // Use the live inspection only to refuse deletion before stopping Runtime.
 func (m *Manager) checkLiveM3Assets(ctx context.Context, health HealthInfo, target string) error {
-	client, err := runtimesdk.NewClient(m.Endpoint, runtimesdk.WithHTTPClient(m.localClient))
+	address, _, err := m.runtimeAccountEndpoint()
+	if err != nil {
+		return err
+	}
+	// A replacement listener cannot inherit the established TCP connection.
+	// Even net/http's transparent retry must never redial with the bearer.
+	var dialed atomic.Bool
+	transport := &http.Transport{DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+		if network != "tcp" || addr != address || !dialed.CompareAndSwap(false, true) {
+			return nil, errors.New("Runtime connection changed during asset inspection")
+		}
+		return (&net.Dialer{}).DialContext(ctx, network, addr)
+	}}
+	defer transport.CloseIdleConnections()
+	httpClient := &http.Client{Transport: transport, Timeout: 5 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	client, err := runtimesdk.NewClient(m.Endpoint, runtimesdk.WithHTTPClient(httpClient))
 	if err != nil {
 		return err
 	}
@@ -75,7 +93,32 @@ func (m *Manager) checkLiveM3Assets(ctx context.Context, health HealthInfo, targ
 	if !slices.Contains(discovered.Capabilities, "model.active_assets") {
 		return nil
 	}
-	response, err := client.GetActiveModelAssets(ctx)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, m.Endpoint+"/api/health", nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("X-Respire-Health", "runtime-v1")
+	res, err := httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	body, err := readRuntimeJSON(res)
+	res.Body.Close()
+	if err != nil {
+		return err
+	}
+	var peer HealthInfo
+	if json.Unmarshal(body, &peer) != nil || peer.InstanceID != health.InstanceID || peer.PID != health.PID || peer.ProcessStartID != health.ProcessStartID || peer.Generation != health.Generation || peer.AccountID != health.AccountID || peer.DataDir != health.DataDir {
+		return errors.New("Runtime scope changed before asset inspection")
+	}
+	token, err := m.localRuntimeToken(false)
+	if err != nil {
+		return err
+	}
+	response, err := client.GetActiveModelAssets(ctx, func(_ context.Context, req *http.Request) error {
+		req.Header.Set("Authorization", "Bearer "+token)
+		return nil
+	})
 	if err != nil {
 		return err
 	}

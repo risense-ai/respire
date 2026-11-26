@@ -380,12 +380,16 @@ func (s runtimeSession) hostFactors(store hostCredentialStore) (super, pass, leg
 }
 
 func (m *Manager) runtimeUnlockToken() (string, error) {
+	return m.localRuntimeToken(true)
+}
+
+func (m *Manager) localRuntimeToken(create bool) (string, error) {
 	if token := strings.TrimSpace(os.Getenv("RSRS_RPC_TOKEN")); token != "" {
 		return token, nil
 	}
 	path := filepath.Join(m.DataRoot, "runtime", "token")
 	body, err := readCredentialConfig(path, 65536)
-	if errors.Is(err, os.ErrNotExist) {
+	if create && errors.Is(err, os.ErrNotExist) {
 		var random [32]byte
 		if _, err := rand.Read(random[:]); err != nil {
 			return "", err

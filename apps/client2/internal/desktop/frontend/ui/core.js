@@ -36,11 +36,11 @@ export function notify(message, error = false) {
   node.hidden = !message;
   node.classList.toggle("error", error);
 }
-export async function api(path, body) {
+export async function api(path, body, signal) {
   const response = await fetch(
     "/api/" + path,
     body === undefined
-      ? {}
+      ? { signal }
       : {
           method: "POST",
           headers: {
@@ -52,7 +52,7 @@ export async function api(path, body) {
   );
   const data = await response.json();
   if (!response.ok || !data.ok)
-    throw new Error(data.error || `${i18nMessages.md8804b190e701500}${response.status})`);
+    throw Object.assign(new Error(data.error || `${i18nMessages.md8804b190e701500}${response.status})`), { status: response.status });
   return data.result;
 }
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));

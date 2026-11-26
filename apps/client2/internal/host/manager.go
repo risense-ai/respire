@@ -4,6 +4,7 @@ import "respire-client2/internal/i18n"
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -186,6 +187,7 @@ func (p Preferences) validate() error {
 }
 
 type TaskState struct {
+	ID    string `json:"id,omitempty"`
 	Busy  bool   `json:"busy"`
 	Stage string `json:"stage"`
 	Error string `json:"error,omitempty"`
@@ -214,6 +216,8 @@ type Manager struct {
 	startupControl  func(context.Context, InstalledRuntime) (*runtimeStartup, error)
 	cliInstallMu    sync.RWMutex
 	prefs           Preferences
+	completedTasks  []TaskState
+	taskChanged     chan struct{}
 	task            TaskState
 	taskCancel      context.CancelFunc
 	taskPause       bool
@@ -403,6 +407,7 @@ func (m *Manager) progress(stage string, done, total int64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.task.Stage, m.task.Done, m.task.Total = stage, done, total
+	m.notifyTaskChanged()
 }
 
 func (m *Manager) RunTask(stage string, action func() error) error {
@@ -413,10 +418,12 @@ func (m *Manager) RunTask(stage string, action func() error) error {
 	}
 	previous := m.task
 	m.task = TaskState{Busy: true, Stage: stage}
+	m.notifyTaskChanged()
 	m.mu.Unlock()
 	err := action()
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	defer m.notifyTaskChanged()
 	if errors.Is(err, errRuntimeUpdateDeferred) {
 		m.task = previous
 		return nil
@@ -438,20 +445,27 @@ func (m *Manager) RunTask(stage string, action func() error) error {
 // task snapshot never observe a stale pre-start terminal state. It reports
 // false when another task is already running, without touching that task.
 func (m *Manager) StartTaskCancellable(stage string, action func(ctx context.Context) error) bool {
+	return m.StartDownload(stage, action) != ""
+}
+
+func (m *Manager) StartDownload(stage string, action func(context.Context) error) string {
 	m.mu.Lock()
 	if m.task.Busy {
 		m.mu.Unlock()
-		return false
+		return ""
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	m.taskCancel = cancel
 	m.taskPause = false
-	m.task = TaskState{Busy: true, Stage: stage}
+	id := rand.Text()
+	m.task = TaskState{ID: id, Busy: true, Stage: stage}
+	m.notifyTaskChanged()
 	m.mu.Unlock()
 	go func() {
 		err := action(ctx)
 		m.mu.Lock()
 		defer m.mu.Unlock()
+		defer m.notifyTaskChanged()
 		m.taskCancel = nil
 		m.task.Busy = false
 		paused := m.taskPause && errors.Is(err, context.Canceled)
@@ -470,8 +484,12 @@ func (m *Manager) StartTaskCancellable(stage string, action func(ctx context.Con
 			m.task.Stage = i18n.Messagebf50abaf51e2a82f
 			m.task.Error = err.Error()
 		}
+		m.completedTasks = append(m.completedTasks, m.task)
+		if len(m.completedTasks) > 8 {
+			m.completedTasks = m.completedTasks[1:]
+		}
 	}()
-	return true
+	return id
 }
 
 // CancelTask aborts the running task; pause keeps partial chunks so the
@@ -487,3 +505,40 @@ func (m *Manager) CancelTask(pause bool) {
 }
 
 func (m *Manager) TaskSnapshot() TaskState { m.mu.Lock(); defer m.mu.Unlock(); return m.task }
+
+// WatchTask captures the snapshot and its next change under the same lock.
+func (m *Manager) WatchTask(id string) (TaskState, <-chan struct{}, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if id != "" && id == m.task.ID && m.task.Busy {
+		if m.taskChanged == nil {
+			m.taskChanged = make(chan struct{})
+		}
+		return m.task, m.taskChanged, true
+	}
+	for _, task := range m.completedTasks {
+		if task.ID == id {
+			return task, nil, true
+		}
+	}
+	return TaskState{}, nil, false
+}
+
+func (m *Manager) CancelDownload(id string, pause bool) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if id == "" || id != m.task.ID || !m.task.Busy || m.taskCancel == nil {
+		return false
+	}
+	m.taskPause = pause
+	m.taskCancel()
+	return true
+}
+
+// Called with m.mu held. Slow readers coalesce updates into the latest snapshot.
+func (m *Manager) notifyTaskChanged() {
+	if m.taskChanged != nil {
+		close(m.taskChanged)
+		m.taskChanged = nil
+	}
+}

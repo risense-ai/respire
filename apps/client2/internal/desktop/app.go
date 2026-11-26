@@ -32,6 +32,7 @@ var icon []byte
 var lightIcon []byte
 
 type desktop struct {
+	taskStreams   downloadStreams
 	app           *application.App
 	window        *application.WebviewWindow
 	panel         *application.WebviewWindow
