@@ -20,5 +20,8 @@ pub(super) use state::check_receipts;
 #[cfg(target_os = "linux")]
 pub(super) mod backup_import;
 
+#[cfg(target_os = "linux")]
+pub(super) use state::archive_claim::routes as archive_confirmation_routes;
+
 #[cfg(all(test, target_os = "linux"))]
-pub(super) use state::archive_claim::routes as archive_claim_fixture;
+pub(super) use state::archive_claim::fixture_routes as archive_claim_fixture;

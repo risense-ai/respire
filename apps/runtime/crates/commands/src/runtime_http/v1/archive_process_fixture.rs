@@ -336,7 +336,7 @@ fn native(f: &Frame, challenge: &[u8; 32]) -> Result<Value> {
     );
     let inspection = ArchiveClaim { inspect_only: true, target_identity: [0;32], ..claim };
     let lookup = archive_proof::issue(credential.as_bytes(), inspection, f.issued).context("owner inspection proof")?;
-    let prepared = agent.post(&format!("{base}/api/runtime/private-backup/claim"))
+    let prepared = agent.post(&format!("{base}/fixture/archive-claim"))
         .set("x-respire-archive-proof", &lookup).send_json(json!({"schema_version":2,"inspect_only":true,
             "operation_id":f.operation,"archive_sha256":hex::encode(f.wire),"target_sha256":hex::encode(f.target),
             "target_identity_sha256":hex::encode(inspection.target_identity)}));
@@ -354,7 +354,7 @@ fn native(f: &Frame, challenge: &[u8; 32]) -> Result<Value> {
         archive_proof::issue(credential.as_bytes(), claim, f.issued).context("owner proof")?;
     let frame = json!({"schema_version":2,"target_identity_sha256":hex::encode(f.identity),"operation_id":f.operation,"archive_sha256":hex::encode(f.wire),"target_sha256":hex::encode(f.target)});
     let reply = agent
-        .post(&format!("{base}/api/runtime/private-backup/claim"))
+        .post(&format!("{base}/fixture/archive-claim"))
         .set("x-respire-archive-proof", &tag)
         .send_json(frame);
     let mut result: Value = match reply {

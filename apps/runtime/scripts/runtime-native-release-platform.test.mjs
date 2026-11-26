@@ -7,7 +7,7 @@ import {assertMachONative, assertNativeLane, assertNativePE, nativeLanes, withou
 
 test('the supported native lanes require exact runner, Node and Rust architecture', () => {
   assert.deepEqual(Object.keys(nativeLanes), ['windows-x64', 'windows-arm64',
-    'linux-gnu-x64', 'linux-gnu-arm64', 'macos-arm64']);
+    'linux-gnu-x64', 'linux-gnu-arm64', 'macos-intel', 'macos-arm64']);
   for (const [name, lane] of Object.entries(nativeLanes)) {
     const actual = {runnerOS: lane.os, runnerArch: lane.arch.toUpperCase(), platform: lane.platform,
       arch: lane.arch, rustHost: lane.target};

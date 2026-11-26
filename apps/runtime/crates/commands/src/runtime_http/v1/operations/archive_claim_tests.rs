@@ -75,7 +75,7 @@ pub(super) async fn check(app: &Router, root: &Path, token: &Path) -> Result<()>
                       archive: [u8; 32],
                       target: [u8; 32],
                       proof: String| {
-        let request=Request::post("/api/runtime/private-backup/claim").header(header::HOST,BOUND.to_string())
+        let request=Request::post("/fixture/archive-claim").header(header::HOST,BOUND.to_string())
             .header("x-respire-archive-proof",proof).extension(ConnectInfo(crate::network::Peer(BOUND)))
             .body(Body::from(json!({"schema_version":2,"target_identity_sha256":hex::encode(identity),"query_only":query_only,"operation_id":id.to_string(),"archive_sha256":hex::encode(archive),"target_sha256":hex::encode(target)}).to_string()));
         let app = app.clone();

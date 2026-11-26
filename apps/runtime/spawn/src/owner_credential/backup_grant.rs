@@ -253,3 +253,17 @@ pub fn verify_vault_observation(
         .verify_slice(tag)
         .map_err(|_| io::ErrorKind::PermissionDenied.into())
 }
+
+fn request_mac(owner: &OwnerRecord, challenge: &[u8; 32], scope: &Scope) -> io::Result<Hmac<Sha256>> {
+    let mut mac = authenticator(owner, challenge)?;
+    mac.update(b"request-offline-grant/v1\0");
+    mac.update(&scope.commitment(&[0; 32], &[0; 16]));
+    Ok(mac)
+}
+
+pub fn sign_request(owner: &OwnerRecord, challenge: &[u8; 32], scope: &Scope) -> io::Result<[u8; 32]> {
+    Ok(request_mac(owner, challenge, scope)?.finalize().into_bytes().into())
+}
+pub fn verify_request(owner: &OwnerRecord, challenge: &[u8; 32], scope: &Scope, tag: &[u8; 32]) -> io::Result<()> {
+    request_mac(owner, challenge, scope)?.verify_slice(tag).map_err(|_| io::ErrorKind::PermissionDenied.into())
+}

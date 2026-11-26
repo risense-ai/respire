@@ -1,9 +1,7 @@
 //! Native claim of the registry's original owner-private upload ticket.
 use super::*;
 use crate::runtime_http::v1::owner_control;
-#[cfg(test)]
 use crate::runtime_http::v1::{owner_request, owner_scope::OwnerBinding};
-#[cfg(test)]
 use axum::{
     body,
     extract::{ConnectInfo, Request},
@@ -16,14 +14,14 @@ use respire_spawn::owner_credential::{
     archive_proof::ArchiveClaim, ArchiveTarget, ArchiveOperation, ArchivePublishError, BackupArchiveHandoff, PendingBackupArchive,
     ReadyBackupArchive,
 };
-#[cfg(test)]
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-#[cfg(test)]
 use std::net::SocketAddr;
 
+#[path = "archive_handoff.rs"]
+mod handoff;
+
 const TTL: Duration = Duration::from_secs(120);
-#[cfg(test)]
 const PATH: &str = "/api/runtime/private-backup/claim";
 
 pub(super) struct Pending {
@@ -247,10 +245,10 @@ fn receipt(claim: ArchiveClaim, handoff: BackupArchiveHandoff, identity: [u8;32]
         "target_identity_sha256":hex::encode(identity),"vault_epoch":epoch.to_string(),"intent_sha256":hex::encode(handoff.intent_sha256())})
 }
 
-#[cfg(test)]
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Frame {
+    handoff: Option<handoff::Request>,
     #[serde(default)]
     query_only: bool,
     #[serde(default)]
@@ -262,7 +260,6 @@ struct Frame {
     target_identity_sha256: String,
 }
 
-#[cfg(test)]
 fn digest(value: &str) -> V1Result<[u8; 32]> {
     let mut result = [0; 32];
     if value.bytes().any(|b| b.is_ascii_uppercase()) {
@@ -272,19 +269,24 @@ fn digest(value: &str) -> V1Result<[u8; 32]> {
     Ok(result)
 }
 
-#[cfg(test)]
 pub(in crate::runtime_http::v1) fn routes(bound: SocketAddr) -> Router {
     Router::new().route(
         PATH,
         post(
             move |ConnectInfo(crate::network::Peer(peer)): ConnectInfo<crate::network::Peer>,
-                  request: Request| serve(bound, peer, request),
+                  request: Request| serve(bound, peer, request, true),
         ),
     )
 }
 
 #[cfg(test)]
-async fn serve(bound: SocketAddr, peer: SocketAddr, request: Request) -> V1Result<Response> {
+pub(in crate::runtime_http::v1) fn fixture_routes(bound: SocketAddr) -> Router {
+    Router::new().route("/fixture/archive-claim", post(
+        move |ConnectInfo(crate::network::Peer(peer)): ConnectInfo<crate::network::Peer>, request: Request|
+            serve(bound, peer, request, false)))
+}
+
+async fn serve(bound: SocketAddr, peer: SocketAddr, request: Request, require_handoff: bool) -> V1Result<Response> {
     let (parts, stream) = request.into_parts();
     owner_request::admit_selected(&parts, peer, bound)?;
     if parts.uri.query().is_some()
@@ -305,8 +307,11 @@ async fn serve(bound: SocketAddr, peer: SocketAddr, request: Request) -> V1Resul
         .map_err(|_| transport::invalid())?
         .map_err(|_| transport::invalid())?;
     let frame: Frame = serde_json::from_slice(&bytes).map_err(|_| transport::invalid())?;
+    if require_handoff && !frame.inspect_only && !frame.query_only && frame.handoff.is_none() {
+        return Err(transport::unauthorized());
+    }
     let id = Uuid::parse_str(&frame.operation_id).map_err(|_| transport::invalid())?;
-    if frame.schema_version != 2
+    if frame.schema_version != if frame.handoff.is_some() { 3 } else { 2 }
         || id.to_string() != frame.operation_id
         || id.get_version_num() != 4
     {
@@ -357,7 +362,11 @@ async fn serve(bound: SocketAddr, peer: SocketAddr, request: Request) -> V1Resul
                 }
                 return Err(transport::unauthorized());
             }
-            entry.claim_archive(claim, || scope_matches() && fresh())
+            let armed = frame.handoff.map(|request| request.arm(claim, live)).transpose()?;
+            let mut receipt = entry.claim_archive(claim, || scope_matches() && fresh()
+                && armed.as_ref().is_none_or(handoff::Armed::current))?;
+            if let Some(armed) = armed { armed.deliver(&mut receipt, live)?; }
+            Ok(receipt)
         })
     })
     .await?;

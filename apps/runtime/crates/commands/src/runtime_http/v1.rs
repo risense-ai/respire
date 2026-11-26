@@ -70,7 +70,8 @@ pub(super) fn router(bound: SocketAddr) -> Router {
     #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
     let router = router.merge(device_spaces::routes(bound));
     #[cfg(target_os = "linux")]
-    let router = router.merge(backup_export::backup_routes(bound));
+    let router = router.merge(backup_export::backup_routes(bound))
+        .merge(operations::archive_confirmation_routes(bound));
     router
 }
 
@@ -201,3 +202,6 @@ fn close_connection(problem: Problem) -> Response {
     );
     response
 }
+
+#[cfg(target_os = "linux")]
+pub use backup_export::{BackupAdmission, BackupRestart};

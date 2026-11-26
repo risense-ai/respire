@@ -10,6 +10,8 @@ export const nativeLanes = Object.freeze({
     arch: 'x64', binary: 'rsrs-runtime'}),
   'linux-gnu-arm64': Object.freeze({target: 'aarch64-unknown-linux-gnu', os: 'Linux', platform: 'linux',
     arch: 'arm64', binary: 'rsrs-runtime'}),
+  'macos-intel': Object.freeze({target: 'x86_64-apple-darwin', os: 'macOS', platform: 'darwin',
+    arch: 'x64', binary: 'rsrs-runtime'}),
   'macos-arm64': Object.freeze({target: 'aarch64-apple-darwin', os: 'macOS', platform: 'darwin',
     arch: 'arm64', binary: 'rsrs-runtime'}),
 });

@@ -5,6 +5,8 @@
 //! concerns (MCP bridge, managed-registration id) arrive via `host_hooks`.
 mod legacy_rpc;
 mod v1;
+#[cfg(target_os = "linux")]
+pub use v1::{BackupAdmission, BackupRestart};
 pub(crate) use v1::owner_control::start_dispatch as start_owner_dispatch;
 pub(crate) use v1::operations::PendingSync;
 #[cfg(test)]

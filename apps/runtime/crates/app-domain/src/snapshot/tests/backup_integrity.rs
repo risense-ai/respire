@@ -1,6 +1,8 @@
     fn fixture() -> Result<(tempfile::TempDir, Connection)> {
         let directory = tempfile::tempdir()?;
-        let db = Connection::open(directory.path().join("rsrs.db"))?;
+        let path = directory.path().join("rsrs.db");
+        drop(private_new(&path)?);
+        let db = Connection::open(path)?;
         db.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE memories(id TEXT PRIMARY KEY,ciphertext TEXT,nonce TEXT,user TEXT NOT NULL DEFAULT 'account',created_at TEXT NOT NULL DEFAULT '2026-01-01T00:00:00Z',updated_at TEXT NOT NULL DEFAULT '2026-01-01T00:00:00Z'); CREATE TABLE access_grants(id TEXT PRIMARY KEY,label TEXT,root_id TEXT,token_hash TEXT,created_at TEXT,revoked INTEGER DEFAULT 0); CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT); INSERT INTO meta VALUES('memory_revision_v1','0123456789abcdef0123456789abcdef'); INSERT INTO access_grants(id,label,root_id,token_hash,created_at) VALUES('synthetic-grant','fixture','synthetic','synthetic-private-grant-marker','2026-01-01');")?;
         let (nonce, ciphertext) =
             crate::SessionKeys::from_urk([7; 32])?.encrypt_content("encrypted-fixture")?;
@@ -388,6 +390,10 @@ fn confirmed_archive_uses_exact_custody_and_only_installs_once() -> Result<()> {
     db.execute("DELETE FROM memories", [])?;
     drop(db);
     let live = root.join("rsrs.db");
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&live, fs::Permissions::from_mode(0o640))?;
+    assert_eq!(digest_file(&live).unwrap_err().to_string(), "snapshot file is not private");
+    fs::set_permissions(&live, fs::Permissions::from_mode(0o600))?;
     let before = digest_file(&live)?;
     for (target, operation, intent, digest) in [
         (id.as_str(), &operation, [0; 32], digest),

@@ -16,8 +16,6 @@ const profiles = [
   ["windows-arm64","aarch64-pc-windows-msvc","Windows","arm64"],
   ["linux-gnu-x64","x86_64-unknown-linux-gnu","Linux","x64","adjacent-dynamic"],
   ["linux-gnu-arm64","aarch64-unknown-linux-gnu","Linux","arm64","adjacent-dynamic"],
-  ["linux-musl-x64","x86_64-unknown-linux-musl","Linux","x64","static"],
-  ["linux-musl-arm64","aarch64-unknown-linux-musl","Linux","arm64","static"],
   ["macos-intel","x86_64-apple-darwin","macOS","x64","adjacent-dynamic"],
   ["macos-arm64","aarch64-apple-darwin","macOS","arm64","static"],
 ];
@@ -54,7 +52,12 @@ async function fixture(t) {
     await writeFile(join(e,`runtime-${lane}.json`),JSON.stringify({schema:1,mode:"dry-run",...provenance,
       target,tag,native_identity:{runner_os:os,runner_arch:arch.toUpperCase(),node_arch:arch,rust_host:target.replace(/-musl$/,"-gnu")},
       native_loader:loader,provider_archive_sha256:lane.startsWith("linux-gnu")
-        ?"769d1d3ea8ab6cd69f737c9dd4d4462aa4ad0ccfa106eaf506efc40d7bead5db":"e".repeat(64),
+        ?"769d1d3ea8ab6cd69f737c9dd4d4462aa4ad0ccfa106eaf506efc40d7bead5db":lane==="macos-intel"?"9c32108e9a1c78b090a95c2a219f244dd5f067d4caf68fb0f967103f3f20839c":"e".repeat(64),
+      packaged_inference:lane==="macos-intel"?{scope:"packaged-runtime-offline-intel-inference",source:provenance.source,
+        run_id:provenance.run_id,attempt:provenance.run_attempt,selected:"CPU",dimensions:4,cosine:1,
+        loaded_provider_sha256:"2d2306de2ea691044b0afa552d1b8ffb0e51baee3172d0988be587f0b68f27a0",
+        fixture_sha256:"291f57d2f44100a02bf83ed0339318e399f6d4d9fb5f2bea536e481824dd8a2d",tokenizer_sha256:"849c6e6797d8fe1b0b78f1fef1357d33c0d76b58c258c52be9fd1815aa59ac5a",
+        binary_sha256:digest(binary),archive_sha256:digest(packageBytes)}:undefined,
       packaged_native_smoke:{passed:true,case_results:caseResults},
       artifact_sha256:{[image]:digest(binary),[arc]:digest(packageBytes),[meta]:digest(data)},
     }));
@@ -74,13 +77,13 @@ async function fixture(t) {
 test("synthetic complete native matrix binds each asset and writes exact mirror evidence",async t=>{
   const {run,output,evidence}=await fixture(t);
   const result=await run();
-  assert.equal(Object.keys(result.receipt.assets).length,24);
+  assert.equal(Object.keys(result.receipt.assets).length,18);
   assert.deepEqual(result.provenance,provenance);
   const [official, mirror] = result.fanout.github;
   assert.deepEqual([official.repository, official.tag], ["risense-ai/respire", tag]);
   assert.deepEqual([mirror.repository, mirror.tag], ["risense-ai/respire-runtime", "v2.0.0-dev.31"]);
   assert.deepEqual(official.assets, mirror.assets);
-  assert.equal(official.assets.length, 24);
+  assert.equal(official.assets.length, 18);
   assert.deepEqual(result.fanout.npm, []);
   for (const [lane] of profiles) {
     const file = join(evidence, `runtime-${lane}-evidence-12345-2`, `runtime-${lane}.json`);
@@ -132,5 +135,24 @@ test("malformed, oversized and control-bearing receipts produce only a fixed fai
       return true;
     });
     await assert.rejects(access(output), {code: "ENOENT"});
+  }
+});
+
+test("unsupported Runtime musl receipts and stale Intel inference fail closed", async t => {
+  const {run, evidence, alter} = await fixture(t);
+  const foreign = join(evidence, "runtime-linux-musl-x64-evidence-12345-2");
+  await mkdir(foreign);
+  await assert.rejects(run(), /RUNTIME_NATIVE_RECEIPT_FAILED/);
+  await rm(foreign, {recursive:true});
+  await alter("macos-intel", body => { body.packaged_inference.attempt = "1"; });
+  await assert.rejects(run(), /RUNTIME_NATIVE_RECEIPT_FAILED/);
+});
+
+test("Intel proof must describe the assembled archive, binary, provider and fixture", async t => {
+  for (const key of ["archive_sha256","binary_sha256","loaded_provider_sha256","fixture_sha256","tokenizer_sha256"]) {
+    const {run, alter, output} = await fixture(t);
+    await alter("macos-intel", body => { body.packaged_inference[key] = "0".repeat(64); });
+    await assert.rejects(run(), /RUNTIME_NATIVE_RECEIPT_FAILED/);
+    await assert.rejects(access(output), {code:"ENOENT"});
   }
 });

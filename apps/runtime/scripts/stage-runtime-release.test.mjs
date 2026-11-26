@@ -134,3 +134,47 @@ test('Cargo invocation adapter normalizes the hardlinked image and rejects ambig
   assert.equal(readdirSync(args.root).filter(name => name.startsWith('runtime-build-')).length, 1);
   assert(!readdirSync(args.root).some(name => name.startsWith('runtime-cargo-image-')));
 });
+
+test('both six-argument staging commands package non-Intel inputs from a clean checkout', t => {
+  const {args, binary, resource} = fixture(t);
+  const scripts = join(args.root, 'apps/runtime/scripts');
+  mkdirSync(scripts, {recursive: true});
+  mkdirSync(join(args.root, 'scripts'));
+  for (const name of ['stage-runtime-release.mjs', 'stage-runtime-cargo.mjs']) {
+    copyFileSync(new URL(name, import.meta.url), join(scripts, name));
+  }
+  copyFileSync(new URL('../../../scripts/component-release-plan.mjs', import.meta.url),
+    join(args.root, 'scripts/component-release-plan.mjs'));
+  const git = (...argv) => execFileSync('git', argv, {cwd: args.root, encoding: 'utf8'}).trim();
+  git('init', '-q');
+  git('add', 'apps', 'scripts');
+  git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+    '-c', 'commit.gpgsign=false', 'commit', '-qm', 'test fixture');
+  const source = git('rev-parse', 'HEAD');
+  const targetDir = join(args.root, 'target');
+  const profile = join(targetDir, target, 'release');
+  const out = join(profile, 'build/respire_core_sdk-a/out');
+  mkdirSync(out, {recursive: true});
+  const executable = join(profile, 'rsrs-runtime.exe');
+  copyFileSync(binary, executable);
+  copyFileSync(resource, join(profile, 'DirectML.dll'));
+  copyFileSync(args.buildReceipt, join(out, 'source-build.json'));
+  const log = join(args.root, 'cargo.jsonl');
+  writeFileSync(log, [
+    {reason: 'compiler-artifact', target: {name: 'rsrs-runtime', kind: ['bin']}, executable},
+    {reason: 'build-script-executed', out_dir: out}, {reason: 'build-finished', success: true},
+  ].map(entry => JSON.stringify(entry)).join('\n'));
+  for (const [name, input, receipt] of [
+    ['stage-runtime-release.mjs', args.build, args.buildReceipt],
+    ['stage-runtime-cargo.mjs', targetDir, log],
+  ]) {
+    const invoke = triple => execFileSync(process.execPath,
+      [join(scripts, name), args.tag, source, triple, input, receipt, args.outputParent],
+      {cwd: args.root, encoding: 'utf8', stdio: 'pipe'});
+    const batch = JSON.parse(invoke(target));
+    assert.equal(batch.source, source);
+    assert.deepEqual(readFileSync(join(batch.directory, 'rsrs-runtime-' + target + '.exe')), readFileSync(binary));
+    assert.throws(() => invoke('x86_64-apple-darwin'), error =>
+      error.status === 1 && error.stderr.includes('Intel staging requires the verified provider'));
+  }
+});

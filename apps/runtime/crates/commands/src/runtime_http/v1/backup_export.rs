@@ -152,3 +152,6 @@ mod completion;
 #[cfg(target_os = "linux")]
 #[path = "backup_selected_receipt.rs"]
 mod selected_receipt;
+
+#[cfg(target_os = "linux")]
+pub use completion::{Admitted as BackupAdmission, Restart as BackupRestart};

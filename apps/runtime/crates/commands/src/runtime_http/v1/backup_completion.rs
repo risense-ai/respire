@@ -28,7 +28,7 @@ struct Completion {
     restarted: [u8; 16],
 }
 
-pub(super) struct Admitted {
+pub struct Admitted {
     scope: Scope,
     fingerprint: String,
     custody: BackupArchiveHandoff,
@@ -36,7 +36,7 @@ pub(super) struct Admitted {
 
 fn hash(bytes: &[u8]) -> [u8; 32] { Sha256::digest(bytes).into() }
 
-pub(super) struct Restart {
+pub struct Restart {
     operation: [u8; 16],
     instance: Uuid,
     file: [u8; 32],
@@ -44,7 +44,7 @@ pub(super) struct Restart {
 }
 
 impl Admitted {
-    pub(super) fn observe_parent(&self, original: &Health, fresh: &Health, selected: &ArchiveTarget,
+    pub fn observe_parent(&self, original: &Health, fresh: &Health, selected: &ArchiveTarget,
         snapshot: &str) -> Result<Restart> {
         use std::os::unix::fs::MetadataExt;
         let instance = self.restart_instance(original, fresh, selected)?;
@@ -89,7 +89,7 @@ impl Admitted {
         Ok(Restart { operation: self.scope.operation, instance, file, space: request.space.clone() })
     }
 
-    pub(super) fn retain(grant: &VerifiedGrant) -> Result<Self> {
+    pub fn retain(grant: &VerifiedGrant) -> Result<Self> {
         grant.check_fresh()?;
         let scope = *grant.scope();
         let custody = BackupArchiveHandoff::from_approved_intent(
@@ -99,7 +99,7 @@ impl Admitted {
 
     /// Called under the selected library lock, after verifying the restarted
     /// serving process and completing the original restore journal.
-    pub(super) fn publish(&self, profile: &Path, account: &str, selected: &ArchiveTarget,
+    pub fn publish(&self, profile: &Path, account: &str, selected: &ArchiveTarget,
         space: &str, restart: &Restart, snapshot: &str,
         ownership: &respire_app::lock::LibraryLock) -> Result<()> {
         let id = Uuid::from_bytes(self.scope.operation);

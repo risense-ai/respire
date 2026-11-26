@@ -106,7 +106,7 @@ async fn check_restarted(app: &Router, root: &Path) -> Result<()> {
         (issue(id).context("current proof")?, StatusCode::NOT_FOUND),
     ] {
         let frame = json!({"schema_version":2,"target_identity_sha256":hex::encode(identity),"operation_id":id.to_string(),"archive_sha256":hex::encode(hash),"target_sha256":hex::encode(target_hash)});
-        let req = Request::post("/api/runtime/private-backup/claim")
+        let req = Request::post("/fixture/archive-claim")
             .header(header::HOST, BOUND.to_string())
             .header("x-respire-archive-proof", proof)
             .extension(ConnectInfo(crate::network::Peer(BOUND)))

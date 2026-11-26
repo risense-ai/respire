@@ -73,7 +73,7 @@ async function* archive(files, binary) {
 
 // Only the current in-repository build's declared native files enter the
 // payload. The surrounding build job still owns binary provenance and native smoke.
-export async function stageRuntime({root, tag, source, target, build, buildReceipt, outputParent}) {
+export async function stageRuntime({root, tag, source, target, build, buildReceipt, outputParent, intelProvider}) {
   const plan = parseComponentTag(tag);
   const binary = `rsrs-runtime-${target}${target.endsWith('-windows-msvc') ? '.exe' : ''}`;
   const archiveName = `rsrs-runtime-${target}.tar.gz`;
@@ -99,6 +99,13 @@ export async function stageRuntime({root, tag, source, target, build, buildRecei
     sha.test(receipt.core_source_sha256 ?? '') && receipt.runtime_cargo_lock_sha256 === await hash(cargoLock) &&
     (receipt.ort_public_archive_sha256 === null || sha.test(receipt.ort_public_archive_sha256 ?? '')) &&
     receipt.runtime_files && Object.getPrototypeOf(receipt.runtime_files) === Object.prototype, 'Invalid source build receipt');
+  const intel = target === "x86_64-apple-darwin";
+  assert.equal(Boolean(intelProvider), intel, "Exactly Intel requires reviewed provider files");
+  if (intel) {
+    await directory(intelProvider);
+    assert.equal(receipt.runtime_files["libonnxruntime.dylib"],
+      "2d2306de2ea691044b0afa552d1b8ffb0e51baee3172d0988be587f0b68f27a0", "Intel provider differs");
+  }
   const runtimeFiles = Object.entries(receipt.runtime_files);
   assert(runtimeFiles.length <= 64 && runtimeFiles.every(([name, digest]) => nativeFile.test(name) && sha.test(digest)),
     'Unknown native resource name or checksum');
@@ -121,9 +128,16 @@ export async function stageRuntime({root, tag, source, target, build, buildRecei
     }
     await add(binary, join(build, target.endsWith('-windows-msvc') ? 'rsrs-runtime.exe' : 'rsrs-runtime'));
     const image = files[0];
-    for (const [name, pin] of runtimeFiles) await add(name, join(build, name), pin);
+    for (const [name, pin] of runtimeFiles) await add(intel && name === "libonnxruntime.dylib" ? "libonnxruntime.1.20.1.dylib" : name, join(build, name), pin);
     await add('core-notices/LICENSE.txt', join(coreRoot, 'LICENSE'));
-    for (const name of noticeNames) await add('core-notices/' + name, join(notices, name));
+    for (const name of noticeNames) {
+      const override = intel && {
+        "onnxruntime-LICENSE.txt": ["LICENSE", "c250d6278f0b47a6439fb7592b08b58a55eb9f535aa49a1db63211c3f982b674"],
+        "onnxruntime-ThirdPartyNotices.txt": ["ThirdPartyNotices.txt", "fac5bb85f568b38fd8f3a6aea32737985841f23a1a43e9ce952f79474f883aa9"],
+      }[name];
+      if (override) await add("core-notices/" + name, join(intelProvider, override[0]), override[1]);
+      else await add("core-notices/" + name, join(notices, name));
+    }
     files.sort((a,b) => a.path < b.path ? -1 : Number(a.path > b.path));
     const coreManifest = join(payload, 'core-runtime.json');
     await writeFile(coreManifest, json({schema_version: 1, target, files: files.filter(file => file !== image)
@@ -155,6 +169,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const args = process.argv.slice(2);
   assert(args.length === 6, 'Usage: stage-runtime-release.mjs <tag> <source-sha> <target> <build-dir> <source-build.json> <output-parent>');
   const [tag, source, target, build, buildReceipt, outputParent] = args;
+  assert.notEqual(target, "x86_64-apple-darwin", "Intel staging requires the verified provider from the native dry-run producer");
   const root = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
   assert.equal(git(root, 'rev-parse', 'HEAD'), source, 'Source SHA does not match checkout');
   assert.equal(git(root, 'status', '--porcelain', '--untracked-files=no'), '', 'Tracked checkout must be clean');
