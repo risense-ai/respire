@@ -38,6 +38,37 @@ def selected(pr, head):
             pr['head']['sha']==head and pr['base']['ref']=='main')
 
 
+
+FIXTURE_BODY = '<!-- respire-ui-preview:fixture -->'
+
+
+def fixture_body(pr, head, url):
+    if not (
+        selected(pr, head)
+        and pr['draft']
+        and pr['head']['ref'].startswith('test/client2-preview-')
+        and any(label['name'] == 'ui-preview' for label in pr['labels'])
+        and pr['body'] == FIXTURE_BODY
+    ):
+        return None
+    media = '\n\n'.join(
+        f'![{locale} screenshot]({url}{locale}.png?raw=true) · [{locale} MP4]({url}{locale}.mp4)'
+        for locale in ('en', 'zh')
+    )
+    return f'{FIXTURE_BODY}\n\nPreview of `{head}`\n\n{media}'
+
+
+def publish_fixture_body(number, head, url):
+    path = f'pulls/{number}'
+    body = fixture_body(api('GET', path), head, url)
+    if body is None:
+        return
+    api('PATCH', path, {'body': body})
+    result = api('GET', path)
+    if not selected(result, head) or result['body'] != body:
+        raise ValueError('fixture body publication not verified')
+    print(f'Published both locales to the fixture PR body at {head}')
+
 def inspect(raw):
     if len(raw)>LIMIT:
         raise ValueError('oversized archive')
@@ -94,6 +125,7 @@ def main():
         api('POST','git/refs',{'ref':'refs/heads/ui-previews','sha':commit})
     url=f'https://github.com/{REPO}/blob/{commit}/{folder}/'
     links = '\n\n'.join(f'[{locale} PNG]({url}{locale}.png?raw=true) · [{locale} MP4]({url}{locale}.mp4)' for locale in ('en','zh'))
+    publish_fixture_body(number, head, url)
     api('POST','check-runs',{'name':'Client2 preview','head_sha':head,
         'external_id':f'{run}/{attempt}/{aid}', 'status':'completed','conclusion':'success',
         'output':{'title':f'Preview of {head}', 'summary':links}})

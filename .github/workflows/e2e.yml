@@ -125,6 +125,11 @@ jobs:
             grep -Eq '^apps/client2/(.*/)?(frontend|desktop)/' "$RUNNER_TEMP/paths" || exit 0
           fi
           echo eligible=true >> "$GITHUB_OUTPUT"
+      - if: steps.paths.outputs.eligible == 'true' && github.event_name == 'pull_request'
+        name: Verify preview publication boundaries
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: python3 -m unittest discover -s scripts/pr-preview -p test_publish.py
       - if: steps.paths.outputs.eligible == 'true'
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -210,7 +215,7 @@ jobs:
     permissions:
       actions: read
       contents: write
-      pull-requests: read
+      pull-requests: write
       checks: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
