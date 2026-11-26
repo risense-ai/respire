@@ -78,7 +78,7 @@ impl StagedImport {
         #[cfg(not(windows))]
         {
             use std::os::unix::fs::{MetadataExt, PermissionsExt};
-            let meta = std::fs::symlink_metadata(self.path.as_ref())
+            let meta = std::fs::symlink_metadata(self.path())
                 .map_err(|_| transport::unavailable())?;
             if !meta.is_file()
                 || meta.file_type().is_symlink()
