@@ -183,7 +183,7 @@ pub(super) fn run_update_check(force: bool, clear: bool) -> Result<()> {
                 vec![OutputItem::new("version", status, s.comparison())],
             );
             if s.outdated {
-                result.actions.push("npm i -g rsrs-cli@latest".into());
+                result.actions.push(s.install_command());
             }
             emit_result(result)
         }
