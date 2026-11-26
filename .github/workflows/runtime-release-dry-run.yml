@@ -48,10 +48,13 @@ jobs:
           - {lane: windows-arm64, runner: windows-11-arm, node_arch: arm64, target: aarch64-pc-windows-msvc, image: rsrs-runtime-aarch64-pc-windows-msvc.exe}
           - {lane: linux-gnu-x64, runner: ubuntu-22.04, node_arch: x64, target: x86_64-unknown-linux-gnu, image: rsrs-runtime-x86_64-unknown-linux-gnu}
           - {lane: linux-gnu-arm64, runner: ubuntu-22.04-arm, node_arch: arm64, target: aarch64-unknown-linux-gnu, image: rsrs-runtime-aarch64-unknown-linux-gnu}
-          # Native macOS Intel and both Runtime musl profiles still need supported ORT inputs.
+          # Runtime x64 and ARM64 musl are excluded: GitHub returned HTTP 404 for
+          # gitlink lookups at microsoft/onnxruntime@da9b5e364c465de65c49d91e696cd6485270757f.
+          # The approved source closure is unavailable; CLI musl builds independently.
+          - {lane: macos-intel, runner: macos-15-intel, node_arch: x64, target: x86_64-apple-darwin, image: rsrs-runtime-x86_64-apple-darwin}
           - {lane: macos-arm64, runner: macos-15, node_arch: arm64, target: aarch64-apple-darwin, image: rsrs-runtime-aarch64-apple-darwin}
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 50
+    timeout-minutes: ${{ matrix.lane == 'macos-intel' && 135 || 50 }}
     env:
       RUNTIME_COMPONENT_TAG: runtime-v2.0.0-dev.31
       RUNTIME_DRY_RUN_LANE: ${{ matrix.lane }}
@@ -70,6 +73,9 @@ jobs:
         run: |
           rustup set default-host "$RUST_HOST"
           rustup toolchain install 1.95.0 --profile minimal
+      - name: Select reviewed Intel SDK
+        if: matrix.lane == 'macos-intel'
+        run: echo 'DEVELOPER_DIR=/Applications/Xcode_16.4.app/Contents/Developer' >> "$GITHUB_ENV"
       - name: Build, stage and smoke the reviewed Runtime source
         run: node apps/runtime/scripts/dry-run-native-release.mjs
       - name: Keep the source-bound coverage envelope
@@ -91,6 +97,40 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           retention-days: 3
+
+  runtime-assembly:
+    name: Verify six native Runtime lanes from this attempt
+    needs: native
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: runtime-*-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/runtime-evidence
+          merge-multiple: false
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: runtime-*-payload-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/runtime-payload
+          merge-multiple: false
+      - run: >-
+          node scripts/assemble-runtime-release-ci.mjs runtime-v2.0.0-dev.31
+          "$RUNNER_TEMP/runtime-evidence" "$RUNNER_TEMP/runtime-payload" "$RUNNER_TEMP/runtime-assembly"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: runtime-component-receipt-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/runtime-assembly/component-release-receipt.json
+          if-no-files-found: error
+          retention-days: 2
 
   cli:
     name: CLI / ${{ matrix.target }}

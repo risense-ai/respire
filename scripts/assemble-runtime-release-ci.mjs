@@ -13,8 +13,6 @@ const profiles = {
   "windows-arm64": ["aarch64-pc-windows-msvc", "Windows", "arm64"],
   "linux-gnu-x64": ["x86_64-unknown-linux-gnu", "Linux", "x64", "adjacent-dynamic"],
   "linux-gnu-arm64": ["aarch64-unknown-linux-gnu", "Linux", "arm64", "adjacent-dynamic"],
-  "linux-musl-x64": ["x86_64-unknown-linux-musl", "Linux", "x64", "static"],
-  "linux-musl-arm64": ["aarch64-unknown-linux-musl", "Linux", "arm64", "static"],
   "macos-intel": ["x86_64-apple-darwin", "macOS", "x64", "adjacent-dynamic"],
   "macos-arm64": ["aarch64-apple-darwin", "macOS", "arm64"],
 };
@@ -73,6 +71,22 @@ function smokeEvidence(report, lane, tag, provenance, names) {
     if (lane.startsWith("linux-gnu")) assert.equal(report.provider_archive_sha256,
       "769d1d3ea8ab6cd69f737c9dd4d4462aa4ad0ccfa106eaf506efc40d7bead5db",
       "GNU provider differs from prepare-gnu-ort.sh");
+  }
+  if (lane === "macos-intel") {
+    assert.equal(report.provider_archive_sha256, "9c32108e9a1c78b090a95c2a219f244dd5f067d4caf68fb0f967103f3f20839c");
+    const proof = report.packaged_inference;
+    assert.equal(proof?.scope, "packaged-runtime-offline-intel-inference");
+    assert.equal(proof.source, provenance.source);
+    assert.equal(proof.run_id, provenance.run_id);
+    assert.equal(proof.attempt, provenance.run_attempt);
+    assert.equal(proof.selected, "CPU");
+    assert.equal(proof.dimensions, 4);
+    assert(Number.isFinite(proof.cosine) && proof.cosine >= 0.99 && proof.cosine <= 1.001);
+    assert.equal(proof.loaded_provider_sha256, "2d2306de2ea691044b0afa552d1b8ffb0e51baee3172d0988be587f0b68f27a0");
+    assert.equal(proof.fixture_sha256, "291f57d2f44100a02bf83ed0339318e399f6d4d9fb5f2bea536e481824dd8a2d");
+    assert.equal(proof.tokenizer_sha256, "849c6e6797d8fe1b0b78f1fef1357d33c0d76b58c258c52be9fd1815aa59ac5a");
+    assert.equal(proof.binary_sha256, report.artifact_sha256["rsrs-runtime-x86_64-apple-darwin"]);
+    assert.equal(proof.archive_sha256, report.artifact_sha256["rsrs-runtime-x86_64-apple-darwin.tar.gz"]);
   }
   assert.deepEqual(Object.keys(report.artifact_sha256 ?? {}).sort(), names, "Native receipt asset set differs");
   assert(Object.values(report.artifact_sha256).every(value=>typeof value === "string" && hash.test(value)),

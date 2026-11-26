@@ -10,6 +10,10 @@ const triples = [
   "aarch64-unknown-linux-musl", "x86_64-apple-darwin", "aarch64-apple-darwin",
   "x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc",
 ];
+// GitHub returned HTTP 404 for the approved Microsoft ORT source gitlink lookups.
+// Both Runtime musl targets are excluded; CLI retains independent native builds.
+const runtimeExclusions = new Set(["x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl"]);
+const runtimeTriples = triples.filter(triple => !runtimeExclusions.has(triple));
 const npmPackages = ["rsrs-cli", ...[
   "linux-x64-gnu", "linux-x64", "linux-arm64-gnu", "linux-arm64", "macos-x64", "macos-arm64",
   "win-x64", "win-arm64",
@@ -39,7 +43,7 @@ function executable(prefix, triple) {
 export function expectedReleaseAssets(tag) {
   const {component, version} = parseComponentTag(tag);
   const github = component === "runtime"
-    ? triples.flatMap(triple => [executable("rsrs-runtime", triple), "runtime-build-" + triple + ".json",
+    ? runtimeTriples.flatMap(triple => [executable("rsrs-runtime", triple), "runtime-build-" + triple + ".json",
       "rsrs-runtime-" + triple + ".tar.gz"])
     : component === "cli"
       ? triples.flatMap(triple => [executable("rsrs", triple), "cli-build-" + triple + ".json"])
@@ -123,7 +127,7 @@ function metadata(assets, name) {
 }
 
 function checkNative(plan, sha, assets) {
-  for (const target of triples) {
+  for (const target of plan.component === "runtime" ? runtimeTriples : triples) {
     if (plan.component === "runtime") {
       const archive = "rsrs-runtime-" + target + ".tar.gz";
       const binary = executable("rsrs-runtime", target);
