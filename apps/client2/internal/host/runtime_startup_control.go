@@ -257,15 +257,6 @@ func (m *Manager) startupScope() (root, profile, account string, err error) {
 }
 
 func (m *Manager) acquireStartup(ctx context.Context, info InstalledRuntime) (guard *runtimeStartup, err error) {
-	if err := m.verifyRuntimeSelection(info); err != nil {
-		return nil, err
-	}
-	if _, ok := ctx.Deadline(); !ok {
-		return nil, errors.New("Startup control requires a caller deadline")
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
 	release, err := m.holdProfile()
 	if err != nil {
 		return nil, err
@@ -275,6 +266,15 @@ func (m *Manager) acquireStartup(ctx context.Context, info InstalledRuntime) (gu
 			release()
 		}
 	}()
+	if err := m.verifyRuntimeSelection(info); err != nil {
+		return nil, err
+	}
+	if _, ok := ctx.Deadline(); !ok {
+		return nil, errors.New("Startup control requires a caller deadline")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	root, profile, account, err := m.startupScope()
 	if err != nil {
 		return nil, err

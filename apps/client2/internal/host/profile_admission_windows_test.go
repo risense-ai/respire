@@ -77,9 +77,7 @@ func TestNewBindsConfiguredJunctionToPhysicalProfile(t *testing.T) {
 		t.Fatalf("replacement should pass standalone owner checks: %v", err)
 	}
 	replacement.close()
-	if _, err := m.removeRuntimeOwnedModel(t.Context(), HealthInfo{}, "m3"); !errors.Is(err, errProfileScope) {
-		t.Fatalf("replacement reached model admission: %v", err)
-	}
+	checkReplacedProfileControls(t, m)
 }
 
 func TestNewRefusesMissingProfileBelowOwnedJunction(t *testing.T) {
@@ -95,5 +93,15 @@ func TestNewRefusesMissingProfileBelowOwnedJunction(t *testing.T) {
 	}
 	if _, err := os.Stat(selected); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("unresolved profile touched: %v", err)
+	}
+}
+
+
+func TestNewRefusesJunctionAsProfileLeaf(t *testing.T) {
+	selected := syntheticJunctionProfile(t, t.TempDir())
+	t.Setenv("RSRS_DATA_DIR", filepath.Dir(selected))
+	t.Setenv("RSRS_RPC_PORT", "15169")
+	if _, err := New(); err == nil {
+		t.Fatal("junction itself was accepted as the configured profile")
 	}
 }

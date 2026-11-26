@@ -2,7 +2,6 @@ package host
 
 import (
 	"encoding/binary"
-	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -13,7 +12,6 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-var errProfileScope = errors.New("configured profile has no trusted local directory identity")
 
 // The ordinary path keeps its existing missing-suffix semantics. Only a raw,
 // explicitly selected, absolute local path can request junction admission.

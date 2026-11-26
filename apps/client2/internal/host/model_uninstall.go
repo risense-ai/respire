@@ -56,6 +56,11 @@ func (m *Manager) uninstallM3(ctx context.Context) (json.RawMessage, error) {
 }
 
 func (m *Manager) uninstallM3Locked(ctx context.Context) (result json.RawMessage, err error) {
+	release, err := m.holdProfile()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	// The current Client2 host can ask the running Runtime to remove its own
 	// assets, but cannot remove unowned legacy files or stop a live process.
 	if m.hostAuthority == nil && m.startupControl != nil {

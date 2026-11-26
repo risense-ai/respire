@@ -3,8 +3,10 @@ package host
 import (
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"syscall"
 	"testing"
 )
@@ -30,4 +32,37 @@ func TestNewChecksProfileBeforeCreatingClientDirectory(t *testing.T) {
 	if _, err := os.Lstat(filepath.Join(target, "profile")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("rejected profile was touched: %v", err)
 	}
+}
+
+// All serving callers, including already-locked maintenance callers, and both
+// native model verbs must stop before reading selections or launching helpers.
+func checkReplacedProfileControls(t *testing.T, m *Manager) {
+	t.Helper()
+	ctx := t.Context()
+	if _, err := m.startDetached(ctx, InstalledRuntime{}); !errors.Is(err, errProfileScope) {
+		t.Fatalf("startup reached selection: %v", err)
+	}
+	if _, err := m.startDetachedLocked(ctx, InstalledRuntime{}); !errors.Is(err, errProfileScope) {
+		t.Fatalf("locked startup reached selection: %v", err)
+	}
+	if _, err := m.launchRuntimeServing(ctx, &exec.Cmd{}); !errors.Is(err, errProfileScope) {
+		t.Fatalf("direct serving reached launch: %v", err)
+	}
+	if err := m.installRuntimeOwnedModel(ctx, HealthInfo{}, "m3", strings.NewReader(""), strings.NewReader("")); !errors.Is(err, errProfileScope) {
+		t.Fatalf("installation reached native model control: %v", err)
+	}
+	if _, err := m.removeRuntimeOwnedModel(ctx, HealthInfo{}, "m3"); !errors.Is(err, errProfileScope) {
+		t.Fatalf("removal reached native model control: %v", err)
+	}
+	if _, err := m.uninstallM3Locked(ctx); !errors.Is(err, errProfileScope) {
+		t.Fatalf("uninstall reached takeover admission: %v", err)
+	}
+}
+
+func TestReplacedProfileStopsServingAndModelControls(t *testing.T) {
+	root := t.TempDir()
+	m := &Manager{DataRoot: root, profile: profileAdmission{root: root, reopen: func() (func(), error) {
+		return nil, errProfileScope
+	}}}
+	checkReplacedProfileControls(t, m)
 }
