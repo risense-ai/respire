@@ -127,3 +127,6 @@ fn help_cannot_swallow_a_stop_or_unknown_argument() -> anyhow::Result<()> {
     }
     Ok(())
 }
+
+#[path = "runtime_help/operation.rs"]
+mod operation;

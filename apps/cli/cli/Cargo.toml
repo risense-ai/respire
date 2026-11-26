@@ -18,6 +18,10 @@ name = "rsrs"
 path = "src/main.rs"
 
 [dependencies]
+respire-runtime-sdk = { path = "../../../packages/runtime-sdk-rs" }
+reqwest = { version = "0.13", default-features = false, features = ["stream"] }
+tokio = { version = "1", features = ["rt", "time"] }
+futures = "0.3"
 respire_host_control = { path = "../crates/host-control" }
 respire_client_host = { path = "../crates/client-host", features = ["locks"] }
 respire_commands = { path = "../crates/commands" }
