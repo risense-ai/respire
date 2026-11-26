@@ -218,3 +218,67 @@ fn published_wire_image_reopens_by_native_identity_and_fresh_vault() -> Result<(
     assert_eq!(restored, db);
     Ok(())
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn durable_intent_fences_final_archive_by_operation_source_and_bytes() -> Result<()> {
+    use super::custody::{ImportWireIntent, PendingImportWire};
+    use respire_spawn::owner_credential::{MigrationCopy, MigrationSource};
+    use std::fs;
+    use uuid::Uuid;
+
+    let directory = tempfile::tempdir()?;
+    let root = directory.path().canonicalize()?;
+    let selected_db = root.join("fixture.db");
+    let other_db = root.join("other.db");
+    fs::write(&selected_db, b"untouched fixture source")?;
+    fs::write(&other_db, b"other fixture source")?;
+    let bytes = vec![77; 65_537];
+    let keys = crate::SessionKeys::from_urk([7; 32])?;
+    let mut description = manifest("alice", &bytes);
+    description.source_library = super::super::fingerprint_path(&selected_db)?;
+    let mut envelope = Vec::new();
+    seal_to_stage(&keys, "alice", description, bytes.as_slice(), &mut envelope, || Ok(()))?;
+    let mut body = envelope.as_slice();
+    let parsed = BackupArchiveHeader::read(&mut body)?;
+    let header = parsed.authenticate("alice", |ciphertext, nonce| keys.decrypt_content(ciphertext, nonce))?;
+    let operation = Uuid::new_v4();
+    let prepared = PendingImportWire::stage(operation, header, body, &root, &selected_db, || Ok(()))?;
+    let intent = prepared.intent_bytes()?;
+    let intent_digest: [u8; 32] = Sha256::digest(&intent).into();
+    let reopen = |body: &[u8], operation, selected: &std::path::Path| {
+        ImportWireIntent::reopen(body, intent_digest, operation, &root, selected, || Ok(()))
+    };
+    assert!(reopen(&intent, operation, &selected_db).is_err(), "pending is not final");
+    let mut private_intent = MigrationCopy::create(&root, ".fixture-intent.pending")?;
+    let native_intent = private_intent.source_identity(".fixture-intent.pending")?;
+    prepared.publish(|data| {
+        assert_eq!(data, intent);
+        private_intent.write_exact_stage(data.len() as u64, |writer| writer.write_all(data))?;
+        private_intent.publish(".fixture-intent.json")?;
+        assert!(reopen(data, operation, &selected_db).is_err(), "intent alone cannot deliver wire");
+        Ok(())
+    })?;
+    drop(keys);
+    let source = MigrationSource::open(&root, false)?;
+    let mut recovered_intent = Vec::new();
+    source.open_verified_file(".fixture-intent.json", native_intent, intent.len() as u64)?
+        .read_to_end(&mut recovered_intent)?;
+    assert!(reopen(&recovered_intent, Uuid::new_v4(), &selected_db).is_err());
+    assert!(reopen(&recovered_intent, operation, &other_db).is_err());
+    assert!(reopen(b"{}", operation, &selected_db).is_err());
+    let verified = reopen(&recovered_intent, operation, &selected_db)?;
+    let fresh = crate::SessionKeys::from_legacy_urk([7; 32])?;
+    let mut decoded = Vec::new();
+    open_to_stage(&fresh, "alice", verified, &mut decoded, || Ok(()))?;
+    assert_eq!(decoded, bytes);
+
+    let published = root.join(format!(".backup-wire-{operation}.archive"));
+    let mut changed = envelope;
+    let last = changed.last_mut().context("fixture has no archive body")?;
+    *last ^= 1;
+    fs::write(published, &changed)?;
+    assert!(reopen(&recovered_intent, operation, &selected_db).is_err());
+    assert_eq!(fs::read(selected_db)?, b"untouched fixture source");
+    Ok(())
+}

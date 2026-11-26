@@ -260,6 +260,10 @@ pub fn open_to_stage(
         .copy_to_stage(archive, stage, check)
 }
 
+#[cfg(all(test, target_os = "linux"))]
+#[path = "backup_import_custody.rs"]
+mod custody;
+
 #[cfg(test)]
 #[path = "backup_archive_tests.rs"]
 mod tests;
