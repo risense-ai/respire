@@ -94,9 +94,11 @@ fn check_versions(app: &mut App) {
     let shared = Arc::clone(&app.shared);
     std::thread::spawn(move || {
         let current = env!("CARGO_PKG_VERSION");
-        let message = match respire::update_check::fetch_dist_tags() {
+        let message = match respire::update_check::fetch_channel_choices() {
             Some((latest, dev)) => {
-                let spec = channel_spec();
+                let dev_channel = current.contains("-dev");
+                let spec = if dev_channel { &dev } else { &latest }.install_spec(dev_channel);
+                let (latest, dev) = (latest.version, dev.version);
                 let remote = if current.contains("-dev") {
                     dev.as_str()
                 } else {
