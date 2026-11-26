@@ -219,6 +219,8 @@ pub use runtime_library::{valid_device_space_name, DeviceSpaceAuthorityChanged, 
 #[path = "auth/runtime_memory.rs"]
 mod runtime_memory;
 pub use runtime_memory::RuntimeMemoryPage;
+#[path = "auth/organize_split.rs"]
+mod organize_split;
 
 pub fn clear_runtime_session() -> Result<()> {
     *RUNTIME_SESSION.lock().map_err(|_| anyhow!("runtime session lock poisoned"))? = None;

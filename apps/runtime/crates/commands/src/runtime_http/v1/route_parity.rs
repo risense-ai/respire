@@ -34,6 +34,7 @@ fn export_registered_routes() -> anyhow::Result<()> {
             ("POST", "/v1/sync/trigger", "triggerSync"),
             ("POST", "/v1/memories/recall", "recallMemories"),
             ("GET", "/v1/organize/suggestions", "getOrganizeSuggestions"),
+            ("POST", "/v1/organize/split", "splitOrganizeNode"),
         ] {
             assert!(actual.iter().any(|spec| {
                 spec.method.as_str() == method && spec.path == path && spec.operation_id == operation_id

@@ -2,6 +2,7 @@
 mod deepen;
 mod model_download;
 pub(super) mod model_switch;
+pub(super) mod organize_split;
 mod routes;
 mod state;
 mod sync;

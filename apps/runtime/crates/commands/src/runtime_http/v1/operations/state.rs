@@ -242,6 +242,14 @@ impl Job {
         final_commit: bool,
         action: impl FnOnce() -> anyhow::Result<()>,
     ) -> anyhow::Result<()> {
+        self.commit(final_commit, action)
+    }
+
+    pub(super) fn commit(
+        &self,
+        final_commit: bool,
+        action: impl FnOnce() -> anyhow::Result<()>,
+    ) -> anyhow::Result<()> {
         let mut state = self.0.lock().map_err(|_| anyhow::anyhow!("operation state unavailable"))?;
         anyhow::ensure!(
             state.snapshot.state == Phase::Running && !state.cancel_requested && !state.committed,
@@ -287,6 +295,15 @@ impl Job {
 }
 
 impl Job {
+    pub(super) fn fail_problem(&self, problem: &Problem) {
+        if let Ok(mut state) = self.0.lock() {
+            if !state.snapshot.terminal() {
+                state.snapshot.error = Some(problem.body());
+                self.0.finish(&mut state, Phase::Failed);
+            }
+        }
+    }
+
     pub(super) fn fail(&self, code: &'static str) {
         if let Ok(mut state) = self.0.lock() {
             if !state.snapshot.terminal() {
