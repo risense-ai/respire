@@ -107,6 +107,10 @@ fn usage() -> &'static str {
 }
 
 fn run(boot_token: Option<String>) -> Result<i32> {
+    if std::env::args().nth(1).as_deref() == Some("--host-soft-logout-internal") {
+        anyhow::ensure!(boot_token.is_none() && std::env::args_os().count() == 2, "invalid native logout invocation");
+        return native_soft_logout();
+    }
     if std::env::args().nth(1).as_deref() == Some("--startup-control-internal") {
         anyhow::ensure!(
             boot_token.is_none() && std::env::args_os().count() == 2,
@@ -452,4 +456,47 @@ fn print_envelope(id: &str, ok: bool, exit: i32, error: Option<&str>, result: Op
     let mut handle = stdout.lock();
     let _ = writeln!(handle, "{body}");
     let _ = handle.flush();
+}
+
+/// Native owner client. It emits only the acknowledged result; no reusable proof leaves this process.
+fn native_soft_logout() -> Result<i32> {
+    use std::{io::Read, path::Path, time::{Duration, SystemTime, UNIX_EPOCH}};
+    use sha2::{Digest, Sha256};
+    use respire_commands::rpc_worker;
+    #[cfg(windows)]
+    normalize_configured_data_root()?;
+    let mut input = String::new();
+    std::io::stdin().take(37).read_to_string(&mut input)?;
+    let id = uuid::Uuid::parse_str(&input)?;
+    anyhow::ensure!(input == id.to_string(), "invalid native operation UUID");
+    let port = net_rpc::rpc_port();
+    let base = format!("http://127.0.0.1:{port}");
+    let health = net_rpc::health()?;
+    let instance = uuid::Uuid::parse_str(&health.instance_id)?;
+    let profile = respire_app::service::data_dir().canonicalize()?;
+    let read_endpoint = || startup_identity::read_private_file(&rpc_worker::endpoint_path())?
+        .context("missing private endpoint");
+    let published = read_endpoint()?;
+    let endpoint: serde_json::Value = serde_json::from_slice(&published)?;
+    anyhow::ensure!(health.store_ready && health.generation > 0 && health.url == base
+        && Path::new(&health.installation_root).canonicalize()? == respire_app::service::main_data_dir().canonicalize()?
+        && Path::new(&health.data_dir).canonicalize()? == profile && endpoint["pid"] == health.pid
+        && endpoint["instance_id"] == health.instance_id && endpoint["process_start_id"] == health.process_start_id
+        && net_rpc::pid_listening_on(port) == Some(health.pid) && net_rpc::instance_is_running(&health)?,
+        "local serving owner changed");
+    let session = startup_identity::read_private_file(&profile.join("session.json"))?.context("missing session")?;
+    let revision = Sha256::digest(&session);
+    let owner = respire_spawn::owner_credential::read_owner_credential(&rpc_worker::runtime_dir(), &health.instance_id)?;
+    let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis().try_into()?;
+    let proof = respire_spawn::owner_credential::proof::issue_soft_logout(owner.as_bytes(), id.as_bytes(),
+        instance.as_bytes(), health.generation, revision.as_ref(), now).context("logout proof unavailable")?;
+    anyhow::ensure!(read_endpoint()? == published, "endpoint changed");
+    let agent = ureq::AgentBuilder::new().try_proxy_from_env(false).redirects(0).timeout(Duration::from_secs(35)).build();
+    let response = agent.post(&format!("{base}/v1/host/transactions/logout"))
+        .set("x-respire-operation-id", &id.to_string()).set("x-respire-session-revision", &format!("{revision:x}"))
+        .set("x-respire-host-proof", proof.as_str()).call().map_err(|_| anyhow::anyhow!("logout unconfirmed"))?;
+    let reply: serde_json::Value = serde_json::from_reader(response.into_reader().take(1024))?;
+    anyhow::ensure!(reply == serde_json::json!({"status":"completed"}), "logout unconfirmed");
+    serde_json::to_writer(std::io::stdout().lock(), &reply)?;
+    Ok(0)
 }

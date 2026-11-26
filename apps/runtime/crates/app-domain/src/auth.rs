@@ -223,7 +223,9 @@ pub use runtime_memory::RuntimeMemoryPage;
 mod organize_split;
 
 pub fn clear_runtime_session() -> Result<()> {
-    *RUNTIME_SESSION.lock().map_err(|_| anyhow!("runtime session lock poisoned"))? = None;
+    // Match unlock's session-then-provider lock order through both updates.
+    let mut current = RUNTIME_SESSION.lock().map_err(|_| anyhow!("runtime session lock poisoned"))?;
+    *current = None;
     crate::credential_io::supply_credentials(Vec::new())?;
     Ok(())
 }
