@@ -119,3 +119,7 @@ async fn next(state: Option<FrameContext>) -> Option<(io::Result<Bytes>, Option<
         _ => Some((Err(io::Error::other("backup stream interrupted")), None)),
     }
 }
+
+#[cfg(test)]
+#[path = "backup_export_http_tests.rs"]
+mod tests;
