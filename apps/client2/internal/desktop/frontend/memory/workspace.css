@@ -1,2 +1,4 @@
 @import url("./workspace.part1.css");
 @import url("./workspace.part2.css");
+
+#view .view-page .page-heading { outline: 2px solid #156bd1; }
