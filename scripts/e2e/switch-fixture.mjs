@@ -36,7 +36,15 @@ export async function prepareSwitch(runtime, rollback) {
   }
   await writeFile(join(root,'embedding-profiles-v1.json'), JSON.stringify({models,backends:{}}), {flag:'wx',mode:0o600});
   const request = spec => runtime.target.request(spec);
-  const started = await request({method:'POST', path:'/v1/models/switch', body:{model_id:incumbent,engine:'cpu'}});
+  if (!rollback) {
+    // Populate the disposable library before starting either switch worker.
+    for (let n=0;n<128;n++) {
+      const stored=await request({method:'POST',path:'/v1/memories',body:{content:'Synthetic background record '+n}});
+      assert.equal(stored.status,201,'fixture seed '+(n+1)+'/128: expected HTTP 201, received '+stored.status);
+    }
+  }
+  const admission = rollback ? runtime.target : settledSwitchTarget(runtime);
+  const started = await admission.request({method:'POST', path:'/v1/models/switch', body:{model_id:incumbent,engine:'cpu'}});
   assert.equal(started.status,202,'incumbent switch admission');
   assert.equal(typeof started.data.operation_id,'string');
   const deadline = Date.now() + 30_000;
@@ -49,18 +57,11 @@ export async function prepareSwitch(runtime, rollback) {
   }
   const active = await request({method:'GET',path:'/v1/models/active-assets'});
   assert.equal(active.data.active_model_id,incumbent);
-  if (!rollback) {
-    // Give the real reindexer bounded work. The unchanged scenario checks real overlap.
-    for (let n=0;n<128;n++) {
-      const stored=await request({method:'POST',path:'/v1/memories',body:{content:'Synthetic background record '+n}});
-      assert.equal(stored.status,201);
-    }
-  }
   return rollback ? {rollbackModel:candidate} : {switchModel:candidate};
 }
 
 
-// Called immediately before the frozen candidate POST, after its marker write.
+// Before a switch, check that the owned Runtime is idle without retrying the POST.
 export function settledSwitchTarget(runtime) {
   const target = runtime.target;
   return {...target, async request(spec) {
