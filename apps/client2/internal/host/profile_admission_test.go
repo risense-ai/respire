@@ -39,6 +39,9 @@ func TestNewChecksProfileBeforeCreatingClientDirectory(t *testing.T) {
 func checkReplacedProfileControls(t *testing.T, m *Manager) {
 	t.Helper()
 	ctx := t.Context()
+	if err := m.stopManaged(ctx, HealthInfo{}); !errors.Is(err, errJunctionTakeover) {
+		t.Fatalf("managed stop reached process inspection: %v", err)
+	}
 	if runtime.GOOS == "linux" || runtime.GOOS == "windows" {
 		checkJunctionMigrationRejected(t, m)
 	}
@@ -79,13 +82,22 @@ func checkJunctionMigrationRejected(t *testing.T, m *Manager) {
 	previous := m.hostAuthority
 	m.hostAuthority = authority
 	defer func() { m.hostAuthority = previous }()
+	if _, err := m.Submit("migration_apply", "desktop-"+operation, []byte(`{"source":"synthetic","account":"synthetic"}`), true, ""); !errors.Is(err, errJunctionTakeover) {
+		t.Fatalf("migration reached the desktop queue: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(m.DataRoot, "client2", "requests.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("rejected migration touched the request ledger: %v", err)
+	}
+	if len(m.Operations()) != 0 {
+		t.Fatal("rejected migration scheduled a background operation")
+	}
+	if _, err := m.desktopRuntimeAccountLogin(t.Context(), nil, "", "desktop-"+operation, "auth.login.browser"); !errors.Is(err, errJunctionTakeover) {
+		t.Fatalf("junction login reached browser authorization: %v", err)
+	}
 	for _, query := range []bool{false, true} {
 		if _, err := m.desktopLegacyMigration(t.Context(), "desktop-"+operation, nil, query); !errors.Is(err, errJunctionTakeover) {
 			t.Fatalf("migration query=%t reached transaction admission: %v", query, err)
 		}
-	}
-	if _, err := m.prepareRuntimeAccountControl(t.Context(), "", "", m.DataRoot, nil, nil); !errors.Is(err, errJunctionTakeover) {
-		t.Fatalf("private helper grant reached native preparation: %v", err)
 	}
 	if _, _, err := m.desktopOfflineKeygen(t.Context(), "desktop-"+operation, false); !errors.Is(err, errJunctionTakeover) {
 		t.Fatalf("cold keygen reached native preparation: %v", err)

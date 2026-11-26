@@ -77,6 +77,9 @@ func TestNewBindsConfiguredJunctionToPhysicalProfile(t *testing.T) {
 		t.Fatalf("replacement should pass standalone owner checks: %v", err)
 	}
 	replacement.close()
+	if _, err := m.installModelEngines(t.Context()); !errors.Is(err, errJunctionTakeover) {
+		t.Fatalf("junction provider install reached catalog download: %v", err)
+	}
 	checkReplacedProfileControls(t, m)
 }
 

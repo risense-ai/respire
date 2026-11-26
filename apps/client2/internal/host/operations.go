@@ -91,6 +91,11 @@ func (m *Manager) loadOperations() error {
 }
 
 func (m *Manager) persistOperationsLocked() error {
+	release, err := m.holdProfile()
+	if err != nil {
+		return err
+	}
+	defer release()
 	var records []operationRecord
 	for _, j := range m.jobs {
 		if j.write {
@@ -215,6 +220,11 @@ func (m *Manager) Submit(name, id string, raw json.RawMessage, confirmed bool, s
 	spec, ok := operationSpec(name)
 	if !ok {
 		return Operation{}, errors.New(i18n.Messageeee8760c4f458b6c)
+	}
+	if name == "migration_apply" {
+		if err := m.requireTakeoverProfile(); err != nil {
+			return Operation{}, err
+		}
 	}
 	if spec.write && !confirmed {
 		return Operation{}, errors.New(i18n.Messagec7e0be86a2792c5e)
