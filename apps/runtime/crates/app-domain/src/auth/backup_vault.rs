@@ -23,7 +23,7 @@ impl RuntimeLibrary<'_> {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 impl RuntimeLibrary<'_> {
     /// Seal the historical SQLite key check only for an identified detached
     /// backup draft rather than offering arbitrary challenge signing.
@@ -103,7 +103,7 @@ mod tests {
         assert_eq!(staged, wire);
         Ok(())
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn detached_backup_only_seals_matching_live_vault_and_exact_stage() -> Result<()> {
         use crate::transport::local::LocalStore;
