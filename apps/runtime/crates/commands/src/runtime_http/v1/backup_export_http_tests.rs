@@ -497,12 +497,38 @@ fn verify_http(bound: SocketAddr, root: &Path, urk: [u8; 32]) -> Result<()> {
     let main_uuid = uuid::Uuid::parse_str(main_op)?;
     assert_eq!(list_ids("main")?, BTreeSet::from([parent.clone(), parent_extra]));
     let main_confirm_proof = sign_confirm(main_uuid, main_digest, main_target)?;
-    let confirmed_main = call_confirm(main_uuid, main_digest, main_target, &main_confirm_proof)?;
-    assert_eq!(confirmed_main.status(), 200);
+    // Disconnect mid-commit after restore starts: restore task must still finalize Completed, not Failed.
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (proceed_tx, proceed_rx) = std::sync::mpsc::channel();
+    super::super::operations::backup_import::set_during_restore_hook(Box::new(move || {
+        let _ = entered_tx.send(());
+        let _ = proceed_rx.recv_timeout(WAIT);
+    }));
+    {
+        use std::{io::Write, net::TcpStream};
+        let payload = serde_json::to_vec(&json!({
+            "schema_version": 1, "operation_id": main_op,
+            "archive_sha256": hex::encode(main_digest), "target_sha256": hex::encode(main_target),
+        }))?;
+        let mut stream = TcpStream::connect(bound)?;
+        stream.set_write_timeout(Some(WAIT))?;
+        write!(
+            stream,
+            "POST /api/runtime/private-backup/confirm HTTP/1.1\r\nHost: {bound}\r\nx-respire-backup-proof: {main_confirm_proof}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            payload.len()
+        )?;
+        stream.write_all(&payload)?;
+        stream.flush()?;
+        entered_rx.recv_timeout(WAIT)?;
+        drop(stream);
+        thread::sleep(Duration::from_millis(30));
+        let _ = proceed_tx.send(());
+    }
     wait_completed(main_op)?;
     assert_eq!(list_ids("main")?, BTreeSet::from([parent]));
     assert_eq!(list_ids(space)?, BTreeSet::from([child]));
     assert_eq!(backup_stage_count(root)?, 0);
+    ensure!(matches!(call_confirm(main_uuid, main_digest, main_target, &main_confirm_proof), Err(ureq::Error::Status(401, _))));
     Ok(())
 }
 

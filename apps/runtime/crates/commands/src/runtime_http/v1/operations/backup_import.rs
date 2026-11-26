@@ -31,10 +31,20 @@ static UPLOADS: Semaphore = Semaphore::const_new(2);
 static PENDING_IMPORTS: OnceLock<Mutex<BTreeMap<Uuid, PendingImport>>> = OnceLock::new();
 #[cfg(test)]
 static BEFORE_RESTORE_COMMIT: OnceLock<Mutex<Option<Box<dyn FnOnce() + Send>>>> = OnceLock::new();
+#[cfg(test)]
+static DURING_RESTORE_COMMIT: OnceLock<Mutex<Option<Box<dyn FnOnce() + Send>>>> = OnceLock::new();
 
 #[cfg(test)]
 pub(in crate::runtime_http::v1) fn set_before_restore_hook(hook: Box<dyn FnOnce() + Send>) {
     let slot = BEFORE_RESTORE_COMMIT.get_or_init(|| Mutex::new(None));
+    if let Ok(mut guard) = slot.lock() {
+        *guard = Some(hook);
+    }
+}
+
+#[cfg(test)]
+pub(in crate::runtime_http::v1) fn set_during_restore_hook(hook: Box<dyn FnOnce() + Send>) {
+    let slot = DURING_RESTORE_COMMIT.get_or_init(|| Mutex::new(None));
     if let Ok(mut guard) = slot.lock() {
         *guard = Some(hook);
     }
@@ -322,14 +332,26 @@ pub(in crate::runtime_http::v1) async fn confirm_local_restore(
     {
         let _ = tokio::task::spawn_blocking(hook).await;
     }
-    let staged_path = staged.to_path_buf();
-    let result = rest_dispatch::submit_backup_restore(owner, move |ctx| {
+    rest_dispatch::submit_backup_restore(owner, move |ctx| {
         reads::with_memory_store(ctx, selected, |store, _| {
-            match job.commit(true, || {
+            let outcome = job.commit(true, || {
+                #[cfg(test)]
+                if let Some(hook) = DURING_RESTORE_COMMIT
+                    .get()
+                    .and_then(|slot| slot.lock().ok().and_then(|mut guard| guard.take()))
+                {
+                    hook();
+                }
                 ctx.library
-                    .restore_staged_backup(&target, &staged_path, &manifest, store)
-            }) {
-                Ok(()) => Ok(job),
+                    .restore_staged_backup(&target, staged.as_ref(), &manifest, store)
+            });
+            drop(staged);
+            match outcome {
+                Ok(()) => {
+                    let _ = job.progress(100);
+                    job.finish(Phase::Completed);
+                    Ok(())
+                }
                 Err(error) => {
                     if matches!(
                         error.downcast_ref::<crate::model_progress::OperationStopped>(),
@@ -350,16 +372,7 @@ pub(in crate::runtime_http::v1) async fn confirm_local_restore(
             }
         })
     })
-    .await;
-    drop(staged);
-    match result {
-        Ok(job) => {
-            let _ = job.progress(100);
-            job.finish(Phase::Completed);
-            Ok(())
-        }
-        Err(problem) => Err(problem),
-    }
+    .await
 }
 
 async fn resolve_target(selected: Option<String>, scope: transport::RestScope) -> V1Result<PathBuf> {
