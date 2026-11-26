@@ -1,9 +1,7 @@
 //! Projection boundary for a supervisor-published terminal backup import.
 //! A legacy snapshot operation ID is not evidence of a typed HTTP import.
-use super::{
-    super::{transport, transport::RestScope, V1Result},
-    state::{Phase, Snapshot},
-};
+use super::{Phase, Snapshot};
+use crate::runtime_http::v1::{transport, transport::RestScope, V1Result};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::{fmt::Write, path::Path};

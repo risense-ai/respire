@@ -10,6 +10,9 @@ use std::{
 use tokio::sync::watch;
 use uuid::Uuid;
 
+#[path = "backup_restore_receipt.rs"]
+pub(super) mod backup_restore_receipt;
+
 const MAX_TRACKED: usize = 128;
 const TERMINAL_RETENTION: Duration = Duration::from_secs(600);
 
