@@ -272,6 +272,15 @@
   font-size: 0.6875rem;
   margin-top: 7px;
 }
+/* Keep the full entry count inside the focused day button on narrow windows. */
+@media (max-width: 1100px) {
+  .diary-grid .calendar-day small {
+    min-width: 0;
+    max-inline-size: 100%;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+}
 .calendar-weekday {
   text-align: center;
   color: var(--muted);
