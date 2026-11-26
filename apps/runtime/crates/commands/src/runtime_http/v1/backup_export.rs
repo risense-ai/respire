@@ -10,6 +10,7 @@ use axum::{
     http::{header, Method, StatusCode},
     response::{IntoResponse, Response},
 };
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use respire_app::snapshot::backup_archive::{BackupExportDraft, BackupExportReader};
 use std::{
     io,
@@ -44,14 +45,22 @@ pub(super) async fn get(bound: SocketAddr, peer: SocketAddr, request: Request) -
     }
     transport::json_optional::<serde_json::Value>(body, 0).await?;
     let permit = ADMISSION.try_acquire().map_err(|_| transport::unavailable())?;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     let source = rest_dispatch::submit(scope.clone(), Access::Read, move |ctx| {
         reads::with_memory_store(ctx, selected, |store, _| {
             store.prepare_backup_export(&ctx.scope.canonical_profile).map_err(|_| transport::unavailable())
         })
     }).await?;
+    #[cfg(windows)]
+    let target = rest_dispatch::submit(scope.clone(), Access::Read, move |ctx| {
+        reads::with_memory_store(ctx, selected, |store, _| {
+            store.backup_target().map_err(|_| transport::unavailable())
+        })
+    }).await?;
     let cancelled = Arc::new(AtomicBool::new(false));
     let _cancel = CancelPreparation(Arc::clone(&cancelled));
     let worker_scope = scope.clone();
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     let setup = tokio::task::spawn_blocking(move || -> Result<_> {
         let deadline = Instant::now() + PREPARATION_LIMIT;
         let check = || -> Result<()> {
@@ -68,8 +77,39 @@ pub(super) async fn get(bound: SocketAddr, peer: SocketAddr, request: Request) -
         check()?;
         Ok((reader, permit))
     });
-    let result = tokio::time::timeout(PREPARATION_LIMIT, setup).await
-        .ok().and_then(|join| join.ok()).and_then(Result::ok);
+    #[cfg(windows)]
+    let setup = tokio::task::spawn_blocking(move || -> Result<_> {
+        let deadline = Instant::now() + PREPARATION_LIMIT;
+        let check = || -> Result<()> {
+            ensure!(!cancelled.load(Ordering::Acquire) && Instant::now() < deadline, "backup preparation ended");
+            verify(&worker_scope, || Ok(()))
+        };
+        check()?;
+        let staged = PortableStage::new(worker_scope.canonical_profile.join(format!(
+            ".backup-export-{}.pending",
+            uuid::Uuid::new_v4().simple()
+        )));
+        let header = with_library(&worker_scope, |library| {
+            library.seal_portable_backup_export(&target, &staged.0)
+        })?;
+        check()?;
+        let file = std::fs::File::open(&staged.0)?;
+        let reader = PortableReader {
+            header: io::Cursor::new(header),
+            file,
+            remaining: std::fs::metadata(&staged.0)?.len(),
+            _staged: staged,
+        };
+        Ok((reader, permit))
+    });
+    let result = match tokio::time::timeout(PREPARATION_LIMIT, setup).await {
+        Ok(Ok(Ok(value))) => Some(value),
+        Ok(Ok(Err(error))) => {
+            eprintln!("command=backup_export status=fail error={error:#}");
+            None
+        }
+        Ok(Err(_)) | Err(_) => None,
+    };
     let Some((reader, permit)) = result else {
         return if !scope.bearer_is_current() { Err(transport::unauthorized()) }
             else { Err(transport::unavailable()) };
@@ -81,6 +121,48 @@ pub(super) async fn get(bound: SocketAddr, peer: SocketAddr, request: Request) -
         [(header::CONTENT_TYPE, "application/octet-stream"), (header::CACHE_CONTROL, "no-store")],
         body,
     ).into_response())
+}
+
+#[cfg(windows)]
+struct PortableStage(std::path::PathBuf);
+#[cfg(windows)]
+impl PortableStage {
+    fn new(path: std::path::PathBuf) -> Self { Self(path) }
+}
+#[cfg(windows)]
+impl Drop for PortableStage {
+    fn drop(&mut self) { let _ = std::fs::remove_file(&self.0); }
+}
+
+#[cfg(windows)]
+struct PortableReader {
+    header: io::Cursor<Vec<u8>>,
+    file: std::fs::File,
+    remaining: u64,
+    _staged: PortableStage,
+}
+
+#[cfg(windows)]
+impl PortableReader {
+    fn next_verified(&mut self, mut check: impl FnMut() -> Result<()>) -> Result<Option<Vec<u8>>> {
+        use std::io::Read;
+        check()?;
+        let mut bytes = vec![0; 64 * 1024];
+        let header = self.header.read(&mut bytes)?;
+        if header != 0 {
+            bytes.truncate(header);
+            check()?;
+            return Ok(Some(bytes));
+        }
+        if self.remaining == 0 {
+            return Ok(None);
+        }
+        bytes.truncate(self.remaining.min(64 * 1024) as usize);
+        self.file.read_exact(&mut bytes)?;
+        self.remaining -= bytes.len() as u64;
+        check()?;
+        Ok(Some(bytes))
+    }
 }
 
 fn verify<T>(scope: &RestScope, action: impl FnOnce() -> Result<T>) -> Result<T> {
@@ -98,7 +180,10 @@ fn with_library<T>(
 }
 
 struct FrameContext {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     reader: BackupExportReader,
+    #[cfg(windows)]
+    reader: PortableReader,
     scope: RestScope,
     deadline: Instant,
     _permit: SemaphorePermit<'static>,

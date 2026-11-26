@@ -398,6 +398,24 @@ impl std::fmt::Display for SourcesExhausted {
 }
 impl std::error::Error for SourcesExhausted {}
 
+fn e2e_loopback_allowed(url: &url::Url) -> bool {
+    #[cfg(not(feature = "e2e-loopback-mirror"))]
+    {
+        let _ = url;
+        false
+    }
+    #[cfg(feature = "e2e-loopback-mirror")]
+    {
+        url.username().is_empty()
+            && url.password().is_none()
+            && super::super::host_config::e2e_loopback_origin()
+                .ok()
+                .flatten()
+                .as_deref()
+                == Some(url.origin().ascii_serialization().as_str())
+    }
+}
+
 fn response(agent: &ureq::Agent, url: &str, check: &impl Fn() -> Result<()>) -> Result<ureq::Response> {
     let mut next = url::Url::parse(url)?;
     let mut seen = std::collections::BTreeSet::new();
@@ -405,20 +423,21 @@ fn response(agent: &ureq::Agent, url: &str, check: &impl Fn() -> Result<()>) -> 
         check()?;
         let host = next.host_str().context("model source host missing")?;
         anyhow::ensure!(
-            next.scheme() == "https"
-                && next.username().is_empty()
-                && next.password().is_none()
-                && next.port().is_none()
-                && matches!(
-                    host,
-                    "hf-mirror.com"
-                        | "hf-mirror.net"
-                        | "huggingface.co"
-                        | "cdn-lfs.huggingface.co"
-                        | "cdn-lfs.hf.co"
-                        | "cdn-lfs-us-1.hf.co"
-                        | "cas-bridge.xethub.hf.co"
-                ),
+            e2e_loopback_allowed(&next)
+                || (next.scheme() == "https"
+                    && next.username().is_empty()
+                    && next.password().is_none()
+                    && next.port().is_none()
+                    && matches!(
+                        host,
+                        "hf-mirror.com"
+                            | "hf-mirror.net"
+                            | "huggingface.co"
+                            | "cdn-lfs.huggingface.co"
+                            | "cdn-lfs.hf.co"
+                            | "cdn-lfs-us-1.hf.co"
+                            | "cas-bridge.xethub.hf.co"
+                    )),
             SourceFailure
         );
         anyhow::ensure!(seen.insert(next.to_string()), SourceFailure);

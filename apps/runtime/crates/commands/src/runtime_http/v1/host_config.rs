@@ -22,6 +22,39 @@ pub(super) const ORIGINS: &[&str] = &[
     "https://huggingface.co",
 ];
 
+pub(super) fn e2e_loopback_origin() -> Result<Option<String>> {
+    #[cfg(not(feature = "e2e-loopback-mirror"))]
+    {
+        Ok(None)
+    }
+    #[cfg(feature = "e2e-loopback-mirror")]
+    {
+        let Ok(raw) = respire_app::env::var("RSRS_E2E_LOOPBACK_MIRROR") else {
+            return Ok(None);
+        };
+        let raw = raw.trim();
+        if raw.is_empty() {
+            return Ok(None);
+        }
+        let url = url::Url::parse(raw).map_err(|_| anyhow::anyhow!("invalid e2e loopback mirror"))?;
+        let port = url
+            .port()
+            .filter(|port| *port != 0)
+            .ok_or_else(|| anyhow::anyhow!("invalid e2e loopback mirror"))?;
+        ensure!(
+            url.scheme() == "http"
+                && url.host_str() == Some("127.0.0.1")
+                && url.username().is_empty()
+                && url.password().is_none()
+                && matches!(url.path(), "" | "/")
+                && url.query().is_none()
+                && url.fragment().is_none(),
+            "invalid e2e loopback mirror"
+        );
+        Ok(Some(format!("http://127.0.0.1:{port}")))
+    }
+}
+
 pub(super) struct ModelNetwork {
     mirror: String,
     proxy_url: Option<String>,
@@ -39,8 +72,9 @@ impl ModelNetwork {
                 .as_str()
                 .ok_or_else(|| anyhow::anyhow!("invalid model mirror"))?,
         };
+        let loopback = e2e_loopback_origin()?;
         ensure!(
-            mirror == "auto" || ORIGINS.contains(&mirror),
+            mirror == "auto" || ORIGINS.contains(&mirror) || loopback.as_deref() == Some(mirror),
             "invalid model mirror"
         );
         let proxy_url = match config.get("proxy_url") {
@@ -71,9 +105,15 @@ impl ModelNetwork {
     }
 
     pub(super) fn origins(&self, requested: Option<&str>) -> Result<Vec<String>> {
+        let loopback = e2e_loopback_origin()?;
         match requested.or_else(|| (self.mirror != "auto").then_some(self.mirror.as_str())) {
-            None => Ok(ORIGINS.iter().map(|origin| (*origin).into()).collect()),
-            Some(origin) if ORIGINS.contains(&origin) => Ok(vec![origin.into()]),
+            None => Ok(match loopback {
+                Some(origin) => vec![origin],
+                None => ORIGINS.iter().map(|origin| (*origin).into()).collect(),
+            }),
+            Some(origin) if ORIGINS.contains(&origin) || loopback.as_deref() == Some(origin) => {
+                Ok(vec![origin.into()])
+            }
             _ => anyhow::bail!("mirror must be an approved canonical origin"),
         }
     }

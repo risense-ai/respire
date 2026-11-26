@@ -63,7 +63,7 @@ fn private_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn private_new(path: &Path) -> Result<fs::File> {
+pub(crate) fn private_new(path: &Path) -> Result<fs::File> {
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -74,7 +74,7 @@ fn private_new(path: &Path) -> Result<fs::File> {
     Ok(options.open(path)?)
 }
 
-fn digest_file(path: &Path) -> Result<String> {
+pub(crate) fn digest_file(path: &Path) -> Result<String> {
     let meta = fs::symlink_metadata(path)?;
     anyhow::ensure!(
         meta.is_file() && !meta.file_type().is_symlink(),
@@ -101,7 +101,7 @@ fn digest_file(path: &Path) -> Result<String> {
     Ok(format!("{:x}", digest.finalize()))
 }
 
-fn inventory(path: &Path) -> Result<(u64, i64)> {
+pub(crate) fn inventory(path: &Path) -> Result<(u64, i64)> {
     let db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     db.busy_timeout(std::time::Duration::from_secs(2))?;
     let check: String = db.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
@@ -122,7 +122,7 @@ fn inventory(path: &Path) -> Result<(u64, i64)> {
     ))
 }
 
-fn schema_digest(path: &Path) -> Result<String> {
+pub(crate) fn schema_digest(path: &Path) -> Result<String> {
     schema_digest_without_triggers(path, &[])
 }
 

@@ -108,7 +108,7 @@ pub fn recover_locked(
     }
 }
 
-fn verify_key(path: &Path, manifest: &Manifest, keys: &crate::SessionKeys) -> Result<()> {
+pub(crate) fn verify_key(path: &Path, manifest: &Manifest, keys: &crate::SessionKeys) -> Result<()> {
     let db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     let (nonce, ciphertext): (String, String) = db.query_row(
         "SELECT nonce,ciphertext FROM snapshot_key_check WHERE singleton=1",

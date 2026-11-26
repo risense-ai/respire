@@ -35,6 +35,8 @@ fn export_registered_routes() -> anyhow::Result<()> {
             ("POST", "/v1/memories/recall", "recallMemories"),
             ("GET", "/v1/organize/suggestions", "getOrganizeSuggestions"),
             ("POST", "/v1/organize/split", "splitOrganizeNode"),
+            ("GET", "/v1/backups/export", "exportBackup"),
+            ("POST", "/v1/backups/import", "importBackup"),
         ] {
             assert!(actual.iter().any(|spec| {
                 spec.method.as_str() == method && spec.path == path && spec.operation_id == operation_id
@@ -177,15 +179,14 @@ fn health_catalog_flag_tracks_ready_verified_dispatch_without_broad_claims() {
     );
     assert_eq!(
         health_capabilities("ready", false, true),
-        ["sse.operations.v1", "model.catalog.v2"]
+        ["openapi.v1", "backups.v1", "sse.operations.v1", "model.catalog.v2"]
     );
     let ready = health_capabilities("ready", true, true);
     assert_eq!(
         ready,
-        ["sse.operations.v1", "model.catalog.v2", "auth.handshake.v1"]
+        ["openapi.v1", "backups.v1", "sse.operations.v1", "model.catalog.v2", "auth.handshake.v1"]
     );
     for withheld in [
-        "openapi.v1",
         "host.transactions.v1",
         "model.active_assets",
         "model.managed_download",

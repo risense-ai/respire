@@ -1,6 +1,5 @@
 use super::*;
 use anyhow::{Context, Result};
-use axum::{extract::ConnectInfo, routing, Router};
 use respire_app::{auth, service, snapshot::backup_archive::open_to_stage};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -18,12 +17,23 @@ fn scoped_archive_over_loopback() -> Result<()> {
     if std::env::var_os(CHILD).is_none() {
         let directory = tempfile::tempdir()?;
         let witness = directory.path().join("backup-fixture-completed");
+        let base_dir = directory.path().canonicalize()?;
+        #[cfg(windows)]
+        let data_dir = {
+            let root = respire_spawn::owner_credential::LocalSpaceNamespace::make_fixture_installation(&base_dir)?;
+            match root.to_str().and_then(|p| p.strip_prefix(r"\\?\")) {
+                Some(local) => std::path::PathBuf::from(local),
+                None => root,
+            }
+        };
+        #[cfg(not(windows))]
+        let data_dir = base_dir;
         let mut child = Command::new(std::env::current_exe()?)
             .args(["--exact", TEST, "--nocapture"])
             .env(CHILD, "1")
             .env(FINISHED, &witness)
             .env("RSRS_CORE_TEST_MODE", "1")
-            .env("RSRS_DATA_DIR", directory.path().canonicalize()?)
+            .env("RSRS_DATA_DIR", &data_dir)
             .env_remove("RSRS_DEFAULT_DATA_DIR")
             .env_remove("RSRS_RPC_TOKEN")
             .env_remove("RSRS_ADDR")
@@ -91,29 +101,14 @@ fn scoped_archive_over_loopback() -> Result<()> {
         tokio::runtime::Builder::new_current_thread().enable_all().build()?.block_on(async {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
             let bound = listener.local_addr()?;
-            let base = crate::runtime_http::router(bound);
-            let app = base.merge(Router::new().route(EXPORT, routing::get(
-                move |ConnectInfo(crate::network::Peer(peer)): ConnectInfo<crate::network::Peer>,
-                      request: Request| get(bound, peer, request),
-            )));
-            #[cfg(target_os = "linux")]
-            let (app, tickets) = {
-                let (worker, tickets) = tokio::sync::mpsc::channel(1);
-                let app = app.merge(Router::new().route("/v1/backups/import", routing::post(
-                    move |ConnectInfo(crate::network::Peer(peer)): ConnectInfo<crate::network::Peer>,
-                          request: Request| super::super::operations::backup_import::post(
-                              bound, peer, request, worker.clone(),
-                          ),
-                )));
-                (app, tickets)
-            };
+            let app = crate::runtime_http::router(bound);
             let server = tokio::spawn(async move {
                 axum::serve(
                     crate::network::Listener(listener),
                     app.into_make_service_with_connect_info::<crate::network::Peer>(),
                 ).await
             });
-            let result = tokio::task::spawn_blocking(move || verify_http(bound, &root, urk, #[cfg(target_os = "linux")] tickets)).await;
+            let result = tokio::task::spawn_blocking(move || verify_http(bound, &root, urk)).await;
             server.abort();
             let _ = server.await;
             result?
@@ -127,9 +122,7 @@ fn scoped_archive_over_loopback() -> Result<()> {
     Ok(())
 }
 
-fn verify_http(bound: SocketAddr, root: &Path, urk: [u8; 32],
-    #[cfg(target_os = "linux")] mut tickets: tokio::sync::mpsc::Receiver<super::super::operations::backup_import::Ticket>,
-) -> Result<()> {
+fn verify_http(bound: SocketAddr, root: &Path, urk: [u8; 32]) -> Result<()> {
     let base = format!("http://{bound}");
     let agent = ureq::AgentBuilder::new().try_proxy_from_env(false).timeout(WAIT).build();
     let get = |name: &str| agent.get(&format!("{base}{name}"));
@@ -140,6 +133,11 @@ fn verify_http(bound: SocketAddr, root: &Path, urk: [u8; 32],
         (get(EXPORT).set("Authorization", &format!("Bearer {TOKEN}")).set("Origin", "http://untrusted.invalid"), 403),
         (get(&format!("{EXPORT}?path=disallowed")).set("Authorization", &format!("Bearer {TOKEN}")), 400),
         (get(&format!("{EXPORT}?space_id=unknown-fixture")).set("Authorization", &format!("Bearer {TOKEN}")), 404),
+        (agent.post(&format!("{base}/v1/backups/import")), 401),
+        (post("/v1/backups/import").set("Origin", "http://untrusted.invalid"), 403),
+        (post("/v1/backups/import?path=disallowed").set("Content-Type", "application/octet-stream"), 400),
+        (post("/v1/backups/import?space_id=unknown-fixture").set("Content-Type", "application/octet-stream"), 404),
+        (post("/v1/backups/import").set("Content-Type", "application/json"), 400),
     ] {
         match request.call() {
             Err(ureq::Error::Status(observed, _)) if observed == status => (),
@@ -154,6 +152,29 @@ fn verify_http(bound: SocketAddr, root: &Path, urk: [u8; 32],
         let response: Value = response.into_json()?;
         Ok(response["id"].as_str().context("fixture memory ID absent")?.to_owned())
     };
+    let list_ids = |space: &str| -> Result<BTreeSet<String>> {
+        let response: Value = get(&format!("/v1/memories?space_id={space}"))
+            .set("Authorization", &format!("Bearer {TOKEN}"))
+            .call()?
+            .into_json()?;
+        let items = response["items"].as_array().context("memory items array missing")?;
+        items.iter().map(|entry| entry["id"].as_str().map(str::to_owned).context("memory id missing")).collect()
+    };
+    let wait_completed = |operation_id: &str| -> Result<()> {
+        let deadline = Instant::now() + WAIT;
+        loop {
+            let status: Value = get(&format!("/v1/operations/{operation_id}"))
+                .set("Authorization", &format!("Bearer {TOKEN}"))
+                .call()?
+                .into_json()?;
+            match status["state"].as_str() {
+                Some("completed") => return Ok(()),
+                Some("pending" | "running") if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
+                other => anyhow::bail!("backup import operation did not complete cleanly: {other:?} ({status})"),
+            }
+        }
+    };
+
     let parent = save("main", "isolated parent fixture memory")?;
     let created = post("/v1/spaces").send_json(json!({"name": "isolated backup fixture"}))?;
     ensure!(created.status() == 201, "device space creation failed");
@@ -162,100 +183,98 @@ fn verify_http(bound: SocketAddr, root: &Path, urk: [u8; 32],
     let child = save(space, "isolated child fixture memory")?;
 
     let keys = respire_app::SessionKeys::from_urk(urk)?;
-    for (space, expected) in [("main", parent), (space, child)] {
-        let response = get(&format!("{EXPORT}?space_id={space}"))
+    let mut main_wire = Vec::new();
+    let mut child_wire = Vec::new();
+    for (target_space, expected, slot) in [("main", &parent, &mut main_wire), (space, &child, &mut child_wire)] {
+        let response = get(&format!("{EXPORT}?space_id={target_space}"))
             .set("Authorization", &format!("Bearer {TOKEN}")).call()?;
         assert_eq!(response.status(), 200);
         assert_eq!(response.header("content-type"), Some("application/octet-stream"));
         assert_eq!(response.header("cache-control"), Some("no-store"));
-        let mut wire = Vec::new();
-        response.into_reader().take(8 * 1024 * 1024 + 1).read_to_end(&mut wire)?;
-        ensure!(wire.len() <= 8 * 1024 * 1024, "fixture archive exceeded its byte budget");
-        #[cfg(target_os = "linux")]
-        {
-            let upload = |payload: &[u8]| post("/v1/backups/import?space_id=main")
-                .set("Content-Type", "application/octet-stream").send_bytes(payload);
-            let reject = |payload: &[u8]| -> Result<()> {
-                ensure!(matches!(upload(payload), Err(ureq::Error::Status(400, _))), "invalid upload accepted");
-                ensure!(tickets.is_empty(), "rejected upload reached confirmation worker");
-                Ok(())
-            };
-            if space == "main" {
-                reject(b"invalid envelope")?;
-                reject(&wire[..wire.len()-1])?;
-                let mut bad_seal = wire.clone();
-                let field = br#""sealed_manifest_digest":""#;
-                let seal = bad_seal.windows(field.len()).position(|bytes| bytes == field)
-                    .context("fixture seal missing")? + field.len();
-                bad_seal[seal] = if bad_seal[seal] == b'A' { b'B' } else { b'A' };
-                let header_size = u32::from_be_bytes(wire[8..12].try_into()?) as usize;
-                reject(&bad_seal[..12 + header_size])?;
-                {
-                    use std::{io::Write, net::{Shutdown, TcpStream}};
-                    let mut stream = TcpStream::connect(bound)?;
-                    stream.set_read_timeout(Some(WAIT))?;
-                    stream.set_write_timeout(Some(WAIT))?;
-                    write!(stream, "POST /v1/backups/import HTTP/1.1\r\nHost: {bound}\r\nAuthorization: Bearer {TOKEN}\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", wire.len())?;
-                    stream.write_all(&wire[..wire.len()/2])?;
-                    stream.shutdown(Shutdown::Write)?;
-                    let mut reply = Vec::new();
-                    stream.take(8192).read_to_end(&mut reply)?;
-                    ensure!(!reply.starts_with(b"HTTP/1.1 202"), "aborted upload accepted");
-                    ensure!(tickets.is_empty(), "aborted upload reached worker");
-                }
-                let mut corrupt = wire.clone();
-                *corrupt.last_mut().context("empty archive")? ^= 1;
-                reject(&corrupt)?;
-                let mut trailing = wire.clone();
-                trailing.push(0);
-                reject(&trailing)?;
-                ensure!(wire.len() > 2 * 1024 * 1024, "fixture must cross the old buffer limit");
-                // An unsized reader makes ureq send HTTP chunked framing. Split
-                // even the magic across reads, then use odd-sized payload blocks.
-                let accepted = post("/v1/backups/import?space_id=main")
-                    .set("Content-Type", "application/octet-stream")
-                    .send(SplitArchive { rest: &wire, first: true })?;
-                assert_eq!(accepted.status(), 202);
-                let receipt: Value = accepted.into_json()?;
-                ensure!(matches!(upload(&wire), Err(ureq::Error::Status(503, _))),
-                    "a full confirmation queue accepted a second ticket");
-                assert_eq!(backup_stage_count(root)?, 1);
-                let ticket = tickets.try_recv()?;
-                let id = ticket.operation_id().map_err(|_| anyhow::anyhow!("missing registry ID"))?;
-                assert_eq!(receipt, json!({"operation_id": id, "status": "pending"}));
-                let status: Value = get(&format!("/v1/operations/{id}"))
-                    .set("Authorization", &format!("Bearer {TOKEN}")).call()?.into_json()?;
-                assert_eq!(status["state"], "pending");
-                assert_eq!(ticket.target, service::database_path(root)?.canonicalize()?);
-                assert_eq!(ticket.archive_sha256, <[u8; 32]>::from(Sha256::digest(&wire)));
-                let handoff = ticket.pending.handoff();
-                let ready = ticket.pending.publish(|| Ok(()))?;
-                ready.consume(|input| {
-                    let mut staged = Vec::new();
-                    input.read_to_end(&mut staged)?;
-                    assert_eq!(staged, wire);
-                    Ok(())
-                })?;
-                handoff.discard(root)?;
-            } else {
-                reject(&wire)?;
-                let accepted = post(&format!("/v1/backups/import?space_id={space}"))
-                    .set("Content-Type", "application/octet-stream").send_bytes(&wire)?;
-                assert_eq!(accepted.status(), 202);
-                let ticket = tickets.try_recv()?;
-                assert_ne!(ticket.target, service::database_path(root)?.canonicalize()?);
-                assert_eq!(ticket.archive_sha256, <[u8; 32]>::from(Sha256::digest(&wire)));
-                drop(ticket);
-            }
+        response.into_reader().take(8 * 1024 * 1024 + 1).read_to_end(slot)?;
+        ensure!(slot.len() <= 8 * 1024 * 1024, "fixture archive exceeded its byte budget");
+        if target_space == "main" {
+            ensure!(slot.len() > 2 * 1024 * 1024, "fixture must cross the old buffer limit");
         }
         let output = tempfile::NamedTempFile::new_in(root)?;
-        open_to_stage(&keys, "backup-fixture", wire.as_slice(), output.as_file(), || Ok(()))?;
+        open_to_stage(&keys, "backup-fixture", slot.as_slice(), output.as_file(), || Ok(()))?;
         let db = rusqlite::Connection::open(output.path())?;
         let mut rows = db.prepare("SELECT id FROM memories WHERE deleted=0")?;
         let ids = rows.query_map([], |row| row.get(0))?.collect::<rusqlite::Result<BTreeSet<String>>>()?;
-        assert_eq!(ids, BTreeSet::from([expected]));
+        assert_eq!(ids, BTreeSet::from([expected.clone()]));
     }
-    assert!(backup_stage_count(root)? == 0);
+
+    let upload_main = |payload: &[u8]| post("/v1/backups/import?space_id=main")
+        .set("Content-Type", "application/octet-stream").send_bytes(payload);
+    let reject_main = |payload: &[u8]| -> Result<()> {
+        ensure!(matches!(upload_main(payload), Err(ureq::Error::Status(400, _))), "invalid upload accepted");
+        Ok(())
+    };
+    reject_main(b"invalid envelope")?;
+    reject_main(&main_wire[..main_wire.len() - 1])?;
+    let mut bad_seal = main_wire.clone();
+    let field = br#""sealed_manifest_digest":""#;
+    let seal = bad_seal.windows(field.len()).position(|bytes| bytes == field)
+        .context("fixture seal missing")? + field.len();
+    bad_seal[seal] = if bad_seal[seal] == b'A' { b'B' } else { b'A' };
+    let header_size = u32::from_be_bytes(main_wire[8..12].try_into()?) as usize;
+    reject_main(&bad_seal[..12 + header_size])?;
+    {
+        use std::{io::Write, net::{Shutdown, TcpStream}};
+        let mut stream = TcpStream::connect(bound)?;
+        stream.set_read_timeout(Some(WAIT))?;
+        stream.set_write_timeout(Some(WAIT))?;
+        write!(stream, "POST /v1/backups/import HTTP/1.1\r\nHost: {bound}\r\nAuthorization: Bearer {TOKEN}\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", main_wire.len())?;
+        stream.write_all(&main_wire[..main_wire.len() / 2])?;
+        stream.shutdown(Shutdown::Write)?;
+        let mut reply = Vec::new();
+        stream.take(8192).read_to_end(&mut reply)?;
+        ensure!(!reply.starts_with(b"HTTP/1.1 202"), "aborted upload accepted");
+    }
+    let mut corrupt = main_wire.clone();
+    *corrupt.last_mut().context("empty archive")? ^= 1;
+    reject_main(&corrupt)?;
+    let mut trailing = main_wire.clone();
+    trailing.push(0);
+    reject_main(&trailing)?;
+    reject_main(&child_wire)?;
+    ensure!(
+        matches!(
+            post(&format!("/v1/backups/import?space_id={space}"))
+                .set("Content-Type", "application/octet-stream")
+                .send_bytes(&main_wire[..12 + header_size]),
+            Err(ureq::Error::Status(400, _))
+        ),
+        "main backup must not restore into a device space"
+    );
+
+    let parent_extra = save("main", "post-export parent memory to discard")?;
+    let child_extra = save(space, "post-export child memory to discard")?;
+    assert_eq!(list_ids("main")?, BTreeSet::from([parent.clone(), parent_extra.clone()]));
+    assert_eq!(list_ids(space)?, BTreeSet::from([child.clone(), child_extra]));
+
+    let accepted_child = post(&format!("/v1/backups/import?space_id={space}"))
+        .set("Content-Type", "application/octet-stream")
+        .send_bytes(&child_wire)?;
+    assert_eq!(accepted_child.status(), 202);
+    let receipt_child: Value = accepted_child.into_json()?;
+    assert_eq!(receipt_child["status"], "pending");
+    let child_op = receipt_child["operation_id"].as_str().context("child restore operation_id missing")?;
+    wait_completed(child_op)?;
+    assert_eq!(list_ids(space)?, BTreeSet::from([child.clone()]));
+    assert_eq!(list_ids("main")?, BTreeSet::from([parent.clone(), parent_extra]));
+
+    let accepted_main = post("/v1/backups/import?space_id=main")
+        .set("Content-Type", "application/octet-stream")
+        .send(SplitArchive { rest: &main_wire, first: true })?;
+    assert_eq!(accepted_main.status(), 202);
+    let receipt_main: Value = accepted_main.into_json()?;
+    assert_eq!(receipt_main["status"], "pending");
+    let main_op = receipt_main["operation_id"].as_str().context("main restore operation_id missing")?;
+    wait_completed(main_op)?;
+    assert_eq!(list_ids("main")?, BTreeSet::from([parent]));
+    assert_eq!(list_ids(space)?, BTreeSet::from([child]));
+    assert_eq!(backup_stage_count(root)?, 0);
     Ok(())
 }
 
@@ -271,13 +290,11 @@ fn backup_stage_count(root: &Path) -> Result<usize> {
     Ok(count)
 }
 
-#[cfg(target_os = "linux")]
 struct SplitArchive<'a> {
     rest: &'a [u8],
     first: bool,
 }
 
-#[cfg(target_os = "linux")]
 impl Read for SplitArchive<'_> {
     fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
         let limit = if std::mem::take(&mut self.first) { 3 } else { 8191 };

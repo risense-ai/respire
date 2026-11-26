@@ -33,6 +33,56 @@ pub(super) fn copy_and_check(source: &Connection, destination: &mut Connection) 
     Ok(())
 }
 
+impl super::LocalStore {
+    /// Resolve the canonical SQLite database path open on the selected owner dispatcher.
+    pub fn backup_target(&self) -> Result<std::path::PathBuf> {
+        use anyhow::Context;
+        let path = std::path::Path::new(self.connection.path().context("backup requires an on-disk store")?);
+        let canonical = path.canonicalize()?;
+        #[cfg(windows)]
+        let same = canonical == path
+            || canonical.to_str().and_then(|value| value.strip_prefix(r"\\?\")) == path.to_str();
+        #[cfg(not(windows))]
+        let same = canonical == path;
+        ensure!(same, "backup target is not canonical");
+        Ok(canonical)
+    }
+
+    /// Atomically replace this store's pages from a verified, private offline
+    /// backup stage and leave the live connection checkpointed and healthy.
+    pub fn restore_from_verified_stage(&self, staged: &std::path::Path) -> Result<()> {
+        use rusqlite::OpenFlags;
+        let live = self.backup_target()?;
+        let mode: String = self
+            .connection
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
+        self.connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+        let flags = OpenFlags::SQLITE_OPEN_NOFOLLOW;
+        let source = Connection::open_with_flags(staged, OpenFlags::SQLITE_OPEN_READ_ONLY | flags)?;
+        let source_check: String = source.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
+        ensure!(source_check == "ok", "staged backup failed SQLite quick_check");
+        {
+            let mut destination =
+                Connection::open_with_flags(&live, OpenFlags::SQLITE_OPEN_READ_WRITE | flags)?;
+            destination.busy_timeout(std::time::Duration::from_secs(5))?;
+            copy_and_check(&source, &mut destination)?;
+            if mode.eq_ignore_ascii_case("wal") {
+                let after: String =
+                    destination.query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))?;
+                ensure!(after.eq_ignore_ascii_case("wal"), "restored store failed to re-enable WAL");
+            }
+            destination.close().map_err(|(_, error)| error)?;
+        }
+        drop(source);
+        self.connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+        let check: String = self
+            .connection
+            .query_row("PRAGMA quick_check", [], |row| row.get(0))?;
+        ensure!(check == "ok", "restored live library failed SQLite quick_check");
+        Ok(())
+    }
+}
+
 #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 pub(super) fn publish_before_ddl(
     database: &std::path::Path,

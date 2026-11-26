@@ -106,6 +106,10 @@ impl BackupArchiveHeader {
         Ok(Self { value: serde_json::from_slice(&prefix[start..])?, prefix })
     }
 
+    pub fn manifest(&self) -> &Manifest {
+        &self.value.manifest
+    }
+
     pub(crate) fn authenticate(
         self,
         keys: &crate::SessionKeys,
@@ -121,6 +125,10 @@ impl BackupArchiveHeader {
 }
 
 impl AuthenticatedBackupHeader {
+    pub fn manifest(&self) -> &Manifest {
+        &self.manifest
+    }
+
     pub fn wire_length(&self) -> u64 {
         self.manifest.bytes + self.prefix.len() as u64
     }
@@ -275,3 +283,102 @@ mod tests;
 mod export;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use export::{BackupExportDraft, BackupExportReader, BackupExportReady, BackupSnapshotProof, SealedBackupExportHeader};
+
+pub(crate) fn seal_database_header(
+    keys: &crate::SessionKeys,
+    account: &str,
+    live_database: &Path,
+    stage_path: &Path,
+) -> Result<Vec<u8>> {
+    use rusqlite::{Connection, OpenFlags, OptionalExtension};
+    let canonical = live_database.canonicalize()?;
+    ensure!(canonical == live_database, "backup source must be canonical");
+    let source_text = canonical.to_str().context("backup source must be UTF-8")?;
+    let source_library = format!("{:x}", Sha256::digest(source_text.as_bytes()));
+    let account_fingerprint = format!("{:x}", Sha256::digest(account.as_bytes()));
+    let id = uuid::Uuid::new_v4().simple().to_string();
+    crate::service::backup_database_policy(live_database, stage_path, true)?;
+    let (nonce, ciphertext) =
+        keys.encrypt_content(&format!("snapshot-key-check:v1:{id}:{source_library}:{account_fingerprint}"))?;
+    let copy = Connection::open_with_flags(
+        stage_path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )?;
+    let mode: String = copy.query_row("PRAGMA journal_mode=MEMORY", [], |row| row.get(0))?;
+    ensure!(mode.eq_ignore_ascii_case("memory"), "unsafe backup stage journal mode");
+    copy.execute_batch("DROP TABLE IF EXISTS snapshot_key_check; CREATE TABLE snapshot_key_check(singleton INTEGER PRIMARY KEY CHECK(singleton=1),nonce TEXT NOT NULL,ciphertext TEXT NOT NULL);")?;
+    copy.execute("INSERT INTO snapshot_key_check VALUES(1,?1,?2)", rusqlite::params![nonce, ciphertext])?;
+    let mode: String = copy.query_row("PRAGMA journal_mode=DELETE", [], |row| row.get(0))?;
+    ensure!(mode.eq_ignore_ascii_case("delete"), "backup stage is not standalone");
+    let selection: Option<String> = copy
+        .query_row(
+            "SELECT value FROM meta WHERE key=?1",
+            [crate::core_sdk::profiles::ACTIVE_SELECTION_KEY],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let model = selection
+        .map(|v| serde_json::from_str::<crate::core_sdk::profiles::Selection>(&v).map(|s| s.model))
+        .transpose()?
+        .unwrap_or_else(|| "m3".to_owned());
+    copy.close().map_err(|(_, error)| error)?;
+    let (entries, sqlite_user_version) = super::inventory(stage_path)?;
+    let database_schema_sha256 = super::schema_digest(stage_path)?;
+    let (witness, witness_problem) = match crate::transport::local::witness_checkpoint_file(stage_path) {
+        Ok(report) => (report, None),
+        Err(_) => (None, Some("witness checkpoint is unverifiable".to_owned())),
+    };
+    ensure!(witness_problem.is_none() && witness.as_ref().is_none_or(|r| r.intact), "backup witness is invalid");
+    let manifest = Manifest {
+        schema_version: 1,
+        id,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        note: String::new(),
+        database_sha256: super::digest_file(stage_path)?,
+        bytes: std::fs::metadata(stage_path)?.len(),
+        entries,
+        source_library,
+        account_fingerprint,
+        sqlite_user_version,
+        database_schema_sha256,
+        sdk_version: crate::core_sdk::CORE_VERSION.to_owned(),
+        sdk_abi: crate::core_sdk::ABI_VERSION,
+        model,
+        witness_head: witness.as_ref().map(|r| r.head.clone()),
+        witness_count: witness.as_ref().map(|r| r.count),
+        witness_intact: witness.as_ref().map(|r| r.intact),
+        witness_problem: None,
+    };
+    encode_header(keys, account, &manifest)
+}
+
+pub(crate) fn restore_verified_stage(
+    keys: &crate::SessionKeys,
+    account: &str,
+    live_db: &Path,
+    staged: &Path,
+    manifest: &Manifest,
+    store: &crate::transport::local::LocalStore,
+) -> Result<()> {
+    let canonical = live_db.canonicalize()?;
+    ensure!(canonical == live_db && store.backup_target()? == canonical, "restore target mismatch");
+    let target_text = canonical.to_str().context("restore target must be UTF-8")?;
+    ensure!(
+        manifest.source_library == format!("{:x}", Sha256::digest(target_text.as_bytes())),
+        "backup belongs to a different selected library"
+    );
+    ensure!(
+        manifest.account_fingerprint == format!("{:x}", Sha256::digest(account.as_bytes())),
+        "backup belongs to a different account"
+    );
+    ensure!(
+        manifest.witness_problem.is_none() && manifest.witness_intact != Some(false),
+        "backup witness checkpoint is invalid"
+    );
+    ensure!(super::digest_file(staged)? == manifest.database_sha256, "staged backup digest mismatch");
+    crate::metadata_gate::ensure_restore_allowed(&canonical, staged)?;
+    super::verify_key(staged, manifest, keys)?;
+    let (entries, version) = super::inventory(staged)?;
+    ensure!(entries == manifest.entries && version == manifest.sqlite_user_version, "staged backup inventory mismatch");
+    store.restore_from_verified_stage(staged)
+}
