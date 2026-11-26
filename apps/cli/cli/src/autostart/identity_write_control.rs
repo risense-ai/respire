@@ -203,18 +203,34 @@ fn control_write(operation: HostIdentityWriteOperation) -> Result<HostIdentityWr
             HostIdentityWriteOutcome::Unknown => anyhow::bail!("identity write outcome unknown; query the original operation"),
         }
         unchanged(&original, &receipt.identity, &binary, &manifest)?;
-        if original.was_serving {
-            maintenance.start_account_runtime_with_expectation(restoration_expectation(&receipt)?)?;
+        let verified_owner = || -> Result<crate::net_rpc::Health> {
             let restored = crate::rpc::probe_runtime()?.context("identity owner did not resume")?;
             super::model_control::verify_model_owner(&restored, &root, &profile, managed, &binary, &manifest,
                 Some(&account(&receipt.identity, &profile)))?;
+            Ok(restored)
+        };
+        let mut logout_restart = None;
+        if original.was_serving {
+            maintenance.start_account_runtime_with_expectation(restoration_expectation(&receipt)?)?;
+            let restored = verified_owner()?;
             if matches!(original.operation, HostIdentityWriteOperation::Logout { full: true }) {
                 anyhow::ensure!(!restored.store_ready, "full logout reopened the store without a session");
             } else {
                 anyhow::ensure!(!original.store_ready || restored.store_ready, "identity owner store readiness was not restored");
             }
+            if matches!(original.operation, HostIdentityWriteOperation::Logout { .. }) {
+                if let Some(drained) = owner.as_ref() {
+                    anyhow::ensure!(restored.instance_id != drained.instance_id
+                        && (restored.pid != drained.pid || restored.process_start_id != drained.process_start_id),
+                        "logout restart matched the drained Runtime");
+                }
+                logout_restart = Some(LogoutRestartV1::observe(&original, &restored)?);
+            }
         }
         unchanged(&original, &receipt.identity, &binary, &manifest)?;
+        if let Some(restart) = logout_restart {
+            restart.confirm(&original, &verified_owner()?)?;
+        }
         maintenance.finish()?;
         finished = true;
         anyhow::ensure!(read_original(&path)?.as_ref().map(|(_, hash)| hash.as_str()) == digest.as_deref(),
@@ -237,6 +253,44 @@ fn control_write(operation: HostIdentityWriteOperation) -> Result<HostIdentityWr
         };
         error.context(original.recovery())
     })
+}
+
+/// Process-local receipt. Recovery must observe a fresh restart on the query-only path.
+#[derive(PartialEq, Eq)]
+struct LogoutRestartV1 {
+    operation_id: String,
+    idempotency_key: String,
+    fingerprint: String,
+    pid: u32,
+    process_start_id: String,
+    instance_id: String,
+    generation: u64,
+    store_ready: bool,
+}
+
+impl LogoutRestartV1 {
+    /// The caller verifies the process image, OS birth, installation, account and profile first.
+    fn observe(original: &Original, owner: &crate::net_rpc::Health) -> Result<Self> {
+        anyhow::ensure!(original.was_serving && original.sent
+            && matches!(original.operation, HostIdentityWriteOperation::Logout { .. }),
+            "logout restart requires an original serving logout operation");
+        Ok(Self {
+            operation_id: original.operation_id.clone(),
+            idempotency_key: original.key.clone(),
+            fingerprint: original.fingerprint()?,
+            pid: owner.pid,
+            process_start_id: owner.process_start_id.clone(),
+            instance_id: owner.instance_id.clone(),
+            generation: owner.generation,
+            store_ready: owner.store_ready,
+        })
+    }
+
+    fn confirm(self, original: &Original, owner: &crate::net_rpc::Health) -> Result<()> {
+        anyhow::ensure!(self == Self::observe(original, owner)?,
+            "logout operation or restored Runtime changed before maintenance completion");
+        Ok(())
+    }
 }
 
 fn account(identity: &HostAuthIdentity, profile: &Path) -> String {

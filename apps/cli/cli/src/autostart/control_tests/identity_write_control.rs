@@ -374,3 +374,41 @@ fn full_logout_and_revoke_receipts_match_the_resulting_local_session() -> Result
     .is_err());
     Ok(())
 }
+
+#[test]
+fn logout_restart_is_bound_to_the_original_and_the_live_generation() -> Result<()> {
+    let mut context = original(Path::new("profile"));
+    context.was_serving = true;
+    context.sent = true;
+    let owner: crate::net_rpc::Health = serde_json::from_value(json!({
+        "server":"runtime", "bin":"rsrs-runtime", "pid":42, "v":1,
+        "process_start_id":"linux-starttime-42", "instance_id":"first", "generation":3
+    }))?;
+    let legacy_bytes = concat!(
+        r#"{"schema_version":1,"root":"profile","profile":"profile","#,
+        r#""operation_id":"9c63f43a-a7bc-4820-92c1-ce966406c087","#,
+        r#""key":"9c63f43a-a7bc-4820-92c1-ce966406c087","source_identity":{"kind":"absent"},"#,
+        r#""operation":{"kind":"logout","full":false},"token":"synthetic-token-not-a-credential","#,
+        r#""coordinator":"synthetic-coordinator","was_serving":true,"store_ready":false,"sent":true}"#,
+    ).as_bytes();
+    let observed = || LogoutRestartV1::observe(&context, &owner);
+    observed()?.confirm(&context, &owner)?;
+    for field in ["pid", "process_start_id", "instance_id", "generation", "store_ready"] {
+        let mut replacement = serde_json::to_value(&owner)?;
+        replacement[field] = match field {
+            "pid" | "generation" => json!(99),
+            "store_ready" => json!(true),
+            _ => json!("replacement"),
+        };
+        assert!(observed()?.confirm(&context, &serde_json::from_value(replacement)?).is_err());
+    }
+    for field in ["operation_id", "key", "profile"] {
+        let mut foreign = serde_json::to_value(&context)?;
+        foreign[field] = json!("other");
+        assert!(observed()?.confirm(&serde_json::from_value(foreign)?, &owner).is_err());
+    }
+    assert_eq!(serde_json::to_vec(&context)?, legacy_bytes);
+    context.was_serving = false;
+    assert!(LogoutRestartV1::observe(&context, &owner).is_err());
+    Ok(())
+}
