@@ -9,7 +9,7 @@ import {assembleRuntimeNative} from "./assemble-runtime-release-ci.mjs";
 const tag = "runtime-v2.0.0-dev.31";
 const provenance = {
   repository:"risense-ai/respire",event:"workflow_dispatch",source:"c".repeat(40),workflow_sha:"d".repeat(40),
-  workflow_ref:"risense-ai/respire/.github/workflows/runtime-release-dry-run.yml@refs/heads/main",run_id:"12345",run_attempt:"2",
+  workflow_ref:"risense-ai/respire/.github/workflows/release.yml@refs/heads/main",run_id:"12345",run_attempt:"2",
 };
 const profiles = [
   ["windows-x64","x86_64-pc-windows-msvc","Windows","x64"],

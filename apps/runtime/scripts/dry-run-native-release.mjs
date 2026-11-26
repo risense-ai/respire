@@ -18,7 +18,7 @@ const run = (command, args, options = {}) => execFileSync(command, args,
 const env = process.env;
 assert.equal(env.GITHUB_ACTIONS, 'true', 'Requires GitHub Actions');
 assert.match(env.GITHUB_WORKFLOW_SHA ?? '', /^[0-9a-f]{40}$/);
-assert.match(env.GITHUB_WORKFLOW_REF ?? '', /^risense-ai\/respire\/.github\/workflows\/runtime-release-dry-run\.yml@refs\//);
+assert.match(env.GITHUB_WORKFLOW_REF ?? '', /^risense-ai\/respire\/\.github\/workflows\/release\.yml@refs\//, 'Unexpected workflow identity');
 assert.match(env.GITHUB_RUN_ID ?? '', /^[1-9][0-9]*$/);
 assert.match(env.GITHUB_RUN_ATTEMPT ?? '', /^[1-9][0-9]*$/);
 assert.equal(env.RUNNER_ENVIRONMENT, 'github-hosted', 'Requires an ephemeral hosted runner');
