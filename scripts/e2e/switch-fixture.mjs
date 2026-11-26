@@ -2,8 +2,9 @@
 // 65ad0ffcfee97b15e828a0be4a5b65291d0d1800. Distributed under the root LICENSE.
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
-import {mkdir, writeFile} from 'node:fs/promises';
+import {mkdir, readFile, writeFile} from 'node:fs/promises';
 import {join} from 'node:path';
+import {probeReadiness} from '../../referee/test-cases/targets.mjs';
 import {setTimeout as delay} from 'node:timers/promises';
 
 const graph = Buffer.from(
@@ -56,4 +57,42 @@ export async function prepareSwitch(runtime, rollback) {
     }
   }
   return rollback ? {rollbackModel:candidate} : {switchModel:candidate};
+}
+
+
+// Called immediately before the frozen candidate POST, after its marker write.
+export function settledSwitchTarget(runtime) {
+  const target = runtime.target;
+  return {...target, async request(spec) {
+    if (spec.method === 'POST' && spec.path === '/v1/models/switch') {
+      const profile = runtime.env.RSRS_DATA_DIR;
+      const endpoint = JSON.parse(await readFile(join(profile,'runtime','endpoint.json'),'utf8'));
+      const base = 'http://127.0.0.1:' + runtime.env.RSRS_RPC_PORT;
+      assert.equal(endpoint.url,base);
+      const modern = await probeReadiness(base,endpoint.pid,false,profile);
+      assert.equal(modern?.instance_id,endpoint.instance_id);
+      const deadline = performance.now() + 30_000;
+      for (;;) {
+        const health = await probeReadiness(base,endpoint.pid,true);
+        assert.equal(health?.instance_id,modern.instance_id);
+        assert(Array.isArray(health.control?.background) && Array.isArray(health.control?.admitted));
+        const rpc = health.rpc;
+        assert(Number.isSafeInteger(rpc?.ordinary_running) && Number.isSafeInteger(rpc.lightweight_running));
+        if (!health.control.background.length && !health.control.admitted.length &&
+            rpc.ordinary_running === 0 && rpc.lightweight_running === 0) {
+          const reply = await target.request({method:'POST',path:'/rpc',body:{
+            v:1,id:'card019-model-progress',method:'model.progress',args:[]}});
+          assert.equal(reply.status,200);
+          assert.equal(reply.data?.ok,true);
+          assert.equal(reply.data.envelope?.command,'model.progress');
+          const active = reply.data.envelope.summary?.operation?.active;
+          assert.equal(typeof active,'boolean');
+          if (!active && performance.now() < deadline) break;
+        }
+        assert(performance.now() < deadline,'owned Runtime did not report idle before switch admission');
+        await delay(100);
+      }
+    }
+    return target.request(spec);
+  }};
 }

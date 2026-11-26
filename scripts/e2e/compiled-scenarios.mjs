@@ -4,7 +4,7 @@ import {channel} from 'node:diagnostics_channel';
 import {loadScenarios, runScenario} from '../../referee/test-cases/runner.mjs';
 import {withRuntime} from '../../referee/test-cases/targets.mjs';
 import {cliTarget} from '../../referee/test-cases/cli-e2e/command.mjs';
-import {prepareSwitch} from './switch-fixture.mjs';
+import {prepareSwitch, settledSwitchTarget} from './switch-fixture.mjs';
 
 // The frozen referee reports "HTTP status mismatch" without the received status.
 channel('undici:request:headers').subscribe(({request, response}) => {
@@ -33,7 +33,9 @@ for (const scenario of scenarios) {
     }
     await withRuntime(binary,{syntheticReady:true},async runtime => {
       const inputs = models ? await prepareSwitch(runtime,scenario.id === 'E2E-004') : {};
-      await runScenario(scenario, scenario.target === 'cli' ? cliTarget(cli,runtime) : runtime.target,inputs);
+      const target = models ? settledSwitchTarget(runtime) :
+        scenario.target === 'cli' ? cliTarget(cli,runtime) : runtime.target;
+      await runScenario(scenario,target,inputs);
     },{deviceLocal:models || scenario.id === 'E2E-005'});
     console.log('PASS '+label);
     passed++;
