@@ -32,6 +32,16 @@ pub struct BackupExportCopy {
     source: SourceIdentity,
 }
 
+/// An exact native library selected from the currently serving store.
+pub struct BackupImportTarget(SourceIdentity);
+
+impl BackupImportTarget {
+    pub fn checked_path(&self) -> Result<&Path> {
+        self.0.check_live(false)?;
+        Ok(&self.0.path)
+    }
+}
+
 struct SourceIdentity {
     path: PathBuf,
     leaf: String,
@@ -55,32 +65,36 @@ impl SourceIdentity {
 }
 
 impl LocalStore {
+    pub fn prepare_backup_import_target(&self) -> Result<BackupImportTarget> {
+        let (source, _) = self.identify_backup_store(false)?;
+        Ok(BackupImportTarget(source))
+    }
+
+    fn identify_backup_store(&self, pin_for_copy: bool) -> Result<(SourceIdentity, MigrationSource)> {
+        let path = Path::new(self.connection.path().context("backup requires an on-disk store")?);
+        let parent = path.parent().context("backup database has no parent")?.canonicalize()?;
+        let leaf = path.file_name().and_then(|entry| entry.to_str())
+            .context("backup database name is unavailable")?.to_owned();
+        ensure!(parent.join(&leaf) == path, "backup store path is not canonical");
+        let reader = MigrationSource::open(&parent, pin_for_copy)?;
+        let source = SourceIdentity {
+            path: parent.join(&leaf),
+            directory: reader.identity()?,
+            file: reader.file_identity(&leaf)?,
+            leaf,
+        };
+        Ok((source, reader))
+    }
+
     /// Short admission only. Select the store from the verified owner scope
     /// before calling; `stage_parent` is the verified owner account root,
     /// not the selected child, and never comes from an HTTP path.
     pub fn prepare_backup_export(&self, stage_parent: &Path) -> Result<BackupExportSource> {
-        let database = Path::new(self.connection.path().context("backup requires an on-disk store")?);
-        let parent = database
-            .parent()
-            .context("backup database has no parent")?
-            .canonicalize()?;
-        let source_leaf = database
-            .file_name()
-            .and_then(|leaf| leaf.to_str())
-            .context("backup database name is unavailable")?
-            .to_owned();
-        ensure!(parent.join(&source_leaf) == database, "backup store path is not canonical");
+        let (source, source_pin) = self.identify_backup_store(true)?;
         let stage_leaf = format!(".backup-export-{}.pending", uuid::Uuid::new_v4().simple());
         ensure!(stage_parent.canonicalize()? == stage_parent, "backup stage root is not canonical");
         let stage = MigrationCopy::create(stage_parent, &stage_leaf)?;
         let stage_identity = stage.source_identity(&stage_leaf)?;
-        let source_pin = MigrationSource::open(&parent, true)?;
-        let source = SourceIdentity {
-            path: parent.join(&source_leaf),
-            directory: source_pin.identity()?,
-            file: source_pin.file_identity(&source_leaf)?,
-            leaf: source_leaf,
-        };
         check_companions(&source_pin, &source.leaf)?;
         let reader = Connection::open_with_flags(
             &source.path,

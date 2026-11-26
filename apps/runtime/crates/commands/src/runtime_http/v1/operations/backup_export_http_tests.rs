@@ -3,6 +3,9 @@ use axum::routing;
 use respire_app::snapshot::backup_archive::open_to_stage;
 use std::{collections::BTreeSet, path::Path};
 
+#[path = "backup_import_http_tests.rs"]
+mod import;
+
 const EXPORT: &str = "/v1/backups/export";
 
 #[test]
@@ -85,7 +88,7 @@ pub(super) async fn check(base: Router, root: &Path, token: &Path, urk: [u8; 32]
     assert!(tokio::time::timeout(WAIT, retired.next()).await?.is_none());
     assert_eq!(request(&app, "GET", &endpoint, Some(TOKEN)).await?.status(), StatusCode::NOT_FOUND);
     assert_eq!(account_stage_count(root)?, 0, "consumer release cleans only its private output");
-    Ok(())
+    import::check(app, root).await
 }
 
 fn account_stage_count(profile: &Path) -> Result<usize> {

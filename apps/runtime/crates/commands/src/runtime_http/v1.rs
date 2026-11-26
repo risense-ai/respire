@@ -17,6 +17,10 @@ mod models;
 pub(crate) mod operations;
 #[cfg(all(test, unix))]
 mod backup_export;
+#[cfg(all(test, unix))]
+mod backup_import;
+#[cfg(all(test, unix))]
+mod backup_upload_stream;
 pub(super) mod owner_control;
 mod owner_handshake;
 mod owner_native;

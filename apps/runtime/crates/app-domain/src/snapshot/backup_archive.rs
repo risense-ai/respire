@@ -14,6 +14,7 @@ const MAGIC: &[u8; 8] = b"RSRSBKP\x01";
 const PURPOSE: &str = "rsrs:backup-archive:manifest:v1:";
 const MAX_HEADER: usize = 64 * 1024;
 pub const MAX_DATABASE: u64 = 4 * 1024 * 1024 * 1024;
+pub const MAX_WIRE: u64 = MAX_DATABASE + MAGIC.len() as u64 + 4 + MAX_HEADER as u64;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
