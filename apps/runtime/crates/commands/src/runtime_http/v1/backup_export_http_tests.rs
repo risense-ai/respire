@@ -1,6 +1,8 @@
 use super::*;
 use anyhow::{Context, Result};
-use axum::{extract::ConnectInfo, routing, Router};
+use axum::Router;
+#[cfg(not(target_os = "linux"))]
+use axum::{extract::ConnectInfo, routing};
 use respire_app::{auth, service, snapshot::backup_archive::open_to_stage};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -91,29 +93,20 @@ fn scoped_archive_over_loopback() -> Result<()> {
         tokio::runtime::Builder::new_current_thread().enable_all().build()?.block_on(async {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
             let bound = listener.local_addr()?;
-            let base = crate::runtime_http::router(bound);
-            let app = base.merge(Router::new().route(EXPORT, routing::get(
-                move |ConnectInfo(crate::network::Peer(peer)): ConnectInfo<crate::network::Peer>,
-                      request: Request| get(bound, peer, request),
-            )));
             #[cfg(target_os = "linux")]
-            let (app, tickets) = {
-                let (worker, tickets) = tokio::sync::mpsc::channel(1);
-                let app = app.merge(Router::new().route("/v1/backups/import", routing::post(
-                    move |ConnectInfo(crate::network::Peer(peer)): ConnectInfo<crate::network::Peer>,
-                          request: Request| super::super::operations::backup_import::post(
-                              bound, peer, request, worker.clone(),
-                          ),
-                )));
-                (app, tickets)
-            };
+            {
+                let url = format!("http://{bound}");
+                *crate::rpc_worker::WEB_URL.lock().map_err(|_| anyhow::anyhow!("URL lock"))? = url.clone();
+                crate::rpc_worker::write_endpoint(&url)?;
+            }
+            let app = install_backup_routes(crate::runtime_http::router(bound), bound);
             let server = tokio::spawn(async move {
                 axum::serve(
                     crate::network::Listener(listener),
                     app.into_make_service_with_connect_info::<crate::network::Peer>(),
                 ).await
             });
-            let result = tokio::task::spawn_blocking(move || verify_http(bound, &root, urk, #[cfg(target_os = "linux")] tickets)).await;
+            let result = tokio::task::spawn_blocking(move || verify_http(bound, &root, urk)).await;
             server.abort();
             let _ = server.await;
             result?
@@ -122,14 +115,24 @@ fn scoped_archive_over_loopback() -> Result<()> {
     drop(stop);
     dispatch.join().map_err(|_| anyhow::anyhow!("fixture dispatcher panicked"))??;
     run?;
+    #[cfg(target_os = "linux")]
+    offline_fixture::install_after_store_close()?;
     let witness = std::env::var_os(FINISHED).context("backup fixture witness missing")?;
     fs::write(witness, b"verified")?;
     Ok(())
 }
 
-fn verify_http(bound: SocketAddr, root: &Path, urk: [u8; 32],
-    #[cfg(target_os = "linux")] mut tickets: tokio::sync::mpsc::Receiver<super::super::operations::backup_import::Ticket>,
-) -> Result<()> {
+/// Isolated backup fixture routes for the selected listener. The caller owns startup.
+pub(crate) fn install_backup_routes(base: Router, bound: std::net::SocketAddr) -> Router {
+    #[cfg(target_os = "linux")]
+    { base.merge(super::super::operations::archive_claim_fixture(bound)) }
+    #[cfg(not(target_os = "linux"))]
+    { base.merge(Router::new().route(EXPORT, routing::get(
+        move |ConnectInfo(crate::network::Peer(peer)): ConnectInfo<crate::network::Peer>, request: Request| get(bound, peer, request)
+    ))) }
+}
+
+fn verify_http(bound: SocketAddr, root: &Path, urk: [u8; 32]) -> Result<()> {
     let base = format!("http://{bound}");
     let agent = ureq::AgentBuilder::new().try_proxy_from_env(false).timeout(WAIT).build();
     let get = |name: &str| agent.get(&format!("{base}{name}"));
@@ -148,6 +151,20 @@ fn verify_http(bound: SocketAddr, root: &Path, urk: [u8; 32],
     }
     assert!(backup_stage_count(root)? == 0);
 
+    #[cfg(target_os = "linux")]
+    {
+        for (request, expected) in [
+            (agent.post(&format!("{base}/v1/backups/import")), 401),
+            (post(EXPORT), 405),
+            (get("/v1/backups/import"), 405),
+            (post("/api/runtime/private-backup/claim"), 401),
+        ] {
+            let error = request.call().expect_err("unexpected backup admission");
+            ensure!(matches!(error, ureq::Error::Status(code, _) if code == expected),
+                "unexpected backup authorization or method result: {error}");
+        }
+        ensure!(backup_stage_count(root)? == 0, "denied requests retained custody");
+    }
     let save = |space: &str, content: &str| -> Result<String> {
         let response = post("/v1/memories").send_json(json!({"space_id": space, "content": content}))?;
         ensure!(response.status() == 201, "memory creation failed");
@@ -163,6 +180,8 @@ fn verify_http(bound: SocketAddr, root: &Path, urk: [u8; 32],
 
     let keys = respire_app::SessionKeys::from_urk(urk)?;
     for (space, expected) in [("main", parent), (space, child)] {
+        #[cfg(target_os = "linux")]
+        if offline_fixture::skip_space(space) { continue; }
         let response = get(&format!("{EXPORT}?space_id={space}"))
             .set("Authorization", &format!("Bearer {TOKEN}")).call()?;
         assert_eq!(response.status(), 200);
@@ -173,11 +192,15 @@ fn verify_http(bound: SocketAddr, root: &Path, urk: [u8; 32],
         ensure!(wire.len() <= 8 * 1024 * 1024, "fixture archive exceeded its byte budget");
         #[cfg(target_os = "linux")]
         {
+            if offline_fixture::enabled() {
+                offline_fixture::claim(&agent, &base, space, &wire, root, &keys, expected)?;
+                continue;
+            }
             let upload = |payload: &[u8]| post("/v1/backups/import?space_id=main")
                 .set("Content-Type", "application/octet-stream").send_bytes(payload);
             let reject = |payload: &[u8]| -> Result<()> {
                 ensure!(matches!(upload(payload), Err(ureq::Error::Status(400, _))), "invalid upload accepted");
-                ensure!(tickets.is_empty(), "rejected upload reached confirmation worker");
+                ensure!(backup_stage_count(root)? == 0, "rejected upload reached confirmation worker");
                 Ok(())
             };
             if space == "main" {
@@ -201,7 +224,7 @@ fn verify_http(bound: SocketAddr, root: &Path, urk: [u8; 32],
                     let mut reply = Vec::new();
                     stream.take(8192).read_to_end(&mut reply)?;
                     ensure!(!reply.starts_with(b"HTTP/1.1 202"), "aborted upload accepted");
-                    ensure!(tickets.is_empty(), "aborted upload reached worker");
+                    ensure!(backup_stage_count(root)? == 0, "aborted upload reached worker");
                 }
                 let mut corrupt = wire.clone();
                 *corrupt.last_mut().context("empty archive")? ^= 1;
@@ -218,18 +241,21 @@ fn verify_http(bound: SocketAddr, root: &Path, urk: [u8; 32],
                 assert_eq!(accepted.status(), 202);
                 let receipt: Value = accepted.into_json()?;
                 ensure!(matches!(upload(&wire), Err(ureq::Error::Status(503, _))),
-                    "a full confirmation queue accepted a second ticket");
+                    "full pending custody admitted another upload");
                 assert_eq!(backup_stage_count(root)?, 1);
-                let ticket = tickets.try_recv()?;
-                let id = ticket.operation_id().map_err(|_| anyhow::anyhow!("missing registry ID"))?;
+                let id = receipt["operation_id"].as_str().context("missing operation")?;
+                let uuid = uuid::Uuid::parse_str(id)?;
                 assert_eq!(receipt, json!({"operation_id": id, "status": "pending"}));
                 let status: Value = get(&format!("/v1/operations/{id}"))
                     .set("Authorization", &format!("Bearer {TOKEN}")).call()?.into_json()?;
                 assert_eq!(status["state"], "pending");
-                assert_eq!(ticket.target, service::database_path(root)?.canonicalize()?);
-                assert_eq!(ticket.archive_sha256, <[u8; 32]>::from(Sha256::digest(&wire)));
-                let handoff = ticket.pending.handoff();
-                let ready = ticket.pending.publish(|| Ok(()))?;
+                let selected = process_fixture::target()?;
+                let claimed = process_fixture::exercise(&agent, &base, selected, uuid, &wire, true)?;
+                use respire_spawn::owner_credential::{ArchiveOperation,BackupArchiveHandoff,ReadyBackupArchive};
+                let mut intent = [0; 32];
+                hex::decode_to_slice(claimed["intent_sha256"].as_str().context("missing claimed intent")?, &mut intent)?;
+                let handoff = BackupArchiveHandoff::from_approved_intent(ArchiveOperation::from_v4_bytes(*uuid.as_bytes())?, intent);
+                let ready = ReadyBackupArchive::open(root, handoff)?;
                 ready.consume(|input| {
                     let mut staged = Vec::new();
                     input.read_to_end(&mut staged)?;
@@ -237,15 +263,27 @@ fn verify_http(bound: SocketAddr, root: &Path, urk: [u8; 32],
                     Ok(())
                 })?;
                 handoff.discard(root)?;
+                let cancelled: Value = upload(&wire)?.into_json()?;
+                let cancelled = uuid::Uuid::parse_str(cancelled["operation_id"].as_str().context("cancelled operation")?)?;
+                agent.delete(&format!("{base}/v1/operations/{cancelled}")).set("Authorization", &format!("Bearer {TOKEN}")).call()?;
+                process_fixture::reject_cancelled(&agent, &base, selected, cancelled, &wire)?;
+
             } else {
                 reject(&wire)?;
                 let accepted = post(&format!("/v1/backups/import?space_id={space}"))
                     .set("Content-Type", "application/octet-stream").send_bytes(&wire)?;
                 assert_eq!(accepted.status(), 202);
-                let ticket = tickets.try_recv()?;
-                assert_ne!(ticket.target, service::database_path(root)?.canonicalize()?);
-                assert_eq!(ticket.archive_sha256, <[u8; 32]>::from(Sha256::digest(&wire)));
-                drop(ticket);
+                let receipt: Value = accepted.into_json()?;
+                let id = receipt["operation_id"].as_str().context("missing child operation")?;
+                assert_eq!(backup_stage_count(root)?, 1);
+                let uuid = uuid::Uuid::parse_str(id)?;
+                let selected = process_fixture::target()?;
+                let claimed = process_fixture::exercise(&agent, &base, selected, uuid, &wire, false)?;
+                use respire_spawn::owner_credential::{ArchiveOperation, BackupArchiveHandoff};
+                let mut intent = [0; 32];
+                hex::decode_to_slice(claimed["intent_sha256"].as_str().context("missing child intent")?, &mut intent)?;
+                BackupArchiveHandoff::from_approved_intent(ArchiveOperation::from_v4_bytes(*uuid.as_bytes())?, intent).discard(root)?;
+                assert_eq!(backup_stage_count(root)?, 0);
             }
         }
         let output = tempfile::NamedTempFile::new_in(root)?;
@@ -255,6 +293,8 @@ fn verify_http(bound: SocketAddr, root: &Path, urk: [u8; 32],
         let ids = rows.query_map([], |row| row.get(0))?.collect::<rusqlite::Result<BTreeSet<String>>>()?;
         assert_eq!(ids, BTreeSet::from([expected]));
     }
+    #[cfg(target_os = "linux")]
+    if offline_fixture::enabled() { return Ok(()); }
     assert!(backup_stage_count(root)? == 0);
     Ok(())
 }
@@ -285,3 +325,23 @@ impl Read for SplitArchive<'_> {
         self.rest.read(&mut out[..size])
     }
 }
+
+#[cfg(target_os = "linux")]
+#[path = "archive_process_fixture.rs"]
+mod process_fixture;
+
+#[cfg(target_os = "linux")]
+pub(super) use process_fixture::remember_selection;
+
+#[cfg(target_os = "linux")]
+#[path = "backup_drain_fixture.rs"]
+mod drain_fixture;
+
+
+#[cfg(target_os = "linux")]
+#[path = "backup_offline_fixture.rs"]
+mod offline_fixture;
+
+#[cfg(target_os = "linux")]
+#[path = "backup_lifecycle_fixture.rs"]
+pub(super) mod lifecycle_fixture;

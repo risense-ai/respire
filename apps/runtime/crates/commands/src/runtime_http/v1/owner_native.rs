@@ -109,6 +109,18 @@ impl NativeOwner {
         )
     }
 
+    #[cfg(target_os = "linux")]
+    pub(super) fn verify_archive(
+        &mut self, live: &OwnerBinding,
+        claim: respire_spawn::owner_credential::archive_proof::ArchiveClaim,
+        proof: &str, now: u64,
+    ) -> bool {
+        self.matches(live) && self.provider_live(&crate::rpc_worker::runtime_dir())
+            && self.registry.observe_archive_clock(now)
+            && claim.instance == *live.instance.as_bytes() && claim.generation == live.generation
+            && respire_spawn::owner_credential::archive_proof::verify(self.record.as_bytes(), claim, proof, now)
+    }
+
     pub(super) fn exchange(
         &mut self,
         live: &OwnerBinding,

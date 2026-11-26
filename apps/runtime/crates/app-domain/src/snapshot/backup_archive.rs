@@ -149,7 +149,7 @@ impl AuthenticatedBackupHeader {
             "backup belongs to a different selected library"
         );
         let length = self.wire_length();
-        Ok(PendingBackupArchive::stage_verified(
+        Ok(PendingBackupArchive::stage_reserved(
             owner_root,
             operation,
             length,
@@ -265,6 +265,12 @@ pub fn open_to_stage(
         .authenticate(keys, account)?
         .copy_to_stage(archive, stage, check)
 }
+
+#[cfg(target_os = "linux")]
+#[path = "backup_archive_restore.rs"]
+mod restore;
+#[cfg(target_os = "linux")]
+pub use restore::{BackupVaultIdentity, restore_approved_archive_locked};
 
 #[cfg(test)]
 #[path = "backup_archive_tests.rs"]

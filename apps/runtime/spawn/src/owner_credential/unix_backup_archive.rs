@@ -142,6 +142,39 @@ impl PendingBackupArchive {
         })
     }
 
+    /// Charge the single owner-root import slot before copying any archive bytes.
+    /// Surviving custody from an earlier process counts against the same slot.
+    pub fn stage_reserved(
+        root: &Path, operation: ArchiveOperation, length: u64,
+        mut check_live: impl FnMut() -> io::Result<()>,
+        copy: impl FnOnce(&mut dyn Write, &mut dyn FnMut() -> io::Result<()>) -> io::Result<()>,
+    ) -> io::Result<Self> {
+        if !(1..=MAX_WIRE_BYTES).contains(&length) { return Err(denied()); }
+        check_live()?;
+        let directory = lock_custody(root)?;
+        let entries = std::fs::read_dir(format!("/proc/self/fd/{}", directory.as_raw_fd()))?;
+        let mut terminals = 0;
+        for (index, entry) in entries.enumerate() {
+            if index >= 65536 { return Err(io::ErrorKind::WouldBlock.into()); }
+            let name = entry?.file_name();
+            let Some(suffix) = name.as_encoded_bytes().strip_prefix(b".backup-archive-") else { continue };
+            let Some(id) = suffix.strip_suffix(b".terminal") else { return Err(io::ErrorKind::WouldBlock.into()) };
+            terminals += 1;
+            if id.len() != 32 || !id.iter().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b)) || terminals >= 128 {
+                return Err(io::ErrorKind::WouldBlock.into());
+            }
+            let terminal = open_leaf(&directory, name.to_str().ok_or_else(denied)?)?;
+            if !(1..=TERMINAL_LIMIT).contains(&check(&terminal, 0o600, false)?.len()) {
+                return Err(io::ErrorKind::WouldBlock.into());
+            }
+        }
+        let wire = MigrationCopy::create(root, &operation.leaf("pending"))?;
+        if file_identity(&directory)? != wire.archive_binding()?.0 { return Err(denied()); }
+        directory.sync_all()?;
+        drop(directory);
+        Self::fill_wire(root, operation, length, wire, check_live, copy)
+    }
+
     /// Put the exact complete wire into custody while a typed decoder
     /// verifies the source. Returning the pending wire conveys no authority
     /// to admit it to maintenance or publish a terminal receipt.
@@ -152,7 +185,17 @@ impl PendingBackupArchive {
     ) -> io::Result<Self> {
         if !(1..=MAX_WIRE_BYTES).contains(&length) { return Err(denied()); }
         check_live()?;
-        let mut wire = MigrationCopy::create(root, &operation.leaf("pending"))?;
+        let wire = MigrationCopy::create(root, &operation.leaf("pending"))?;
+        Self::fill_wire(root, operation, length, wire, check_live, copy)
+    }
+
+    fn fill_wire(
+        root: &Path, operation: ArchiveOperation, length: u64, mut wire: MigrationCopy,
+        mut check_live: impl FnMut() -> io::Result<()>,
+        copy: impl FnOnce(&mut dyn Write, &mut dyn FnMut() -> io::Result<()>) -> io::Result<()>,
+    ) -> io::Result<Self> {
+        check_live()?;
+        wire.reserve_archive_bytes(length)?;
         let mut digest = Sha256::new();
         wire.fill_archive(|out| {
             let mut bounded = BoundedArchiveWriter { out, digest: &mut digest, remaining: length };
@@ -166,6 +209,11 @@ impl PendingBackupArchive {
             root: root.to_owned(), wire,
             intent: Intent { operation, root: root_identity, file, bytes: length, sha256: digest.finalize().into() },
         })
+    }
+
+    /// Compare the authenticated receiver's ticket to this exact staged file.
+    pub fn matches_ticket(&self, root: &Path, operation: ArchiveOperation, digest: [u8; 32]) -> bool {
+        self.root == root && self.intent.operation == operation && self.intent.sha256 == digest
     }
 
     pub fn handoff(&self) -> BackupArchiveHandoff {
@@ -187,16 +235,40 @@ impl PendingBackupArchive {
     /// Fsync intent first, then publish the final wire without clobbering.
     /// Do not drain unless reopen succeeds; an error may leave an intent
     /// only (or a final name after a late fsync failure). Never replay.
-    pub fn publish(self, mut check_live: impl FnMut() -> io::Result<()>) -> io::Result<ReadyBackupArchive> {
+    pub fn publish(self, check_live: impl FnMut() -> io::Result<()>) -> io::Result<ReadyBackupArchive> {
+        self.publish_observed(check_live, || ())
+    }
+
+    pub fn publish_claim(self, check_live: impl FnMut() -> io::Result<()>) -> Result<ReadyBackupArchive, ArchivePublishError> {
+        let root = self.root.clone();
+        let handoff = self.handoff();
+        let mut renamed = false;
+        self.publish_observed(check_live, || renamed = true).map_err(|error| {
+            if renamed { return ArchivePublishError::AfterRename(error); }
+            // Only the exact marker of this consumed ticket can be removed.
+            let _ = handoff.discard_unpublished_intent(&root);
+            ArchivePublishError::BeforeRename(error)
+        })
+    }
+
+    /// The observer runs immediately after the successful no-replace wire rename.
+    fn publish_observed(self, mut check_live: impl FnMut() -> io::Result<()>, renamed: impl FnOnce()) -> io::Result<ReadyBackupArchive> {
+        let _directory = lock_custody(&self.root)?;
         check_live()?;
         let handoff = self.handoff();
         self.persist_intent()?;
         check_live()?;
-        self.wire.publish(&handoff.operation.leaf("archive"))?;
+        self.wire.publish_observed(&handoff.operation.leaf("archive"), renamed)?;
         let ready = ReadyBackupArchive::open(&self.root, handoff)?;
         check_live()?;
         Ok(ready)
     }
+}
+
+#[derive(Debug)]
+pub enum ArchivePublishError {
+    BeforeRename(io::Error),
+    AfterRename(io::Error),
 }
 
 pub struct ReadyBackupArchive {
@@ -217,6 +289,11 @@ impl ReadyBackupArchive {
         Ok(Self { wire, intent })
     }
 
+    pub fn require_archive_digest(self, expected: [u8; 32]) -> io::Result<Self> {
+        if self.intent.sha256 != expected { return Err(denied()); }
+        Ok(self)
+    }
+
     /// An isolated decoder may write only its own private disposable stage.
     /// It gets success only when the exact approved wire was actually consumed.
     pub fn consume<T>(self, decode: impl FnOnce(&mut dyn Read) -> io::Result<T>) -> io::Result<T> {
@@ -234,6 +311,32 @@ impl ReadyBackupArchive {
 }
 
 impl BackupArchiveHandoff {
+    fn discard_unpublished_intent(self, root: &Path) -> io::Result<()> {
+        let parent = open_base(root)?;
+        let (_, record) = read_intent(&parent, self)?;
+        remove_owned(&parent, &self.operation.leaf("intent"), record, Some(INTENT_BYTES as u64))?;
+        parent.sync_all()
+    }
+
+    /// Publish an immutable, bounded record while exact retained custody is present.
+    /// A retry after an uncertain rename must supply the identical record.
+    pub fn publish_terminal(self, root: &Path, archive: [u8; 32], bytes: &[u8]) -> io::Result<()> {
+        if bytes.is_empty() || bytes.len() as u64 > TERMINAL_LIMIT { return Err(denied()); }
+        let directory = lock_custody(root)?;
+        let (intent, _) = read_intent(&directory, self)?;
+        ReadyBackupArchive::open(root, self)?.require_archive_digest(archive)?;
+        if let Some(previous) = read_backup_terminal(root, self.operation)? {
+            if previous != bytes { return Err(denied()); }
+            return directory.sync_all();
+        }
+        let mut pending = MigrationCopy::create(root, &self.operation.leaf("terminal-pending"))?;
+        if pending.archive_binding()?.0 != intent.root { return Err(denied()); }
+        pending.fill_archive(|file| file.write_all(bytes))?;
+        pending.publish(&self.operation.leaf("terminal"))?;
+        if read_backup_terminal(root, self.operation)?.as_deref() != Some(bytes) { return Err(denied()); }
+        Ok(())
+    }
+
     /// Only the current coordinator may discard its exact admitted custody.
     /// An unrelated or ambiguous replacement is retained, never unlinked.
     pub fn discard(self, root: &Path) -> io::Result<()> {
@@ -291,6 +394,16 @@ impl Read for ApprovedRead {
         self.remaining -= size as u64;
         Ok(size)
     }
+}
+
+fn lock_custody(root: &Path) -> io::Result<File> {
+    let directory = open_base(root)?;
+    let flags = libc::LOCK_EX | libc::LOCK_NB;
+    // SAFETY: the descriptor belongs to this live directory handle.
+    if unsafe { libc::flock(directory.as_raw_fd(), flags) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(directory)
 }
 
 fn file_identity(file: &File) -> io::Result<[u64; 2]> {

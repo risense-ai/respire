@@ -162,3 +162,40 @@ fn terminal_reader_denies_oversize_and_does_not_follow_substitute_links() -> io:
     assert!(unrelated.is_file());
     Ok(())
 }
+
+#[test]
+fn reserved_wire_stays_charged_until_exact_cleanup() -> io::Result<()> {
+    let dir = Scratch::model_fixture()?;
+    let root = dir.path();
+    let op = operation(21)?;
+    let length = 128 * 1024;
+    let staged = || PendingBackupArchive::stage_reserved(root, op, length, || Ok(()), |out, _| {
+        let metadata = fs::metadata(root.join(op.leaf("pending")))?;
+        assert_eq!(metadata.len(), 0);
+        assert!(metadata.blocks() * 512 >= length);
+        out.write_all(&vec![24; length as usize])
+    });
+    let blocked = || -> io::Result<()> {
+        let result = PendingBackupArchive::stage_reserved(root, operation(22)?, 1, || Ok(()),
+            |_, _| panic!("decoder ran without a reservation"));
+        assert!(matches!(result, Err(e) if e.kind() == io::ErrorKind::WouldBlock));
+        Ok(())
+    };
+    let first = staged()?;
+    blocked()?;
+    drop(first);
+    let second = staged()?;
+    let handoff = second.handoff();
+    let reply = second.publish_claim(|| {
+        if root.join(op.leaf("archive")).exists() { return Err(denied()); }
+        Ok(())
+    });
+    assert!(matches!(reply, Err(ArchivePublishError::AfterRename(_))));
+    blocked()?;
+    let wrong = BackupArchiveHandoff::from_approved_intent(op, [0; 32]);
+    assert!(wrong.discard(root).is_err());
+    blocked()?;
+    handoff.discard(root)?;
+    drop(staged()?);
+    Ok(())
+}

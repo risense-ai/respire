@@ -54,6 +54,14 @@ fn restore_operation_with_hook(
     operation: Option<&SnapshotOperation>,
     hook: &dyn Fn(&str) -> Result<()>,
 ) -> Result<RestoreReceipt> {
+    restore_source_with_hook(root, account, keys, id, ownership, operation, None, hook)
+}
+
+fn restore_source_with_hook(
+    root: &Path, account: &str, keys: &crate::SessionKeys, id: &str,
+    ownership: &crate::lock::LibraryLock, operation: Option<&SnapshotOperation>,
+    archive: Option<(Manifest, &Path)>, hook: &dyn Fn(&str) -> Result<()>,
+) -> Result<RestoreReceipt> {
     anyhow::ensure!(
         ownership.protects(root)?,
         "snapshot restore requires ownership of this library"
@@ -70,7 +78,10 @@ fn restore_operation_with_hook(
     }
     let live = crate::service::database_path(root)?;
     reject_live_symlink(&live)?;
-    let selected = read_manifest(root, id)?;
+    let (selected, source) = match archive {
+        Some((manifest, source)) => (manifest, source.to_owned()),
+        None => (read_manifest(root, id)?, root.join("snapshots").join(format!("{id}.db"))),
+    };
     let source_library = format!(
         "{:x}",
         Sha256::digest(fs::canonicalize(&live)?.to_string_lossy().as_bytes())
@@ -81,7 +92,6 @@ fn restore_operation_with_hook(
             && selected.account_fingerprint == account_fingerprint,
         "snapshot belongs to another account or library"
     );
-    let source = root.join("snapshots").join(format!("{id}.db"));
     let live_schema = schema_digest(&live)?;
     let schemas_match = live_schema == selected.database_schema_sha256;
     let legacy_columns = if schemas_match {

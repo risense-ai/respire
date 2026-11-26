@@ -11,7 +11,7 @@ use std::net::SocketAddr;
 
 mod compatibility;
 mod diary;
-#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+#[cfg(any(target_os = "linux", all(test, target_os = "macos")))]
 mod backup_export;
 mod host_config;
 mod host_config_patch;
@@ -69,6 +69,8 @@ pub(super) fn router(bound: SocketAddr) -> Router {
         .merge(operations::routes(bound));
     #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
     let router = router.merge(device_spaces::routes(bound));
+    #[cfg(target_os = "linux")]
+    let router = router.merge(backup_export::backup_routes(bound));
     router
 }
 

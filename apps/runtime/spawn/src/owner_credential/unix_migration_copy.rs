@@ -70,6 +70,18 @@ impl MigrationCopy {
     }
 
     #[cfg(target_os = "linux")]
+    pub(super) fn reserve_archive_bytes(&self, length: u64) -> io::Result<()> {
+        self.archive_binding()?;
+        let length = i64::try_from(length).map_err(|_| denied())?;
+        // SAFETY: reserve on our exclusive private inode. KEEP_SIZE leaves the
+        // logical length zero so the streaming decoder still verifies exact EOF.
+        if unsafe { libc::fallocate(self.file.as_raw_fd(), libc::FALLOC_FL_KEEP_SIZE, 0, length) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
     pub(super) fn fill_archive(&mut self, fill: impl FnOnce(&mut File) -> io::Result<()>) -> io::Result<()> {
         self.archive_binding()?;
         if self.file.metadata()?.len() != 0 {
@@ -85,7 +97,11 @@ impl MigrationCopy {
         &self.path
     }
 
-    pub fn publish(mut self, final_name: &str) -> io::Result<()> {
+    pub fn publish(self, final_name: &str) -> io::Result<()> {
+        self.publish_observed(final_name, || ())
+    }
+
+    pub(super) fn publish_observed(mut self, final_name: &str, renamed: impl FnOnce()) -> io::Result<()> {
         super::super::validate_migration_leaf(final_name)?;
         let final_name = CString::new(final_name).map_err(|_| denied())?;
         let parent = self.parent.as_raw_fd();
@@ -98,6 +114,7 @@ impl MigrationCopy {
         self.file.sync_all()?;
         super::model_stage::no_replace(parent, &self.pending, &final_name)?;
         self.published = true;
+        renamed();
         self.parent.sync_all()
     }
 }

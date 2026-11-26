@@ -2379,6 +2379,7 @@ dependencies = [
  "hmac",
  "libc",
  "libloading",
+ "rusqlite",
  "sha2",
  "windows-sys 0.61.2",
 ]

@@ -66,6 +66,13 @@ impl LocalStore {
         Ok(canonical)
     }
 
+    #[cfg(target_os = "linux")]
+    pub fn pin_backup_target(&self) -> Result<respire_spawn::owner_credential::ArchiveTarget> {
+        let target = respire_spawn::owner_credential::ArchiveTarget::pin(self.backup_target()?)?;
+        target.verify_connection(&self.connection)?;
+        Ok(target)
+    }
+
     /// Short admission only. Select the store from the verified owner scope
     /// before calling; `stage_parent` is the verified owner account root,
     /// not the selected child, and never comes from an HTTP path.

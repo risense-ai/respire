@@ -337,3 +337,75 @@
         assert!(!db.prepare("SELECT 1 FROM memories WHERE id='later'")?.exists([])?);
         Ok(())
     }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn confirmed_archive_uses_exact_custody_and_only_installs_once() -> Result<()> {
+    use respire_spawn::owner_credential::ArchiveOperation;
+    use crate::snapshot::backup_archive::{self, BackupArchiveHeader};
+    let (directory, db) = fixture()?;
+    let root = directory.path().canonicalize()?;
+    let keys = crate::SessionKeys::from_urk([7; 32])?;
+    let id = create(&root, "account", "fixture", &keys)?.id;
+    let ownership = crate::lock::LibraryLock::acquire(&root, std::time::Duration::ZERO)?;
+    let mut wire = Vec::new();
+    backup_archive::seal_verified_snapshot(&root, &ownership, &keys, "account", &id, &mut wire, || Ok(()))?;
+    let uuid = uuid::Uuid::new_v4();
+    let op = ArchiveOperation::from_v4_bytes(*uuid.as_bytes())?;
+    let custody = tempfile::tempdir()?;
+    let custody = custody.path().canonicalize()?;
+    let selected = respire_spawn::owner_credential::ArchiveTarget::pin(root.join("rsrs.db"))?;
+    let mut reader = wire.as_slice();
+    let pending = BackupArchiveHeader::read(&mut reader)?.authenticate(&keys, "account")?
+        .stage_for_restore(reader, &custody, &root.join("rsrs.db"), op, || Ok(()))?;
+    let intent = pending.handoff().intent_sha256();
+    drop(pending.publish(|| Ok(()))?);
+    let digest = Sha256::digest(&wire).into();
+    use respire_spawn::owner_credential::{OwnerRecord, backup_grant::{self, Receiver, Scope}};
+    let owner = OwnerRecord::from_bytes([12; 48]);
+    let scope = Scope {
+        operation: *uuid.as_bytes(), archive: digest, target: Sha256::digest(selected.path().as_os_str().as_encoded_bytes()).into(),
+        target_identity: selected.identity_digest()?, account: Sha256::digest(b"account").into(),
+        profile: Sha256::digest(custody.as_os_str().as_encoded_bytes()).into(), instance: [15; 16], generation: 1,
+        supervisor_pid: std::process::id(), supervisor_birth: 1,
+    };
+    let issue = |intent, archive| -> Result<_> {
+        let exact = Scope { archive, ..scope };
+        let receiver = Receiver::arm(&owner, exact)?;
+        let tag = backup_grant::issue(&owner, &receiver.challenge(), &exact, &intent, &[16;16])?;
+        Ok(receiver.accept(intent, [16;16], &tag)?)
+    };
+    let vault = backup_archive::BackupVaultIdentity::fixture("account", &custody, uuid::Uuid::from_bytes([16;16]));
+    for (name, epoch) in [("wrong", [16;16]), ("account", [17;16])] {
+        let other = backup_archive::BackupVaultIdentity::fixture(name, &custody, uuid::Uuid::from_bytes(epoch));
+        assert!(other.check(&issue(intent, digest)?).is_err());
+    }
+    let operation = SnapshotOperation { operation_id: uuid.to_string(), request_fingerprint: issue(intent, digest)?.fingerprint() };
+    let mut other = operation.clone();
+    other.operation_id = uuid::Uuid::new_v4().to_string();
+    fs::remove_file(root.join("snapshots").join(format!("{id}.db")))?;
+    fs::remove_file(root.join("snapshots").join(format!("{id}.json")))?;
+    db.execute("DELETE FROM memories", [])?;
+    drop(db);
+    let live = root.join("rsrs.db");
+    let before = digest_file(&live)?;
+    for (target, operation, intent, digest) in [
+        (id.as_str(), &operation, [0; 32], digest),
+        (id.as_str(), &operation, intent, [0; 32]),
+        (id.as_str(), &other, intent, digest),
+        ("11111111111111111111111111111111", &operation, intent, digest),
+    ] {
+        assert!(backup_archive::restore_approved_archive_locked(&root, &custody, &selected, &vault, &keys, target,
+            operation, &ownership, issue(intent, digest)?, || Ok(())).is_err());
+        assert_eq!(digest_file(&live)?, before);
+        assert!(!root.join(RECOVERY_FILE).exists());
+    }
+    let apply = || backup_archive::restore_approved_archive_locked(&root, &custody, &selected, &vault, &keys, &id,
+        &operation, &ownership, issue(intent, digest)?, || Ok(()));
+    let status = apply()?.context("missing installed operation")?;
+    assert_eq!(status.phase, "installed");
+    assert!(apply().is_err());
+    let restored = Connection::open_with_flags(&live, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    assert_eq!(restored.query_row("SELECT COUNT(*) FROM memories", [], |row| row.get::<_, i64>(0))?, 1);
+    Ok(())
+}

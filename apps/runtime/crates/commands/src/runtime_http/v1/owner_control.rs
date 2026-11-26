@@ -89,6 +89,8 @@ impl OwnerDispatch {
 impl Drop for OwnerDispatch {
     fn drop(&mut self) {
         DISPATCH_LIVE.store(false, std::sync::atomic::Ordering::Release);
+        #[cfg(target_os = "linux")]
+        super::operations::retire_pending_archives();
         revoke();
     }
 }

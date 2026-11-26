@@ -153,16 +153,18 @@ async fn handle(
     }
 
     let deadline = Instant::now() + Duration::from_secs(2);
+    #[cfg(target_os = "linux")]
+    let receipt_scope = scope.clone();
     let snapshot = owner_control::bounded_blocking(move || {
         transport::with_scope(&scope, || {
-            let entry = state::registry().lookup(&scope, id)?;
+            let Some(entry) = state::registry().lookup_optional(&scope, id)? else { return Ok(None); };
             if matches!(route, Route::Cancel) {
                 if Instant::now() >= deadline {
                     return Err(transport::unavailable());
                 }
-                entry.cancel()
+                entry.cancel().map(Some)
             } else {
-                entry.snapshot()
+                entry.snapshot().map(Some)
             }
         })
     })
@@ -172,7 +174,16 @@ async fn handle(
     } else {
         StatusCode::OK
     };
-    let mut response = transport::json_response(code, snapshot)?;
+    let mut response = match snapshot {
+        Some(snapshot) => transport::json_response(code, snapshot)?,
+        #[cfg(target_os = "linux")]
+        None if matches!(route, Route::Status) => {
+            let terminal = super::super::backup_export::lookup_completed(receipt_scope, id).await?
+                .ok_or_else(state::not_found)?;
+            transport::json_response(code, terminal)?
+        }
+        None => return Err(state::not_found()),
+    };
     response.headers_mut().insert(
         header::CACHE_CONTROL,
         header::HeaderValue::from_static("no-store"),

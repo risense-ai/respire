@@ -399,6 +399,19 @@ fn router(bound: SocketAddr) -> axum::Router {
         .merge(v1::router(bound))
 }
 
+#[cfg(test)]
+type FixtureRoutes = fn(axum::Router, SocketAddr) -> axum::Router;
+
+#[cfg(test)]
+static FIXTURE_ROUTES: std::sync::OnceLock<FixtureRoutes> = std::sync::OnceLock::new();
+
+/// Install before normal startup in an isolated fixture process. Production
+/// binaries contain neither the hook nor an environment switch for it.
+#[cfg(test)]
+pub(crate) fn install_fixture_routes(routes: FixtureRoutes) -> anyhow::Result<()> {
+    FIXTURE_ROUTES.set(routes).map_err(|_| anyhow::anyhow!("fixture routes already installed"))
+}
+
 pub fn serve_loop(server: std::net::TcpListener) -> anyhow::Result<()> {
     let bound = server.local_addr()?;
     let (finished, drained) = std::sync::mpsc::sync_channel(1);
@@ -414,6 +427,11 @@ pub fn serve_loop(server: std::net::TcpListener) -> anyhow::Result<()> {
     crate::network::runtime()?.block_on(async move {
         let listener = tokio::net::TcpListener::from_std(server)?;
         let app = router(bound);
+        #[cfg(test)]
+        let app = match FIXTURE_ROUTES.get() {
+            Some(augment) => augment(app, bound),
+            None => app,
+        };
         axum::serve(
             crate::network::Listener(listener),
             app.into_make_service_with_connect_info::<crate::network::Peer>(),

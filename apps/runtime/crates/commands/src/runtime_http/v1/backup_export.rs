@@ -23,6 +23,21 @@ static ADMISSION: Semaphore = Semaphore::const_new(2);
 const PREPARATION_LIMIT: Duration = Duration::from_secs(120);
 const STREAM_LIMIT: Duration = Duration::from_secs(180);
 
+/// Linux has both a pinned exporter and a bounded importer. The public router
+/// may merge this pair only after native confirmation is qualified for the build.
+#[cfg(target_os = "linux")]
+pub(super) fn backup_routes(bound: SocketAddr) -> axum::Router {
+    use super::registration::{bind, RouteSpec, Verb};
+    use axum::{extract::{ConnectInfo, State}, Router};
+    use crate::network::Peer;
+    let app = bind(Router::new(), RouteSpec::new(Verb::Get, "/v1/backups/export", "exportBackup"),
+        |State(bound), ConnectInfo(Peer(peer)), request| get(bound, peer, request));
+    bind(app, RouteSpec::new(Verb::Post, "/v1/backups/import", "importBackup"),
+        |State(bound), ConnectInfo(Peer(peer)), request| super::operations::backup_import::post(bound, peer, request))
+        .method_not_allowed_fallback(super::method_not_allowed)
+        .with_state(bound)
+}
+
 struct CancelPreparation(Arc<AtomicBool>);
 
 impl Drop for CancelPreparation {
@@ -45,7 +60,11 @@ pub(super) async fn get(bound: SocketAddr, peer: SocketAddr, request: Request) -
     transport::json_optional::<serde_json::Value>(body, 0).await?;
     let permit = ADMISSION.try_acquire().map_err(|_| transport::unavailable())?;
     let source = rest_dispatch::submit(scope.clone(), Access::Read, move |ctx| {
+        #[cfg(all(test, target_os = "linux"))]
+        tests::lifecycle_fixture::capture_armed(ctx)?;
         reads::with_memory_store(ctx, selected, |store, _| {
+            #[cfg(all(test, target_os = "linux"))]
+            tests::remember_selection(store).map_err(|_| transport::unavailable())?;
             store.prepare_backup_export(&ctx.scope.canonical_profile).map_err(|_| transport::unavailable())
         })
     }).await?;
@@ -123,3 +142,13 @@ async fn next(state: Option<FrameContext>) -> Option<(io::Result<Bytes>, Option<
 #[cfg(test)]
 #[path = "backup_export_http_tests.rs"]
 mod tests;
+
+#[cfg(target_os = "linux")]
+pub(super) use completion::lookup as lookup_completed;
+#[cfg(target_os = "linux")]
+#[path = "backup_completion.rs"]
+mod completion;
+
+#[cfg(target_os = "linux")]
+#[path = "backup_selected_receipt.rs"]
+mod selected_receipt;

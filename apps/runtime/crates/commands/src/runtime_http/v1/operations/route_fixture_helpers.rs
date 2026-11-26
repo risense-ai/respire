@@ -37,3 +37,11 @@ pub(super) fn owner_fixture_root(path: std::path::PathBuf, owner: bool) -> Resul
     let _ = owner;
     Ok(path)
 }
+
+pub(super) async fn trigger(app: &Router, token: &str) -> Result<String> {
+    let response = request(app, "POST", "/v1/sync/trigger", Some(token)).await?;
+    let operation = json_response(response, StatusCode::ACCEPTED).await?;
+    let id = operation["operation_id"].as_str().context("operation ID")?;
+    uuid::Uuid::parse_str(id)?;
+    Ok(format!("/v1/operations/{id}"))
+}

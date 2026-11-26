@@ -345,6 +345,11 @@ fn read_manifest(root: &Path, id: &str) -> Result<Manifest> {
     chrono::DateTime::parse_from_rfc3339(&manifest.created_at)
         .context("invalid snapshot timestamp")?;
     let database = directory.join(format!("{id}.db"));
+    validate_manifest_database(&database, &manifest)?;
+    Ok(manifest)
+}
+
+fn validate_manifest_database(database: &Path, manifest: &Manifest) -> Result<()> {
     anyhow::ensure!(
         manifest.bytes == fs::metadata(&database)?.len()
             && manifest.database_sha256 == digest_file(&database)?,
@@ -360,7 +365,7 @@ fn read_manifest(root: &Path, id: &str) -> Result<Manifest> {
         entries == manifest.entries && version == manifest.sqlite_user_version,
         "snapshot inventory mismatch"
     );
-    Ok(manifest)
+    Ok(())
 }
 
 fn verify_witness(database: &Path, manifest: &Manifest) -> Result<()> {
