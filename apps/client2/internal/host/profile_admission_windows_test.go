@@ -71,3 +71,19 @@ func TestNewBindsConfiguredJunctionToPhysicalProfile(t *testing.T) {
 		t.Fatalf("replacement reached model admission: %v", err)
 	}
 }
+
+func TestNewRefusesMissingProfileBelowOwnedJunction(t *testing.T) {
+	root := t.TempDir()
+	selected := syntheticJunctionProfile(t, root)
+	if err := os.Remove(filepath.Join(root, "physical", "profile")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("RSRS_DATA_DIR", selected)
+	t.Setenv("RSRS_RPC_PORT", "15169")
+	if _, err := New(); err == nil {
+		t.Fatal("missing profile beneath a junction was admitted")
+	}
+	if _, err := os.Stat(selected); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unresolved profile touched: %v", err)
+	}
+}

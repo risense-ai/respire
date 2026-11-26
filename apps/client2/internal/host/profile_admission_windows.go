@@ -18,7 +18,7 @@ var errProfileScope = errors.New("configured profile has no trusted local direct
 // The ordinary path keeps its existing missing-suffix semantics. Only a raw,
 // explicitly selected, absolute local path can request junction admission.
 func admitProfile(root, configured string) (profileAdmission, func(), error) {
-	if configured != "" && !plainProfilePath(windowsDOSPath(configured)) {
+	if configured != "" && strings.HasPrefix(filepath.ToSlash(windowsDOSPath(configured)), "//") {
 		return profileAdmission{}, nil, errProfileScope
 	}
 	path, err := startupScopePath(root)
@@ -107,7 +107,7 @@ func (p *profilePins) walk(path string, allowJunction bool) error {
 	parts := strings.Split(path[3:], "\\")
 	found := false
 	cursor := root
-	for i, name := range parts {
+	for i, name := range append([]string{""}, parts...) {
 		cursor = filepath.Join(cursor, name)
 		file, err := openProfileDirectory(cursor, windows.FILE_SHARE_READ)
 		if err != nil {
@@ -123,13 +123,13 @@ func (p *profilePins) walk(path string, allowJunction bool) error {
 			return errProfileScope
 		}
 		if info.FileAttributes & windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-			if !allowJunction || found || i == 0 || i == len(parts)-1 {
+			if !allowJunction || found || i <= 1 || i == len(parts) {
 				return errProfileScope
 			}
-			if err := privateProfileDirectory(windows.Handle(p.files[len(p.files)-2].Fd())); err != nil {
+			if err := verifyProfileDirectory(windows.Handle(p.files[len(p.files)-2].Fd()), true); err != nil {
 				return err
 			}
-			if err := privateProfileDirectory(h); err != nil {
+			if err := verifyProfileDirectory(h, true); err != nil {
 				return err
 			}
 			// Inspect the native substitute name. A printable reparse name is
@@ -143,10 +143,8 @@ func (p *profilePins) walk(path string, allowJunction bool) error {
 			}
 			cursor = p.root
 			found = true
-		} else if i == len(parts)-1 {
-			if err := privateProfileDirectory(h); err != nil {
-				return err
-			}
+		} else if err := verifyProfileDirectory(h, i == len(parts)); err != nil {
+			return err
 		}
 	}
 	if allowJunction && !found {
@@ -165,7 +163,7 @@ func openProfileDirectory(path string, share uint32) (*os.File, error) {
 	if err != nil {
 		return nil, err
 	}
-	h, err := windows.CreateFile(ptr, windows.FILE_READ_ATTRIBUTES|windows.READ_CONTROL, share, nil,
+	h, err := windows.CreateFile(ptr, windows.FILE_LIST_DIRECTORY|windows.FILE_READ_ATTRIBUTES|windows.READ_CONTROL, share, nil,
 		windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
 	if err != nil {
 		return nil, err
@@ -209,7 +207,7 @@ func junctionSubstitute(h windows.Handle) (string, error) {
 
 // Restrict the alias, its parent, and the destination to the current owner.
 // Only allow entries for that user, SYSTEM, or administrators qualify.
-func privateProfileDirectory(h windows.Handle) error {
+func verifyProfileDirectory(h windows.Handle, private bool) error {
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()
 	if err != nil {
 		return err
@@ -219,7 +217,15 @@ func privateProfileDirectory(h windows.Handle) error {
 		return err
 	}
 	owner, _, err := sd.Owner()
-	if err != nil || owner == nil || !owner.Equals(user.User.Sid) {
+	if err != nil || owner == nil {
+		return errProfileScope
+	}
+	trusted := func(sid *windows.SID) bool {
+		return sid.Equals(user.User.Sid) || sid.IsWellKnown(windows.WinLocalSystemSid) || sid.IsWellKnown(windows.WinBuiltinAdministratorsSid)
+	}
+	// Windows Resource Protection owns some system directories.
+	const trustedInstaller = "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"
+	if private && !owner.Equals(user.User.Sid) || !trusted(owner) && owner.String() != trustedInstaller {
 		return errProfileScope
 	}
 	acl, _, err := sd.DACL()
@@ -231,11 +237,17 @@ func privateProfileDirectory(h windows.Handle) error {
 		if err := windows.GetAce(acl, uint32(i), &ace); err != nil {
 			return err
 		}
+		const inheritOnlyACE = 0x08
+		if ace.Header.AceType == windows.ACCESS_DENIED_ACE_TYPE || !private && ace.Header.AceFlags & inheritOnlyACE != 0 {
+			continue
+		}
 		if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE {
 			return errProfileScope
 		}
 		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
-		if !sid.Equals(owner) && !sid.IsWellKnown(windows.WinLocalSystemSid) && !sid.IsWellKnown(windows.WinBuiltinAdministratorsSid) {
+		// FILE_APPEND_DATA permits adding an unrelated subdirectory.
+		const safePrefixRights = windows.FILE_GENERIC_READ | windows.FILE_GENERIC_EXECUTE | windows.GENERIC_READ | windows.GENERIC_EXECUTE | windows.FILE_APPEND_DATA
+		if !trusted(sid) && (private || sid.String() != trustedInstaller && ace.Mask &^ uint32(safePrefixRights) != 0) {
 			return errProfileScope
 		}
 	}
