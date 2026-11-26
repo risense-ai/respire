@@ -5,6 +5,20 @@ use respire_protocol::host_control::*;
 use respire_protocol::RpcRequest;
 mod target_identity;
 
+pub(crate) const LOGIN_PROGRESS_METHOD: &str = "control.auth.login_progress";
+
+pub(crate) fn validate_account_frame(request: &RpcRequest) -> Result<()> {
+    let canonical = |value: &str| uuid::Uuid::parse_str(value)
+        .is_ok_and(|id| id.get_version_num() == 4 && id.to_string() == value);
+    ensure!(request.v == respire_commands::rpc_worker::PROTOCOL_V
+        && canonical(&request.id) && request.operation_id.as_deref().is_some_and(canonical)
+        && request.idempotency_key.as_ref().is_some_and(|key| !key.is_empty() && key.len() <= 128
+            && key.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte)))
+        && request.args.len() == 1 && request.scope.is_none() && request.parent_operation_id.is_none()
+        && request.queue_wait_ms.is_none() && request.lifecycle.is_none(), "invalid account control request");
+    Ok(())
+}
+
 pub(crate) enum AccountRequest {
     Register(HostAuthRegisterParams),
     Login(HostAuthLoginParams),
@@ -15,14 +29,7 @@ pub(crate) enum AccountRequest {
 
 impl AccountRequest {
     pub(crate) fn parse(request: &RpcRequest) -> Result<Self> {
-        let canonical = |value: &str| uuid::Uuid::parse_str(value)
-            .is_ok_and(|id| id.get_version_num() == 4 && id.to_string() == value);
-        ensure!(request.v == respire_commands::rpc_worker::PROTOCOL_V
-            && canonical(&request.id) && request.operation_id.as_deref().is_some_and(canonical)
-            && request.idempotency_key.as_ref().is_some_and(|key| !key.is_empty() && key.len() <= 128
-                && key.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte)))
-            && request.args.len() == 1 && request.scope.is_none() && request.parent_operation_id.is_none()
-            && request.queue_wait_ms.is_none() && request.lifecycle.is_none(), "invalid account control request");
+        validate_account_frame(request)?;
         let (parsed, schema) = match request.method.as_str() {
             HOST_AUTH_REGISTER_METHOD => {
                 let params: HostAuthRegisterParams = serde_json::from_str(&request.args[0]).context("invalid register parameters")?;
