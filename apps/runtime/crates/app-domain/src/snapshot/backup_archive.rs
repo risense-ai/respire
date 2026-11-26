@@ -76,6 +76,106 @@ fn copy_checked(
     Ok(())
 }
 
+/// Parsed wire header only. No lock, Vault key, or file authority is needed.
+pub struct BackupArchiveHeader {
+    value: Header,
+    prefix: Vec<u8>,
+}
+
+/// A consumed, account-bound header proof, not a restore authorization.
+pub struct AuthenticatedBackupHeader {
+    manifest: Manifest,
+    prefix: Vec<u8>,
+}
+
+impl BackupArchiveHeader {
+    pub fn read(mut archive: impl Read) -> Result<Self> {
+        let mut magic = [0; 8];
+        archive.read_exact(&mut magic)?;
+        ensure!(&magic == MAGIC, "unsupported backup archive");
+        let mut size = [0; 4];
+        archive.read_exact(&mut size)?;
+        let length = u32::from_be_bytes(size) as usize;
+        ensure!((1..=MAX_HEADER).contains(&length), "invalid backup header length");
+        let mut prefix = Vec::with_capacity(MAGIC.len() + size.len() + length);
+        prefix.extend_from_slice(MAGIC);
+        prefix.extend_from_slice(&size);
+        let start = prefix.len();
+        prefix.resize(start + length, 0);
+        archive.read_exact(&mut prefix[start..])?;
+        Ok(Self { value: serde_json::from_slice(&prefix[start..])?, prefix })
+    }
+
+    pub(crate) fn authenticate(
+        self,
+        keys: &crate::SessionKeys,
+        account: &str,
+    ) -> Result<AuthenticatedBackupHeader> {
+        let header = self.value;
+        check_manifest(&header.manifest, account, header.bytes)?;
+        let proof = keys.decrypt_content(&header.sealed_manifest_digest, &header.nonce)
+            .context("backup manifest authentication failed")?;
+        ensure!(proof == manifest_challenge(&header.manifest)?, "backup manifest authentication failed");
+        Ok(AuthenticatedBackupHeader { manifest: header.manifest, prefix: self.prefix })
+    }
+}
+
+impl AuthenticatedBackupHeader {
+    pub fn wire_length(&self) -> u64 {
+        self.manifest.bytes + self.prefix.len() as u64
+    }
+
+    /// Inspect the complete bounded input, not the live SQLite file.
+    /// The caller owns and must discard any unverified partial stage.
+    pub fn copy_to_stage(
+        self,
+        database: impl Read,
+        output: impl Write,
+        check: impl FnMut() -> Result<()>,
+    ) -> Result<Manifest> {
+        copy_checked(database, output, &self.manifest, check)?;
+        Ok(self.manifest)
+    }
+
+    /// Retain the exact authenticated wire prefix for independently
+    /// reauthorizing the archive under fresh offline Vault factors.
+    pub fn copy_envelope_to_stage(
+        self,
+        database: impl Read,
+        mut output: impl Write,
+        mut check: impl FnMut() -> Result<()>,
+    ) -> Result<Manifest> {
+        check()?;
+        output.write_all(&self.prefix)?;
+        self.copy_to_stage(database, output, check)
+    }
+}
+
+pub(crate) fn encode_header(
+    keys: &crate::SessionKeys,
+    account: &str,
+    manifest: &Manifest,
+) -> Result<Vec<u8>> {
+    check_manifest(manifest, account, manifest.bytes)?;
+    let (nonce, sealed_manifest_digest) = keys.encrypt_content(&manifest_challenge(manifest)?)?;
+    #[derive(Serialize)]
+    struct EncodedHeader<'a> {
+        bytes: u64,
+        nonce: String,
+        sealed_manifest_digest: String,
+        manifest: &'a Manifest,
+    }
+    let wire = serde_json::to_vec(&EncodedHeader {
+        bytes: manifest.bytes, nonce, sealed_manifest_digest, manifest,
+    })?;
+    ensure!(wire.len() <= MAX_HEADER, "backup header is too large");
+    let mut prefix = Vec::with_capacity(MAGIC.len() + 4 + wire.len());
+    prefix.extend_from_slice(MAGIC);
+    prefix.extend_from_slice(&(wire.len() as u32).to_be_bytes());
+    prefix.extend_from_slice(&wire);
+    Ok(prefix)
+}
+
 /// Only for an exclusively held, disposable output. A failed call may leave
 /// a partial envelope; the owner must discard it rather than publish it.
 fn seal_to_stage(
@@ -87,20 +187,8 @@ fn seal_to_stage(
     mut check: impl FnMut() -> Result<()>,
 ) -> Result<()> {
     check()?;
-    check_manifest(&manifest, account, manifest.bytes)?;
-    let (nonce, sealed_manifest_digest) = keys.encrypt_content(&manifest_challenge(&manifest)?)?;
-    let header = Header {
-        bytes: manifest.bytes,
-        nonce,
-        sealed_manifest_digest,
-        manifest,
-    };
-    let wire = serde_json::to_vec(&header)?;
-    ensure!(wire.len() <= MAX_HEADER, "backup header is too large");
-    stage.write_all(MAGIC)?;
-    stage.write_all(&(wire.len() as u32).to_be_bytes())?;
-    stage.write_all(&wire)?;
-    copy_checked(database, stage, &header.manifest, check)
+    stage.write_all(&encode_header(keys, account, &manifest)?)?;
+    copy_checked(database, stage, &manifest, check)
 }
 
 /// Seal a verified native snapshot, never caller-provided metadata or a
@@ -136,26 +224,9 @@ pub fn open_to_stage(
     mut check: impl FnMut() -> Result<()>,
 ) -> Result<Manifest> {
     check()?;
-    let mut magic = [0; 8];
-    archive.read_exact(&mut magic)?;
-    ensure!(&magic == MAGIC, "unsupported backup archive");
-    let mut size = [0; 4];
-    archive.read_exact(&mut size)?;
-    let size = u32::from_be_bytes(size) as usize;
-    ensure!((1..=MAX_HEADER).contains(&size), "invalid backup header length");
-    let mut wire = vec![0; size];
-    archive.read_exact(&mut wire)?;
-    let header: Header = serde_json::from_slice(&wire)?;
-    check_manifest(&header.manifest, account, header.bytes)?;
-    let proof = keys
-        .decrypt_content(&header.sealed_manifest_digest, &header.nonce)
-        .context("backup manifest authentication failed")?;
-    ensure!(
-        proof == manifest_challenge(&header.manifest)?,
-        "backup manifest authentication failed"
-    );
-    copy_checked(archive, stage, &header.manifest, check)?;
-    Ok(header.manifest)
+    BackupArchiveHeader::read(&mut archive)?
+        .authenticate(keys, account)?
+        .copy_to_stage(archive, stage, check)
 }
 
 #[cfg(test)]
