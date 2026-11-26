@@ -39,6 +39,9 @@ func TestNewChecksProfileBeforeCreatingClientDirectory(t *testing.T) {
 func checkReplacedProfileControls(t *testing.T, m *Manager) {
 	t.Helper()
 	ctx := t.Context()
+	if runtime.GOOS == "linux" || runtime.GOOS == "windows" {
+		checkJunctionMigrationRejected(t, m)
+	}
 	if _, err := m.startDetached(ctx, InstalledRuntime{}); !errors.Is(err, errProfileScope) {
 		t.Fatalf("startup reached selection: %v", err)
 	}
@@ -65,4 +68,28 @@ func TestReplacedProfileStopsServingAndModelControls(t *testing.T) {
 		return nil, errProfileScope
 	}}}
 	checkReplacedProfileControls(t, m)
+}
+
+// The authority fixture creates the runtime directory on its first takeover.
+// Rejection before that callback excludes the later private helper launch.
+func checkJunctionMigrationRejected(t *testing.T, m *Manager) {
+	t.Helper()
+	const operation = "a463ac20-7783-4077-a62f-e931d6b58466"
+	authority := &hostAuthorityFixture{}
+	previous := m.hostAuthority
+	m.hostAuthority = authority
+	defer func() { m.hostAuthority = previous }()
+	for _, query := range []bool{false, true} {
+		if _, err := m.desktopLegacyMigration(t.Context(), "desktop-"+operation, nil, query); !errors.Is(err, errJunctionTakeover) {
+			t.Fatalf("migration query=%t reached transaction admission: %v", query, err)
+		}
+	}
+	if authority.held != nil {
+		t.Fatal("migration invoked native takeover before rejection")
+	}
+	for _, name := range []string{"maintenance.json", "migration-client2-" + operation + ".json"} {
+		if _, err := os.Lstat(filepath.Join(m.DataRoot, "runtime", "autostart", name)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("rejected migration touched %s: %v", name, err)
+		}
+	}
 }

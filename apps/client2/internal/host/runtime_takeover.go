@@ -12,8 +12,22 @@ import (
 	"respire-client2/internal/i18n"
 )
 
+var errJunctionTakeover = errors.New("Runtime takeover maintenance requires a profile without a junction alias")
+
+// These legacy authority transactions pass directory names to other processes.
+// Junction admission is limited to the pinned startup and native model controls.
+func (m *Manager) requireTakeoverProfile() error {
+	if m.profile.reopen != nil {
+		return errJunctionTakeover
+	}
+	return nil
+}
+
 // Runtime must use the same exclusion as the CLI takeover transaction.
 func (m *Manager) lockRuntimeTakeover(ctx context.Context) (io.Closer, error) {
+	if err := m.requireTakeoverProfile(); err != nil {
+		return nil, err
+	}
 	root, err := filepath.EvalSymlinks(m.DataRoot)
 	if err != nil {
 		return nil, err
