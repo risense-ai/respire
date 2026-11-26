@@ -188,7 +188,8 @@ fn verify_http(bound: SocketAddr, root: &Path, urk: [u8; 32],
                 let seal = bad_seal.windows(field.len()).position(|bytes| bytes == field)
                     .context("fixture seal missing")? + field.len();
                 bad_seal[seal] = if bad_seal[seal] == b'A' { b'B' } else { b'A' };
-                reject(&bad_seal)?;
+                let header_size = u32::from_be_bytes(wire[8..12].try_into()?) as usize;
+                reject(&bad_seal[..12 + header_size])?;
                 {
                     use std::{io::Write, net::{Shutdown, TcpStream}};
                     let mut stream = TcpStream::connect(bound)?;

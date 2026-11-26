@@ -2,7 +2,7 @@
 //! EOF for the archive decoder. A dropped sender is an interrupted upload.
 use super::{transport, V1Result};
 use axum::body::{Body, Bytes};
-use futures_util::StreamExt;
+use futures_util::{future::{select, Either}, StreamExt};
 use sha2::{Digest, Sha256};
 use std::{io::{self, Read}, time::Duration};
 use tokio::sync::mpsc;
@@ -49,9 +49,14 @@ impl Read for Reader {
 
 pub(super) async fn feed(body: Body, sender: mpsc::Sender<Option<Bytes>>) -> V1Result<()> {
     let mut frames = body.into_data_stream();
-    while let Some(frame) = tokio::time::timeout(IDLE, frames.next()).await
-        .map_err(|_| transport::invalid())?
-    {
+    loop {
+        let next = std::pin::pin!(frames.next());
+        let closed = std::pin::pin!(sender.closed());
+        let next = match tokio::time::timeout(IDLE, select(next, closed)).await {
+            Ok(Either::Left((frame, _))) => frame,
+            _ => return Err(transport::invalid()),
+        };
+        let Some(frame) = next else { break };
         let frame = frame.map_err(|_| transport::invalid())?;
         // The HTTP/1 listener supplies bounded frames. Never retain an oversized
         // allocation from an alternate body producer through a cheap Bytes slice.
