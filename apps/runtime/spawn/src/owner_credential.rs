@@ -105,7 +105,7 @@ pub mod model_proof;
 pub mod proof;
 
 #[cfg(windows)]
-pub use windows::migration_copy::MigrationCopy;
+pub use windows::migration_copy::{MigrationCopy, MigrationSource};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use unix::migration_copy::{MigrationCopy, MigrationSource};
 

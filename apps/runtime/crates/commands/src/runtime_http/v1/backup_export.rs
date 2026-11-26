@@ -1,6 +1,6 @@
 //! Stream a selected native SQLite backup without retaining the owner
 //! dispatcher, write fence, or Vault lock during disk I/O.
-use super::{
+use crate::runtime_http::v1::{
     reads, rest_dispatch::{self, Access}, transport::{self, RestScope}, V1Result,
 };
 use anyhow::{ensure, Result};
@@ -34,7 +34,7 @@ impl Drop for CancelPreparation {
 pub(super) async fn get(bound: SocketAddr, peer: SocketAddr, request: Request) -> V1Result<Response> {
     let (parts, body) = request.into_parts();
     if parts.method != Method::GET {
-        return Err(super::method_not_allowed().await);
+        return Err(crate::runtime_http::v1::method_not_allowed().await);
     }
     let scope = transport::authorize(&parts, peer, bound).await?;
     let mut query = transport::query(parts.uri.query())?;
@@ -120,6 +120,10 @@ async fn next(state: Option<FrameContext>) -> Option<(io::Result<Bytes>, Option<
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(windows)))]
 #[path = "backup_export_http_tests.rs"]
 mod tests;
+
+#[cfg(all(test, windows))]
+#[path = "backup_export_windows_tests.rs"]
+pub(super) mod windows_tests;

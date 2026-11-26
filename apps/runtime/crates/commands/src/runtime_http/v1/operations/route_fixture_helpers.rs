@@ -37,3 +37,26 @@ pub(super) fn owner_fixture_root(path: std::path::PathBuf, owner: bool) -> Resul
     let _ = owner;
     Ok(path)
 }
+
+#[cfg(windows)]
+#[path = "../backup_export.rs"]
+mod backup_export;
+
+pub(super) fn is_owner_route(test: &str) -> bool {
+    #[cfg(windows)]
+    if test == backup_export::windows_tests::LOOPBACK {
+        return true;
+    }
+    test == SPACE_TEST
+}
+
+pub(super) async fn check_owner_route(
+    test: &str, app: &Router, root: &std::path::Path, urk: [u8; 32],
+) -> Result<()> {
+    #[cfg(windows)]
+    if test == backup_export::windows_tests::LOOPBACK {
+        return backup_export::windows_tests::check_loopback(root, urk).await;
+    }
+    let _ = (test, urk);
+    space_members_tests::device_space_tests::check(app, root, true).await
+}

@@ -72,13 +72,28 @@ impl LocalStore {
             .and_then(|leaf| leaf.to_str())
             .context("backup database name is unavailable")?
             .to_owned();
-        ensure!(parent.join(&source_leaf) == database, "backup store path is not canonical");
+        let canonical_database = parent.join(&source_leaf);
+        #[cfg(windows)]
+        let database_matches = {
+            // SQLite may report the fixed-drive path without Win32's verbatim prefix.
+            let mut verbatim = std::ffi::OsString::from(r"\\?\");
+            verbatim.push(database.as_os_str());
+            canonical_database == database || canonical_database.as_os_str() == verbatim.as_os_str()
+        };
+        #[cfg(not(windows))]
+        let database_matches = canonical_database == database;
+        ensure!(database_matches, "backup store path is not canonical");
         let stage_leaf = format!(".backup-export-{}.pending", uuid::Uuid::new_v4().simple());
         ensure!(stage_parent.canonicalize()? == stage_parent, "backup stage root is not canonical");
         let stage_root = MigrationSource::open(stage_parent, false)?.identity()?;
+        #[cfg(windows)]
+        let stage = MigrationCopy::create_for_export(stage_parent, &stage_leaf)?;
+        #[cfg(not(windows))]
         let stage = MigrationCopy::create(stage_parent, &stage_leaf)?;
         let stage_identity = stage.source_identity(&stage_leaf)?;
         let source_pin = MigrationSource::open(&parent, true)?;
+        #[cfg(windows)]
+        let _database_pin = source_pin.pin_database(&source_leaf)?;
         let source = SourceIdentity {
             path: parent.join(&source_leaf),
             directory: source_pin.identity()?,

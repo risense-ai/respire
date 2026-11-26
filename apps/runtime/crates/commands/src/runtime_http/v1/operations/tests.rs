@@ -51,13 +51,13 @@ fn scoped_deepen_on_production_router() -> Result<()> {
 fn device_local_space_patch_on_production_router() -> Result<()> {
     production_router_fixture(SPACE_TEST)
 }
-
 pub(super) fn production_router_fixture(test: &'static str) -> Result<()> {
+    let owner_route = route_fixture_helpers::is_owner_route(test);
     if std::env::var_os(CHILD).is_none() {
         let directory = tempfile::tempdir()?;
-        let fixture_root = space_members_tests::fixture_root(directory.path(), matches!(test, TEST | SPACE_TEST))?;
-        let fixture_root = route_fixture_helpers::owner_fixture_root(fixture_root, test == SPACE_TEST)?;
-        if !matches!(test, TEST | SPACE_TEST) {
+        let fixture_root = space_members_tests::fixture_root(directory.path(), test == TEST || owner_route)?;
+        let fixture_root = route_fixture_helpers::owner_fixture_root(fixture_root, owner_route)?;
+        if test != TEST && !owner_route {
             let profile = fixture_root.join("accounts").join("outline-fixture");
             fs::create_dir_all(&profile)?;
             fs::write(fixture_root.join("client.json"), serde_json::to_vec(&json!({"data_dir": profile}))?)?;
@@ -93,7 +93,7 @@ pub(super) fn production_router_fixture(test: &'static str) -> Result<()> {
         "user": "sse-fixture", "vault_version": 4, "kdf_salt": salt,
         "urk_nonce": nonce, "wrapped_urk": wrapped,
     });
-    if test != SPACE_TEST {
+    if !owner_route {
         session_data["addr"] = json!("http://[");
         session_data["token"] = json!("fixture-sync-token");
     }
@@ -150,9 +150,9 @@ pub(super) fn production_router_fixture(test: &'static str) -> Result<()> {
         .build()?
         .block_on(async {
             let app = crate::runtime_http::router(BOUND);
-            if test == SPACE_TEST {
+            if owner_route {
                 crate::rpc_serve::mark_http_fixture_ready();
-                return space_members_tests::device_space_tests::check(&app, &root, true).await;
+                return route_fixture_helpers::check_owner_route(test, &app, &root, urk).await;
             }
             if test == super::organize_split::tests::TEST {
                 crate::rpc_serve::mark_http_fixture_ready();

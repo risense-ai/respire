@@ -23,9 +23,9 @@ pub use feedback::FeedbackCounts;
 mod schema_version;
 #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 mod migration_backup;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 mod backup_export_source;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 pub use backup_export_source::{BackupExportCopy, BackupExportSource};
 mod startup_schema;
 mod witness;
