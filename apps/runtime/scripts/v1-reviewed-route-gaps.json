@@ -1,5 +1,4 @@
 [
   "GET /v1/backups/export exportBackup",
-  "POST /v1/backups/import importBackup",
-  "POST /v1/host/transactions/login executeLoginTransaction"
+  "POST /v1/backups/import importBackup"
 ]

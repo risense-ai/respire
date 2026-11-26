@@ -16,7 +16,8 @@ use serde::Deserialize;
 use std::net::SocketAddr;
 
 pub(super) fn routes(bound: SocketAddr) -> Router {
-    let router = bind(Router::new(), RouteSpec::new(Verb::Post, "/v1/spaces/{spaceId}/members", "inviteSpaceMember"), invite);
+    let router = bind(Router::new(), RouteSpec::new(Verb::Post, "/v1/host/transactions/login", "executeLoginTransaction"), login);
+    let router = bind(router, RouteSpec::new(Verb::Post, "/v1/spaces/{spaceId}/members", "inviteSpaceMember"), invite);
     let router = bind(
         router,
         RouteSpec::new(Verb::Post, "/v1/memories", "createMemory"),
@@ -307,4 +308,23 @@ async fn invite(
                 "space_offline", "An online space is required"))
     }, || Problem::new(StatusCode::CONFLICT, "invite_outcome_unknown", "Check space membership"), false).await?;
     transport::json_response(StatusCode::CREATED, member)
+}
+
+async fn login(State(bound): State<SocketAddr>, ConnectInfo(crate::network::Peer(peer)): ConnectInfo<crate::network::Peer>,
+    request: Request<Body>) -> V1Result<Response> {
+    use respire_app::login_transaction::{request_login, LoginAdmission};
+    let (parts, body) = request.into_parts();
+    let scope = transport::authorize(&parts, peer, bound).await?;
+    if parts.uri.query().is_some() { return Err(transport::invalid()); }
+    let intent = transport::json(body, 1024).await?;
+    let result = rest_dispatch::submit_publication(scope, move |ctx, admission| {
+        request_login(&ctx.scope.canonical_profile, &ctx.scope.account, ctx.ownership, intent,
+            || ctx.may_commit() && admission.admit())
+            .map_err(|_| transport::unavailable())
+    }, || Problem::new(StatusCode::CONFLICT, "login_request_unconfirmed", "Check the current host account state"), true).await?;
+    match result {
+        LoginAdmission::Pending => transport::json_response(StatusCode::OK, serde_json::json!({"status":"pending_confirmation"})),
+        LoginAdmission::Conflict => Err(Problem::new(StatusCode::CONFLICT,"transaction_pending","Another account transaction is pending")),
+        LoginAdmission::RequiresEmptyProfile => Err(Problem::new(StatusCode::CONFLICT,"profile_not_empty","Offline key generation requires an empty profile")),
+    }
 }
