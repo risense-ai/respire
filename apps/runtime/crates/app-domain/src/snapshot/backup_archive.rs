@@ -145,13 +145,19 @@ pub fn seal_verified_snapshot(
 
 /// An untrusted envelope header. Parsing is bounded and requires neither the
 /// Vault nor access to a stage. The reader is positioned at the SQLite body.
-pub struct BackupArchiveHeader(Header);
+pub struct BackupArchiveHeader {
+    decoded: Header,
+    prefix: Vec<u8>,
+}
 
 /// Proof of a header's account and Vault lineage. This is not a restore
 /// grant: the selected library, live scope, and offline authority still
 /// have to be verified. It cannot expose a manifest before the body passes
 /// the exact length and digest checks.
-pub struct AuthenticatedBackupHeader(Manifest);
+pub struct AuthenticatedBackupHeader {
+    manifest: Manifest,
+    prefix: Vec<u8>,
+}
 
 impl BackupArchiveHeader {
     pub fn read(mut archive: impl Read) -> Result<Self> {
@@ -162,9 +168,14 @@ impl BackupArchiveHeader {
         archive.read_exact(&mut size)?;
         let size = u32::from_be_bytes(size) as usize;
         ensure!((1..=MAX_HEADER).contains(&size), "invalid backup header length");
-        let mut wire = vec![0; size];
-        archive.read_exact(&mut wire)?;
-        Ok(Self(serde_json::from_slice(&wire)?))
+        let mut prefix = Vec::with_capacity(MAGIC.len() + 4 + size);
+        prefix.extend_from_slice(MAGIC);
+        prefix.extend_from_slice(&(size as u32).to_be_bytes());
+        let header_start = prefix.len();
+        prefix.resize(header_start + size, 0);
+        archive.read_exact(&mut prefix[header_start..])?;
+        let decoded = serde_json::from_slice(&prefix[header_start..])?;
+        Ok(Self { decoded, prefix })
     }
 
     fn authenticate(
@@ -172,7 +183,7 @@ impl BackupArchiveHeader {
         account: &str,
         open: impl FnOnce(&str, &str) -> Result<String>,
     ) -> Result<AuthenticatedBackupHeader> {
-        let header = self.0;
+        let header = self.decoded;
         check_manifest(&header.manifest, account, header.bytes)?;
         let proof = open(&header.sealed_manifest_digest, &header.nonce)
             .context("backup manifest authentication failed")?;
@@ -180,7 +191,7 @@ impl BackupArchiveHeader {
             proof == manifest_challenge(&header.manifest)?,
             "backup manifest authentication failed"
         );
-        Ok(AuthenticatedBackupHeader(header.manifest))
+        Ok(AuthenticatedBackupHeader { manifest: header.manifest, prefix: self.prefix })
     }
 }
 
@@ -209,8 +220,21 @@ impl AuthenticatedBackupHeader {
         stage: impl Write,
         check: impl FnMut() -> Result<()>,
     ) -> Result<Manifest> {
-        copy_checked(database_body, stage, &self.0, check)?;
-        Ok(self.0)
+        copy_checked(database_body, stage, &self.manifest, check)?;
+        Ok(self.manifest)
+    }
+
+    /// Stage the wire image as one file so a later owner can authenticate
+    /// it with fresh Vault factors. This does not publish or authorize it.
+    pub fn copy_envelope_to_stage(
+        self,
+        database_body: impl Read,
+        mut stage: impl Write,
+        mut check: impl FnMut() -> Result<()>,
+    ) -> Result<Manifest> {
+        check()?;
+        stage.write_all(&self.prefix)?;
+        self.copy_to_stage(database_body, stage, check)
     }
 }
 

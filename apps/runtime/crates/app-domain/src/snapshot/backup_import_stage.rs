@@ -25,7 +25,7 @@ impl AuthenticatedBackupHeader {
         mut gate: impl FnMut() -> Result<()>,
     ) -> Result<BackupImportStage> {
         gate()?;
-        let manifest = self.0;
+        let manifest = self.manifest;
         ensure!(
             manifest.source_library == super::super::fingerprint_path(selected_database)?,
             "backup does not belong to the selected physical library"

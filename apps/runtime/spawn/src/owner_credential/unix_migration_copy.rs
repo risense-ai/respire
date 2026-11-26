@@ -100,6 +100,24 @@ impl MigrationSource {
         Ok([metadata.dev(), metadata.ino()])
     }
 
+    /// Reopen an owned private file by an expected native identity, not
+    /// by an HTTP path or an unverified pending filename.
+    pub fn open_verified_file(
+        &self,
+        leaf: &str,
+        expected: [u64; 2],
+        length: u64,
+    ) -> io::Result<File> {
+        super::super::validate_migration_leaf(leaf)?;
+        let name = CString::new(leaf).map_err(|_| denied())?;
+        let file = named_file(self.0.as_raw_fd(), &name, libc::O_RDONLY, 0)?;
+        let metadata = check(&file, 0o600, false)?;
+        if metadata.len() != length || [metadata.dev(), metadata.ino()] != expected {
+            return Err(denied());
+        }
+        Ok(file)
+    }
+
     pub fn file_identity(&self, leaf: &str) -> io::Result<[u64; 2]> {
         source_at(&self.0, leaf)
     }

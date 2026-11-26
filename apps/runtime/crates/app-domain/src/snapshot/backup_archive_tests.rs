@@ -172,3 +172,49 @@ fn split_header_streams_more_than_the_ordinary_http_body_limit() -> Result<()> {
     assert!(checks >= count);
     Ok(())
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn published_wire_image_reopens_by_native_identity_and_fresh_vault() -> Result<()> {
+    use respire_spawn::owner_credential::{MigrationCopy, MigrationSource};
+
+    let db = vec![23; 128 * 1024 + 1];
+    let live = crate::SessionKeys::from_urk([7; 32])?;
+    let envelope = archive(&db, &live)?;
+    let mut body = envelope.as_slice();
+    let parsed = BackupArchiveHeader::read(&mut body)?;
+    let verified = parsed.authenticate("alice", |ciphertext, nonce| live.decrypt_content(ciphertext, nonce))?;
+    let directory = tempfile::tempdir()?;
+    let root = directory.path().canonicalize()?;
+    let pending = ".import-handoff.pending";
+    let published = ".import-handoff.archive";
+    let wire_size = envelope.len() as u64;
+    let mut stage = MigrationCopy::create(&root, pending)?;
+    let expected = stage.source_identity(pending)?;
+    stage.write_exact_stage(wire_size, |writer| {
+        verified.copy_envelope_to_stage(body, writer, || Ok(())).map(|_| ())
+            .map_err(std::io::Error::other)
+    })?;
+    stage.publish(published)?;
+    drop(live);
+    assert!(!root.join(pending).try_exists()?);
+
+    let restart = MigrationSource::open(&root, false)?;
+    assert!(restart.open_verified_file(published, expected, wire_size - 1).is_err());
+    assert!(restart.open_verified_file(published, [expected[0], expected[1] ^ 1], wire_size).is_err());
+    let mut wire = Vec::new();
+    restart.open_verified_file(published, expected, wire_size)?.read_to_end(&mut wire)?;
+    assert_eq!(wire, envelope);
+
+    let other = crate::SessionKeys::from_urk([8; 32])?;
+    let mut restored = Vec::new();
+    let source = restart.open_verified_file(published, expected, wire_size)?;
+    assert!(open_to_stage(&other, "alice", source, &mut restored, || Ok(())).is_err());
+    assert!(restored.is_empty());
+    let offline = crate::SessionKeys::from_legacy_urk([7; 32])?;
+    let source = restart.open_verified_file(published, expected, wire_size)?;
+    let manifest = open_to_stage(&offline, "alice", source, &mut restored, || Ok(()))?;
+    assert_eq!(manifest.bytes, db.len() as u64);
+    assert_eq!(restored, db);
+    Ok(())
+}

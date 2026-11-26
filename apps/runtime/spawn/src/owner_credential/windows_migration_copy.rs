@@ -142,6 +142,27 @@ impl MigrationSource {
         id_pair(self.0.as_raw_handle())
     }
 
+    /// Reopen an owned private file by an expected native identity, not
+    /// by an HTTP path or an unverified pending filename.
+    pub fn open_verified_file(
+        &self,
+        leaf: &str,
+        expected: [u64; 2],
+        length: u64,
+    ) -> io::Result<File> {
+        super::super::validate_migration_leaf(leaf)?;
+        let handle = relative_open(
+            self.0.as_raw_handle(), OsStr::new(leaf), GENERIC_READ | META,
+            FILE_SHARE_READ, None, FILE_OPEN, FILE_NON_DIRECTORY_FILE,
+        )?;
+        checked_file(handle.as_raw_handle(), Some(length))?;
+        CurrentUser::query_managed()?.verify_handle(handle.as_raw_handle(), true)?;
+        if id_pair(handle.as_raw_handle())? != expected {
+            return Err(denied("private staged file identity changed"));
+        }
+        Ok(File::from(handle))
+    }
+
     pub fn file_identity(&self, leaf: &str) -> io::Result<[u64; 2]> {
         source_at(&self.0, leaf)
     }
