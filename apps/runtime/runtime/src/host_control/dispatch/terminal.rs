@@ -9,6 +9,41 @@ pub(super) fn dispatch(
     progress: &Mutex<RpcResponse<ResultEnvelope>>,
     events: &mpsc::SyncSender<ControlEvent>,
 ) -> std::result::Result<(), ControlFailure> {
+    if request.method == crate::auth_control::LOGIN_PROGRESS_METHOD {
+        use respire_protocol::host_control::{HostLoginRecoveryParams, HOST_AUTH_SCHEMA_V};
+        response.envelope = Some(ResultEnvelope::new("login-progress", Status::Fail,
+            serde_json::json!({}), Vec::new()));
+        crate::auth_control::validate_account_frame(&request)
+            .map_err(|_| ("invalid_request", "invalid login progress frame"))?;
+        let params: HostLoginRecoveryParams = serde_json::from_str(&request.args[0])
+            .map_err(|_| ("invalid_request", "invalid login progress binding"))?;
+        if params.schema_version != HOST_AUTH_SCHEMA_V {
+            return Err(("invalid_request", "unsupported login progress schema"));
+        }
+        let id = request.operation_id.as_deref().ok_or(("invalid_request", "missing operation ID"))?;
+        let key = request.idempotency_key.as_deref().ok_or(("invalid_request", "missing idempotency key"))?;
+        response.operation_id = request.operation_id.clone();
+        response.idempotency_key = request.idempotency_key.clone();
+        *progress.lock().map_err(|_| ("control_unavailable", "control progress unavailable"))? = response.clone();
+        crate::startup_identity::authorize_auth_control(grant)
+            .map_err(|_| ("unauthorized", "private login maintenance authorization failed"))?;
+        watch_auth_parent(events.clone())
+            .map_err(|_| ("unauthorized", "private login parent watch failed"))?;
+        let ownership = crate::startup_identity::acquire_auth_ownership(&params.binding, &params.identity)
+            .map_err(|_| ("auth_ownership_unavailable", "private login ownership unavailable"))?;
+        crate::startup_identity::verify_auth_control_binding(&params.binding, &params.identity)
+            .map_err(|_| ("scope_mismatch", "private login binding changed"))?;
+        respire_app::login_transaction::verify_login_merge_offer(&ownership, &params.identity, id, key)
+            .map_err(|_| ("login_progress_unavailable", "no matching login confirmation is available"))?;
+        crate::startup_identity::verify_auth_control_binding(&params.binding, &params.identity)
+            .map_err(|_| ("scope_mismatch", "private login binding changed"))?;
+        response.envelope = Some(ResultEnvelope::new("login-progress", Status::Pending,
+            serde_json::json!({"status":"pending_confirmation"}), Vec::new()));
+        response.ok = true;
+        response.exit = 0;
+        *control_ready = true;
+        return Ok(());
+    }
     use respire_protocol::host_control::{HostAuthAccountOutcome, HOST_AUTH_REGISTER_METHOD,
         HOST_AUTH_LOGIN_METHOD, HOST_AUTH_ACCOUNT_RESULT_METHOD, HOST_AUTH_ACCOUNT_COMPLETE_METHOD,
         HOST_AUTH_ACCOUNT_ROLLBACK_METHOD};

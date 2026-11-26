@@ -273,3 +273,6 @@ fn save_authorization(journal: &mut Journal, index: usize, mut authorization: Va
 }
 
 include!("login/publication.rs");
+
+mod merge_offer;
+pub use merge_offer::verify_login_merge_offer;

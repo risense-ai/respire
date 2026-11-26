@@ -11,6 +11,7 @@ use respire_protocol::host_control::{HostAuthAccountOutcome, HostAuthAccountResu
 
 mod cold_keygen;
 mod login;
+pub use login::verify_login_merge_offer;
 mod identity;
 pub use identity::{control_identity_write, control_identity_write_result};
 #[cfg(test)]
