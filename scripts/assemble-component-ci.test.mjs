@@ -1,6 +1,7 @@
+import {fileURLToPath} from "node:url";
 import assert from "node:assert/strict";
 import {execFileSync, spawnSync} from "node:child_process";
-import {access, copyFile, mkdir, mkdtemp, realpath, rm, writeFile} from "node:fs/promises";
+import {access, copyFile, mkdir, mkdtemp, realpath, rm, truncate, writeFile} from "node:fs/promises";
 import {tmpdir} from "node:os";
 import {join} from "node:path";
 import test from "node:test";
@@ -55,7 +56,7 @@ test("the real CLI rejects a mismatched checked-out SHA and never creates output
   const root = await realpath(directory);
   const scripts = join(root, "scripts");
   await mkdir(scripts);
-  const names = ["assemble-component-ci.mjs", "assemble-component-release.mjs", "component-release-plan.mjs"];
+  const names = ["assemble-component-ci.mjs", "assemble-component-release.mjs", "component-release-plan.mjs", "finalize-component-receipt.mjs"];
   for (const name of names) await copyFile(new URL("./" + name, import.meta.url), join(scripts, name));
   const git = (...args) => execFileSync("git", args, {cwd: root, encoding: "utf8"}).trim();
   git("init", "--quiet");
@@ -76,13 +77,36 @@ test("the real CLI rejects a mismatched checked-out SHA and never creates output
     {cwd: root, env: environment, encoding: "utf8"});
   const wrong = invoke(env, payload);
   assert.equal(wrong.status, 1);
-  assert.match(wrong.stderr, /Checkout must match the Actions event SHA/);
+  assert.equal(wrong.stderr.trim(), "COMPONENT_RECEIPT_FAILED");
   const exact = {...env, GITHUB_SHA: git("rev-parse", "HEAD")};
   const unrelated = invoke(exact, scripts);
   assert.equal(unrelated.status, 1);
-  assert.match(unrelated.stderr, /Payload directories must be under RUNNER_TEMP/);
+  assert.equal(unrelated.stderr.trim(), "COMPONENT_RECEIPT_FAILED");
   await assert.rejects(access(output), {code: "ENOENT"});
   const missing = invoke(exact, payload);
   assert.equal(missing.status, 1);
-  assert.match(missing.stderr, /Invalid build batch file count/);
+  assert.match(missing.stderr, /COMPONENT_RECEIPT_FAILED/);
+});
+
+test("both executables emit only fixed errors for malformed and oversized event files", async t => {
+  const root = await mkdtemp(join(tmpdir(), "event-redaction-"));
+  t.after(() => rm(root, {recursive: true, force: true}));
+  const file = join(root, "UNTRUSTED_PATH");
+  const output = join(root, "output");
+  for (const oversized of [false, true]) {
+    await writeFile(file, "UNTRUSTED_EVENT\x1b[31m");
+    if (oversized) await truncate(file, 25 * 1024 * 1024 + 1);
+    for (const [script, code, third] of [
+      ["assemble-component-ci.mjs", "COMPONENT_RECEIPT_FAILED", "-"],
+      ["assemble-runtime-release-ci.mjs", "RUNTIME_NATIVE_RECEIPT_FAILED", root],
+    ]) {
+      const path = new URL(script, import.meta.url);
+      const result = spawnSync(process.execPath, [fileURLToPath(path), "runtime-v1.0.0", root, third, output],
+        {env: {...process.env, ...main, GITHUB_EVENT_PATH: file}, encoding: "utf8"});
+      assert.equal(result.status, 1);
+      assert.equal(result.stderr.trim(), code);
+      assert.equal(result.stdout, "");
+      await assert.rejects(access(output), {code: "ENOENT"});
+    }
+  }
 });

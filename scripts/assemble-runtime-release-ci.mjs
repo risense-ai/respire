@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
+import {createHash} from "node:crypto";
 import {execFileSync} from "node:child_process";
-import {lstat, mkdir, readFile, readdir, realpath, rm, writeFile} from "node:fs/promises";
+import {lstat, open, readdir, realpath} from "node:fs/promises";
 import {dirname, isAbsolute, join, relative, resolve, sep} from "node:path";
 import {pathToFileURL} from "node:url";
-import {assembleLocalRelease} from "./assemble-component-release.mjs";
-import {workflowIdentity} from "./assemble-component-ci.mjs";
-import {expectedReleaseAssets, parseComponentTag} from "./component-release-plan.mjs";
+import {finalizeComponent} from "./finalize-component-receipt.mjs";
+import {readWorkflowEvent, workflowIdentity} from "./assemble-component-ci.mjs";
+import {expectedReleaseAssets, localFanoutPlan, parseComponentTag} from "./component-release-plan.mjs";
 
 const profiles = {
   "windows-x64": ["x86_64-pc-windows-msvc", "Windows", "x64"],
@@ -87,7 +88,7 @@ function smokeEvidence(report, lane, tag, provenance, names) {
 
 // Inputs must be separate exact same-run/attempt downloads from GitHub Actions.
 // This verifies the resulting evidence and bytes, not the transport or supplier.
-export async function assembleRuntimeNative({tag, provenance, evidenceRoot, payloadRoot, output}) {
+async function verifyRuntime({tag, provenance, evidenceRoot, payloadRoot, output}) {
   assert.equal(parseComponentTag(tag).component, "runtime", "Expected a Runtime component tag");
   assert.equal(provenance.event, "workflow_dispatch", "Runtime payload assembly is restricted to main dispatch");
   for (const key of ["run_id", "run_attempt"]) assert(/^[1-9][0-9]*$(?![\s\S])/.test(provenance[key] ?? ""));
@@ -102,7 +103,7 @@ export async function assembleRuntimeNative({tag, provenance, evidenceRoot, payl
   const payloadFolders = lanes.map(lane=>"runtime-" + lane + "-payload" + suffix);
   await exactNames(evidence, receiptFolders);
   await exactNames(payload, payloadFolders);
-  const batches = [], claims = {};
+  const batches = [], claims = {}, nativeReceipts = {};
   for (const [index, lane] of lanes.entries()) {
     const receipts = await directory(join(evidence, receiptFolders[index]));
     const artifacts = await directory(join(payload, payloadFolders[index]));
@@ -111,7 +112,21 @@ export async function assembleRuntimeNative({tag, provenance, evidenceRoot, payl
     await exactNames(artifacts, names);
     const file = join(receipts, receiptName), st = await lstat(file);
     assert(st.isFile() && st.nlink === 1 && st.size > 0 && st.size <= 64 * 1024, "Invalid native receipt file");
-    const report = JSON.parse(await readFile(file, "utf8"));
+    const handle = await open(file, "r");
+    const bytes = Buffer.alloc(st.size);
+    try {
+      let offset = 0;
+      while (offset < bytes.length) {
+        const {bytesRead} = await handle.read(bytes, offset, bytes.length - offset);
+        if (!bytesRead) throw new Error("NATIVE_RECEIPT_SIZE");
+        offset += bytesRead;
+      }
+      if ((await handle.read(Buffer.alloc(1))).bytesRead) throw new Error("NATIVE_RECEIPT_SIZE");
+    } finally {
+      await handle.close();
+    }
+    const report = JSON.parse(new TextDecoder("utf-8", {fatal: true}).decode(bytes));
+    nativeReceipts[lane] = createHash("sha256").update(bytes).digest("hex");
     Object.assign(claims, smokeEvidence(report, lane, tag, provenance, names));
     batches.push({tag, source: provenance.source, kind: "github", directory: artifacts});
   }
@@ -119,35 +134,45 @@ export async function assembleRuntimeNative({tag, provenance, evidenceRoot, payl
   await directory(dirname(output));
   assert([evidence,payload].every(input=>input !== output && !below(input,output) && !below(output,input)),
     "Native output overlaps source data");
-  await mkdir(output, {mode: 0o700});
-  try {
-    const {receipt} = await assembleLocalRelease({tag, source: provenance.source, batches, outputParent: output});
+  return finalizeComponent({tag, source: provenance.source, batches, output, makeResult(receipt) {
     assert.deepEqual(Object.fromEntries(Object.entries(receipt.assets).map(([name, asset])=>[name, asset.sha256])),
-      claims, "Assembled bytes differ from same-attempt native smoke receipts");
-    const result = {schema: 1, scope:"same-attempt-native-runtime-and-local-byte-parity", provenance, receipt};
-    await writeFile(join(output, "component-release-receipt.json"), JSON.stringify(result, null, 2) + "\n", {flag:"wx",mode:0o600});
-    return result;
-  } catch (error) {
-    assert.equal(await directory(output), output, "Refusing cleanup of redirected output");
-    await rm(output,{recursive:true});
-    throw error;
+      claims);
+    return {schema: 1, scope:"same-attempt-native-runtime-and-local-byte-parity", provenance, receipt,
+      native_receipt_sha256: nativeReceipts, fanout: localFanoutPlan(receipt)};
+  }});
+}
+
+export async function assembleRuntimeNative(inputs) {
+  try {
+    return await verifyRuntime(inputs);
+  } catch {
+    throw new Error("RUNTIME_NATIVE_RECEIPT_FAILED");
   }
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+async function run() {
   assert.equal(process.argv.length, 6,
     "Usage: assemble-runtime-release-ci.mjs <tag> <same-attempt-evidence-root> <same-attempt-payload-root> <fresh-output>");
   const [tag, evidenceRoot, payloadRoot, output] = process.argv.slice(2);
   const env = process.env;
   assert(isAbsolute(env.GITHUB_EVENT_PATH ?? ""), "Missing GitHub event path");
-  const provenance = workflowIdentity(env, JSON.parse(await readFile(env.GITHUB_EVENT_PATH,"utf8")));
+  const provenance = workflowIdentity(env, await readWorkflowEvent(env.GITHUB_EVENT_PATH));
   const root = await directory(env.GITHUB_WORKSPACE ?? "");
   assert.equal(await directory(resolve(dirname(process.argv[1]), "..")), root, "Assembler checkout mismatch");
-  const git = (...args)=>execFileSync("git",args,{cwd:root,encoding:"utf8"}).trim();
+  const git = (...args)=>execFileSync("git",args,{cwd:root,encoding:"utf8",stdio:"pipe"}).trim();
   assert.equal(git("rev-parse","HEAD"), provenance.source, "Checkout must match Actions event SHA");
   assert.equal(git("status","--porcelain","--untracked-files=no"), "", "Tracked checkout must be clean");
   const temporary = await directory(env.RUNNER_TEMP ?? "");
   assert([await directory(evidenceRoot),await directory(payloadRoot),resolve(output)].every(path=>below(temporary,path)),
     "Inputs and output must remain inside RUNNER_TEMP");
   await assembleRuntimeNative({tag, provenance, evidenceRoot, payloadRoot, output});
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  try {
+    await run();
+  } catch {
+    console.error("RUNTIME_NATIVE_RECEIPT_FAILED");
+    process.exitCode = 1;
+  }
 }
