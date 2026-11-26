@@ -37,6 +37,22 @@ pub(super) struct Snapshot {
 }
 
 impl Snapshot {
+    pub(super) fn durable_backup(id: Uuid, state: Phase, revision: u64) -> Self {
+        Self {
+            operation_id: id.to_string(),
+            kind: "backup_import",
+            state,
+            progress_percent: (state == Phase::Completed).then_some(100),
+            error: (state == Phase::Failed).then(|| json!({
+                "type": "about:blank", "status": 500, "code": "backup_restore_failed",
+                "title": "Backup restoration failed", "detail": "Backup restoration failed",
+                "retryable": false,
+            })),
+            // Kept separate from (and never inserted into) the live SSE registry.
+            revision,
+        }
+    }
+
     pub(super) fn event(&self) -> &'static str {
         match self.state {
             Phase::Pending | Phase::Running => "progress",
