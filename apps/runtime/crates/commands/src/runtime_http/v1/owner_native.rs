@@ -109,6 +109,14 @@ impl NativeOwner {
         )
     }
 
+    pub(super) fn authorize_logout(&mut self, live: &OwnerBinding, id: uuid::Uuid,
+        revision: &[u8; 32], header: &str, now: u64) -> Result<(), Denied> {
+        let proof = respire_spawn::owner_credential::proof::verify_soft_logout(
+            self.record.as_bytes(), id.as_bytes(), live.instance.as_bytes(), live.generation,
+            revision, header, now).ok_or(Denied::UnusableCredential)?;
+        self.registry.consume_logout(live, proof, now)
+    }
+
     pub(super) fn exchange(
         &mut self,
         live: &OwnerBinding,

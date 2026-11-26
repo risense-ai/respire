@@ -219,6 +219,7 @@ fn dispatch_loop_inner(
     let mut owner_dispatch = startup.as_ref()
         .and_then(|_| crate::runtime_http::start_owner_dispatch());
     let mut pending = VecDeque::<Job>::new();
+    let mut logout = None;
     let mut idle_since = Instant::now();
     loop {
         if STOPPING.load(Ordering::Acquire) {
@@ -241,7 +242,10 @@ fn dispatch_loop_inner(
             }
         }
         if let Some(dispatch) = owner_dispatch.as_mut() {
-            dispatch.tick(_store.as_ref(), &_lock);
+            if let Some(work) = dispatch.tick(_store.as_ref(), &_lock) {
+                logout = Some(work);
+                break;
+            }
         }
         match receive_dispatch_job(&rx, Duration::from_millis(10)) {
             Ok(job) => {
@@ -526,6 +530,9 @@ fn dispatch_loop_inner(
                 clean = false;
             }
         }
+    }
+    if let Some(work) = logout {
+        work.finish(&_lock, clean && !STOP_FORCE_TRIGGERED.load(Ordering::Acquire));
     }
     drop(_lock);
     if !STOP_FORCE_TRIGGERED.load(Ordering::Acquire) {
