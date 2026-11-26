@@ -29,6 +29,16 @@ const PENDING_TTL: Duration = Duration::from_secs(15 * 60);
 const MAX_PENDING: usize = 2;
 static UPLOADS: Semaphore = Semaphore::const_new(2);
 static PENDING_IMPORTS: OnceLock<Mutex<BTreeMap<Uuid, PendingImport>>> = OnceLock::new();
+#[cfg(test)]
+static BEFORE_RESTORE_COMMIT: OnceLock<Mutex<Option<Box<dyn FnOnce() + Send>>>> = OnceLock::new();
+
+#[cfg(test)]
+pub(in crate::runtime_http::v1) fn set_before_restore_hook(hook: Box<dyn FnOnce() + Send>) {
+    let slot = BEFORE_RESTORE_COMMIT.get_or_init(|| Mutex::new(None));
+    if let Ok(mut guard) = slot.lock() {
+        *guard = Some(hook);
+    }
+}
 
 struct PendingImport {
     owner: transport::RestScope,
@@ -305,26 +315,50 @@ pub(in crate::runtime_http::v1) async fn confirm_local_restore(
         return Err(mismatch());
     }
     let _ = job.progress(50);
+    #[cfg(test)]
+    if let Some(hook) = BEFORE_RESTORE_COMMIT
+        .get()
+        .and_then(|slot| slot.lock().ok().and_then(|mut guard| guard.take()))
+    {
+        let _ = tokio::task::spawn_blocking(hook).await;
+    }
     let staged_path = staged.to_path_buf();
     let result = rest_dispatch::submit_backup_restore(owner, move |ctx| {
         reads::with_memory_store(ctx, selected, |store, _| {
-            ctx.library
-                .restore_staged_backup(&target, &staged_path, &manifest, store)
-                .map_err(|_| transport::unavailable())
+            match job.commit(true, || {
+                ctx.library
+                    .restore_staged_backup(&target, &staged_path, &manifest, store)
+            }) {
+                Ok(()) => Ok(job),
+                Err(error) => {
+                    if matches!(
+                        error.downcast_ref::<crate::model_progress::OperationStopped>(),
+                        Some(crate::model_progress::OperationStopped::Cancelled)
+                    ) {
+                        job.finish(Phase::Cancelled);
+                        Err(Problem::new(
+                            StatusCode::CONFLICT,
+                            "backup_import_cancelled",
+                            "Backup restore was cancelled before commit",
+                        ))
+                    } else {
+                        let problem = transport::unavailable();
+                        job.fail_problem(&problem);
+                        Err(problem)
+                    }
+                }
+            }
         })
     })
     .await;
     drop(staged);
     match result {
-        Ok(()) => {
+        Ok(job) => {
             let _ = job.progress(100);
             job.finish(Phase::Completed);
             Ok(())
         }
-        Err(problem) => {
-            job.fail_problem(&problem);
-            Err(problem)
-        }
+        Err(problem) => Err(problem),
     }
 }
 

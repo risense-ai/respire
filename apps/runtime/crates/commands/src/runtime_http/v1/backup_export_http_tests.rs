@@ -347,7 +347,7 @@ fn verify_http(bound: SocketAddr, root: &Path, urk: [u8; 32]) -> Result<()> {
         let proof = sign_confirm(bad_op, bad_archive, bad_target)?;
         ensure!(matches!(call_confirm(bad_op, bad_archive, bad_target, &proof), Err(ureq::Error::Status(observed, _)) if observed == expected));
     }
-    assert_eq!(list_ids(space)?, BTreeSet::from([child.clone(), child_extra]));
+    assert_eq!(list_ids(space)?, BTreeSet::from([child.clone(), child_extra.clone()]));
     assert_eq!(backup_stage_count(root)?, 1);
 
     // Bounded queue (max 2) + concurrent cancel/status/reap race must never deadlock or leak stages.
@@ -389,16 +389,103 @@ fn verify_http(bound: SocketAddr, root: &Path, urk: [u8; 32]) -> Result<()> {
     let cancel_proof = sign_confirm(cancel_uuid, main_digest, main_target)?;
     ensure!(matches!(call_confirm(cancel_uuid, main_digest, main_target, &cancel_proof), Err(ureq::Error::Status(404, _))));
 
-    let child_confirm_proof = sign_confirm(child_uuid, child_digest, child_target)?;
-    let confirmed_child = call_confirm(child_uuid, child_digest, child_target, &child_confirm_proof)?;
-    assert_eq!(confirmed_child.status(), 200);
-    let confirmed_child_body: Value = confirmed_child.into_json()?;
-    assert_eq!(confirmed_child_body, json!({"operation_id": child_op, "status": "completed"}));
-    wait_completed(child_op)?;
+    // Deterministic Running-cancel fence: DELETE after job.start() and before Job::commit must abort DB write.
+    super::super::operations::backup_import::set_before_restore_hook(Box::new({
+        let delete_url = format!("{base}/v1/operations/{child_op}");
+        move || {
+            let local = ureq::AgentBuilder::new().try_proxy_from_env(false).timeout(WAIT).build();
+            if let Ok(reply) = local.delete(&delete_url).set("Authorization", &format!("Bearer {TOKEN}")).call() {
+                if reply.status() == 202 {
+                    if let Ok(body) = reply.into_json::<Value>() {
+                        assert_eq!(body["state"], "running");
+                    }
+                }
+            }
+        }
+    }));
+    let aborted_proof = sign_confirm(child_uuid, child_digest, child_target)?;
+    ensure!(matches!(call_confirm(child_uuid, child_digest, child_target, &aborted_proof), Err(ureq::Error::Status(409, _))));
+    let aborted_status: Value = get(&format!("/v1/operations/{child_op}"))
+        .set("Authorization", &format!("Bearer {TOKEN}")).call()?.into_json()?;
+    assert_eq!(aborted_status["state"], "cancelled");
+    assert_eq!(list_ids(space)?, BTreeSet::from([child.clone(), child_extra.clone()]));
+    assert_eq!(backup_stage_count(root)?, 0);
+
+    // Concurrent confirm-vs-cancel-vs-write race: either completes cleanly with write, or cancels without write.
+    let race_accepted = post(&format!("/v1/backups/import?space_id={space}"))
+        .set("Content-Type", "application/octet-stream")
+        .send_bytes(&child_wire)?;
+    assert_eq!(race_accepted.status(), 202);
+    let race_receipt: Value = race_accepted.into_json()?;
+    let race_op = race_receipt["operation_id"].as_str().context("race operation_id missing")?.to_owned();
+    let race_uuid = uuid::Uuid::parse_str(&race_op)?;
+    let race_proof = sign_confirm(race_uuid, child_digest, child_target)?;
+    let race_confirm = thread::spawn({
+        let confirm_url = format!("{base}/api/runtime/private-backup/confirm");
+        let race_op = race_op.clone();
+        let race_proof = race_proof.clone();
+        move || {
+            let local = ureq::AgentBuilder::new().try_proxy_from_env(false).timeout(WAIT).build();
+            local.post(&confirm_url)
+                .set("x-respire-backup-proof", &race_proof)
+                .send_json(json!({
+                    "schema_version": 1, "operation_id": race_op,
+                    "archive_sha256": hex::encode(child_digest), "target_sha256": hex::encode(child_target),
+                }))
+        }
+    });
+    let race_cancel = thread::spawn({
+        let delete_url = format!("{base}/v1/operations/{race_op}");
+        move || {
+            let local = ureq::AgentBuilder::new().try_proxy_from_env(false).timeout(WAIT).build();
+            local.delete(&delete_url).set("Authorization", &format!("Bearer {TOKEN}")).call()
+        }
+    });
+    let confirm_res = race_confirm.join().map_err(|_| anyhow::anyhow!("confirm racer panicked"))?;
+    let cancel_res = race_cancel.join().map_err(|_| anyhow::anyhow!("cancel racer panicked"))?;
+    let final_race: Value = get(&format!("/v1/operations/{race_op}"))
+        .set("Authorization", &format!("Bearer {TOKEN}")).call()?.into_json()?;
+    assert_eq!(backup_stage_count(root)?, 0);
+    let restored_in_race = match final_race["state"].as_str() {
+        Some("completed") => {
+            ensure!(matches!(confirm_res, Ok(ref r) if r.status() == 200));
+            match cancel_res {
+                Err(ureq::Error::Status(409, _)) => (),
+                Ok(r) if r.status() == 202 => {
+                    let body: Value = r.into_json()?;
+                    ensure!(body["state"] == "completed");
+                }
+                other => anyhow::bail!("unexpected cancel status during completed race: {other:?}"),
+            }
+            assert_eq!(list_ids(space)?, BTreeSet::from([child.clone()]));
+            true
+        }
+        Some("cancelled") => {
+            ensure!(matches!(confirm_res, Err(ureq::Error::Status(404 | 409, _))));
+            assert_eq!(list_ids(space)?, BTreeSet::from([child.clone(), child_extra.clone()]));
+            false
+        }
+        other => anyhow::bail!("unexpected confirm/cancel race state: {other:?}"),
+    };
+    if !restored_in_race {
+        let retry_accepted = post(&format!("/v1/backups/import?space_id={space}"))
+            .set("Content-Type", "application/octet-stream")
+            .send_bytes(&child_wire)?;
+        assert_eq!(retry_accepted.status(), 202);
+        let retry_receipt: Value = retry_accepted.into_json()?;
+        let retry_op = retry_receipt["operation_id"].as_str().context("retry operation_id missing")?;
+        let retry_uuid = uuid::Uuid::parse_str(retry_op)?;
+        let retry_proof = sign_confirm(retry_uuid, child_digest, child_target)?;
+        let retry_confirm = call_confirm(retry_uuid, child_digest, child_target, &retry_proof)?;
+        assert_eq!(retry_confirm.status(), 200);
+        wait_completed(retry_op)?;
+    }
     assert_eq!(list_ids(space)?, BTreeSet::from([child.clone()]));
     assert_eq!(list_ids("main")?, BTreeSet::from([parent.clone(), parent_extra.clone()]));
     assert_eq!(backup_stage_count(root)?, 0);
-    ensure!(matches!(call_confirm(child_uuid, child_digest, child_target, &child_confirm_proof), Err(ureq::Error::Status(401, _))));
+    if restored_in_race {
+        ensure!(matches!(call_confirm(race_uuid, child_digest, child_target, &race_proof), Err(ureq::Error::Status(401, _))));
+    }
 
     let accepted_main = post("/v1/backups/import?space_id=main")
         .set("Content-Type", "application/octet-stream")
