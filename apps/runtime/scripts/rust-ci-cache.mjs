@@ -45,6 +45,7 @@ function release(action, target, native = false) {
       platform: process.platform, arch: process.arch, image: [process.env.ImageOS || null, process.env.ImageVersion || null],
       compiler: process.platform === 'win32' ? null : execFileSync('cc', ['--version'], {encoding: 'utf8'}),
       container: process.env.RELEASE_CONTAINER_IMAGE || null,
+      ...(target.endsWith('-musl') && {staticOrtSha256: process.env.ORT_STATIC_SHA256}),
       alpine: existsSync('/etc/alpine-release') ? readFileSync('/etc/alpine-release', 'utf8') : null,
       packages: target.endsWith('-musl') ? execFileSync('apk', ['info', '-v'], {encoding: 'utf8'}).split('\n').sort() : null,
       flags: Object.entries(process.env).filter(([name]) => /^(?:CARGO_PROFILE_|CARGO_TARGET_|CFLAGS|CXXFLAGS|CC_|CXX_|AR_|OPENSSL_|PKG_CONFIG)/.test(name) ||
