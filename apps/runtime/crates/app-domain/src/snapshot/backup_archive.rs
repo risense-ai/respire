@@ -125,6 +125,43 @@ impl AuthenticatedBackupHeader {
         self.manifest.bytes + self.prefix.len() as u64
     }
 
+    /// Verify an upload in one pass into native pending custody. The selected
+    /// database comes from the verified library dispatcher, never a request
+    /// path. The resulting stage is not authority to stop or restore Runtime.
+    #[cfg(target_os = "linux")]
+    pub fn stage_for_restore(
+        self,
+        database_bytes: impl Read,
+        owner_root: &Path,
+        selected_database: &Path,
+        operation: respire_spawn::owner_credential::ArchiveOperation,
+        mut check: impl FnMut() -> Result<()>,
+    ) -> Result<respire_spawn::owner_credential::PendingBackupArchive> {
+        use respire_spawn::owner_credential::PendingBackupArchive;
+        use std::io;
+
+        check()?;
+        let canonical = selected_database.canonicalize()?;
+        ensure!(canonical == selected_database, "backup selection is not canonical");
+        let selected = canonical.to_str().context("backup selection must be UTF-8")?;
+        ensure!(
+            self.manifest.source_library == format!("{:x}", Sha256::digest(selected.as_bytes())),
+            "backup belongs to a different selected library"
+        );
+        let length = self.wire_length();
+        Ok(PendingBackupArchive::stage_verified(
+            owner_root,
+            operation,
+            length,
+            || check().map_err(io::Error::other),
+            |output, check| {
+                self.copy_envelope_to_stage(database_bytes, output, || Ok(check()?))
+                    .map(|_| ())
+                    .map_err(io::Error::other)
+            },
+        )?)
+    }
+
     /// Inspect the complete bounded input, not the live SQLite file.
     /// The caller owns and must discard any unverified partial stage.
     pub fn copy_to_stage(

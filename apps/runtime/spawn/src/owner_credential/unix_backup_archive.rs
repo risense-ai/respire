@@ -104,16 +104,30 @@ pub struct PendingBackupArchive {
     intent: Intent,
 }
 
+struct BoundedArchiveWriter<'a> {
+    out: &'a mut File,
+    digest: &'a mut Sha256,
+    remaining: u64,
+}
+
+impl Write for BoundedArchiveWriter<'_> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if bytes.len() as u64 > self.remaining { return Err(denied()); }
+        let written = self.out.write(bytes)?;
+        self.digest.update(&bytes[..written]);
+        self.remaining -= written as u64;
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> io::Result<()> { self.out.flush() }
+}
+
 impl PendingBackupArchive {
     /// The supplied root is a previously verified local owner namespace, not
     /// a filename from HTTP. Reuse the caller's takeover across publication.
     pub fn stage(root: &Path, operation: ArchiveOperation, length: u64,
-        mut input: impl Read, mut check_live: impl FnMut() -> io::Result<()>) -> io::Result<Self> {
-        if !(1..=MAX_WIRE_BYTES).contains(&length) { return Err(denied()); }
-        check_live()?;
-        let mut wire = MigrationCopy::create(root, &operation.leaf("pending"))?;
-        let mut digest = Sha256::new();
-        wire.fill_archive(|out| {
+        mut input: impl Read, check_live: impl FnMut() -> io::Result<()>) -> io::Result<Self> {
+        Self::stage_verified(root, operation, length, check_live, |out, check_live| {
             let mut remaining = length;
             let mut block = [0; 64 * 1024];
             while remaining != 0 {
@@ -121,10 +135,29 @@ impl PendingBackupArchive {
                 let size = remaining.min(block.len() as u64) as usize;
                 input.read_exact(&mut block[..size])?;
                 out.write_all(&block[..size])?;
-                digest.update(&block[..size]);
                 remaining -= size as u64;
             }
             if input.read(&mut [0])? != 0 { return Err(denied()); }
+            Ok(())
+        })
+    }
+
+    /// Put the exact complete wire into custody while a typed decoder
+    /// verifies the source. Returning the pending wire conveys no authority
+    /// to admit it to maintenance or publish a terminal receipt.
+    pub fn stage_verified(
+        root: &Path, operation: ArchiveOperation, length: u64,
+        mut check_live: impl FnMut() -> io::Result<()>,
+        copy: impl FnOnce(&mut dyn Write, &mut dyn FnMut() -> io::Result<()>) -> io::Result<()>,
+    ) -> io::Result<Self> {
+        if !(1..=MAX_WIRE_BYTES).contains(&length) { return Err(denied()); }
+        check_live()?;
+        let mut wire = MigrationCopy::create(root, &operation.leaf("pending"))?;
+        let mut digest = Sha256::new();
+        wire.fill_archive(|out| {
+            let mut bounded = BoundedArchiveWriter { out, digest: &mut digest, remaining: length };
+            copy(&mut bounded, &mut check_live)?;
+            if bounded.remaining != 0 { return Err(denied()); }
             Ok(())
         })?;
         check_live()?;
