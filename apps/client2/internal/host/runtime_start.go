@@ -87,6 +87,9 @@ func (m *Manager) startDetachedComplete(ctx context.Context, info InstalledRunti
 	}
 	executable := filepath.Join(m.runtimeDir(info.Version), runtimeBinary())
 	cmd := runtimeServingCommand(executable, m.DataRoot, endpoint.Hostname(), endpoint.Port(), "")
+	if m.profile.reopen != nil {
+		cmd.Env = append(cmd.Env, "RSRS_DATA_DIR="+m.DataRoot)
+	}
 	return m.launchRuntimeServingComplete(ctx, cmd, func(health HealthInfo) error {
 		if health.ImageSHA256 != info.SHA256 {
 			return errors.New(i18n.Message35bb3c888073700d)

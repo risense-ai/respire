@@ -30,6 +30,11 @@ type onlineModelReceipt struct {
 // active account, profile, and owner-only native credential before sending
 // the model operation. The Go host never reads or handles the owner secret.
 func (m *Manager) removeRuntimeOwnedModel(ctx context.Context, health HealthInfo, modelID string) (onlineModelReceipt, error) {
+	release, err := m.holdProfile()
+	if err != nil {
+		return onlineModelReceipt{}, err
+	}
+	defer release()
 	raw, err := m.runRuntimeModelControl(ctx, health, modelID, nil)
 	if err != nil {
 		return onlineModelReceipt{}, err

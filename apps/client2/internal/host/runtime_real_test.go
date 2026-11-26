@@ -18,6 +18,11 @@ import (
 // signed release claim or a replacement for application verification.
 func realRuntimeManager(t *testing.T) (*Manager, InstalledRuntime) {
 	t.Helper()
+	return realRuntimeManagerAt(t, nil)
+}
+
+func realRuntimeManagerAt(t *testing.T, configure func(*testing.T, string) string) (*Manager, InstalledRuntime) {
+	t.Helper()
 	image := os.Getenv("RESPIRE_TEST_REAL_RUNTIME")
 	if image == "" {
 		t.Skip("set RESPIRE_TEST_REAL_RUNTIME and RESPIRE_TEST_REAL_RUNTIME_VERSION for native acceptance")
@@ -41,6 +46,9 @@ func realRuntimeManager(t *testing.T) (*Manager, InstalledRuntime) {
 			strings.HasSuffix(upper, "_API_KEY") || strings.HasSuffix(upper, "_TOKEN") || strings.HasSuffix(upper, "_SECRET") {
 			t.Setenv(key, "")
 		}
+	}
+	if configure != nil {
+		root = configure(t, root)
 	}
 	t.Setenv("RSRS_DATA_DIR", root)
 	listener, err := net.Listen("tcp4", "127.0.0.1:0")
