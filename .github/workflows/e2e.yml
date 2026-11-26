@@ -1,0 +1,58 @@
+name: Compiled black-box acceptance
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'apps/**'
+      - 'contracts/**'
+      - 'packages/**'
+      - '.github/workflows/e2e.yml'
+permissions:
+  contents: read
+jobs:
+  compiled:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: ubuntu-24.04, target: x86_64-unknown-linux-gnu, suffix: ''}
+          - {os: macos-15, target: aarch64-apple-darwin, suffix: ''}
+          - {os: windows-2025, target: x86_64-pc-windows-msvc, suffix: '.exe'}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: risense-ai/respire-resources
+          ref: ade89e47833f99baf7f6acba7592d59ffc789d0c
+          path: referee
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22.14.0'
+      - name: Build and exercise native executables
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          EXE: ${{ matrix.suffix }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git -C referee rev-parse HEAD)" = ade89e47833f99baf7f6acba7592d59ffc789d0c
+          rustup toolchain install 1.95.0 --profile minimal
+          test "$(rustc +1.95.0 -vV | sed -n 's/^host: //p')" = "$TARGET"
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            export ORT_LIB_PATH="$RUNNER_TEMP/e2e-ort"
+            bash apps/runtime/scripts/prepare-gnu-ort.sh "$TARGET" "$ORT_LIB_PATH"
+            export ORT_SKIP_DOWNLOAD=1 ORT_PREFER_DYNAMIC_LINK=1
+            export RUSTFLAGS="-C target-feature=-crt-static -C embed-bitcode=no -C link-arg=-Wl,-rpath,$ORT_LIB_PATH"
+          fi
+          cargo +1.95.0 build --locked --manifest-path apps/runtime/Cargo.toml --target "$TARGET" --bin rsrs-runtime
+          cargo +1.95.0 build --locked --manifest-path apps/cli/Cargo.toml --target "$TARGET" --bin rsrs
+          runtime=$(node -p 'require("fs").realpathSync(process.argv[1])' "apps/runtime/target/$TARGET/debug/rsrs-runtime$EXE")
+          cli=$(node -p 'require("fs").realpathSync(process.argv[1])' "apps/cli/target/$TARGET/debug/rsrs$EXE")
+          node -e 'for(const p of process.argv.slice(1))console.log(require("crypto").createHash("sha256").update(require("fs").readFileSync(p)).digest("hex"),p)' "$runtime" "$cli"
+          node referee/test-cases/runner.mjs --runtime-bin "$runtime" --cli-bin "$cli" --synthetic-ready --verify
