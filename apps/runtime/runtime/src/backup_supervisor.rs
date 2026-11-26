@@ -10,7 +10,7 @@ use respire_protocol::{credentials::RuntimeUnlock, HostControlLaunchGrant as Lau
 use respire_spawn::owner_credential::{
     archive_proof::{self, ArchiveClaim},
     backup_grant::{self, Receiver, Scope},
-    read_owner_credential, ArchiveOperation, ArchiveTarget, BackupArchiveHandoff,
+    read_owner_credential, ArchiveTarget,
 };
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -34,6 +34,7 @@ struct Open {
     super_password: Option<String>,
     login_password: Option<String>,
     legacy_secret: Option<String>,
+    resume_operation: Option<String>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -175,10 +176,20 @@ pub(super) fn run() -> Result<i32> {
     let takeover = respire_commands::runtime_policy::takeover_lock()?;
     let (installation, library) = locks(&root)?;
     let initial = super::startup_identity::backup_launch(port)?;
-    snapshot::ensure_no_incomplete_restore(&root)?;
+    if open.resume_operation.is_none() { snapshot::ensure_no_incomplete_restore(&root)?; }
     auth::supply_runtime_session(open.unlock(&initial))?;
     let (keys, user) = auth::load_local_session_with_owner()?;
     let account = user.context("Vault owner missing")?;
+    let fence_path = root.join("runtime/autostart/launch/backup-restart");
+    if let Some(raw) = &open.resume_operation {
+        let id = Uuid::parse_str(raw)?;
+        ensure!(id.get_version_num()==4 && id.to_string()==*raw,"invalid operation UUID");
+        let fence = super::startup_identity::read_private_file(&fence_path)?;
+        respire_commands::runtime_http::BackupAdmission::resume_release(&root,&account,&keys,id,&library,fence.as_deref())?;
+        if fence.is_some() { fs::remove_file(&fence_path)?; respire_spawn::durable::sync_directory(fence_path.parent().context("reservation directory")?)?; }
+        emit(json!({"operation_id":raw,"kind":"backup_import","state":"completed","progress_percent":100}))?;
+        return Ok(0);
+    }
     let mut child = rotate(&open, None, &takeover, installation, library, initial)?;
     let agent = ureq::AgentBuilder::new()
         .try_proxy_from_env(false)
@@ -232,10 +243,6 @@ pub(super) fn run() -> Result<i32> {
         request_fingerprint: grant.fingerprint(),
     };
     let admission = respire_commands::runtime_http::BackupAdmission::retain(&grant)?;
-    let custody = BackupArchiveHandoff::from_approved_intent(
-        ArchiveOperation::from_v4_bytes(*confirm.operation_id.as_bytes())?,
-        grant.intent(),
-    );
     child.drain(&agent, token)?;
     let (installation, library) = locks(&root)?;
     let authorize = |current: &Launch| -> Result<()> {
@@ -278,9 +285,10 @@ pub(super) fn run() -> Result<i32> {
     next.drain(&agent, token)?;
     let (installation, library) = locks(&root)?;
     authorize(&next.launch)?;
-    snapshot::complete_restore(&root, &installed.receipt)?;
-    admission.publish(&root, &account, &restored, "main", &witness, &installed.receipt.restored, &library)?;
-    custody.discard(&root)?;
+    snapshot::commit_restore(&root, &installed.receipt)?;
+    let fence = serde_json::to_vec(&next.launch)?;
+    admission.publish(&root, &account, &restored, "main", &witness, &installed.receipt.restored, &library, &keys, &fence)?;
+    respire_commands::runtime_http::BackupAdmission::resume_release(&root, &account, &keys, confirm.operation_id, &library, Some(&fence))?;
     let mut serving = rotate(
         &open,
         Some(&next.launch),

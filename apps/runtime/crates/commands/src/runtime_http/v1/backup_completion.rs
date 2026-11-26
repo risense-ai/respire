@@ -26,6 +26,8 @@ struct Completion {
     space: String,
     admitted: [u8; 16],
     restarted: [u8; 16],
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    release_proof: Option<(String, String)>,
 }
 
 pub struct Admitted {
@@ -98,10 +100,10 @@ impl Admitted {
     }
 
     /// Called under the selected library lock, after verifying the restarted
-    /// serving process and completing the original restore journal.
+    /// serving process and committing the original restore journal.
     pub fn publish(&self, profile: &Path, account: &str, selected: &ArchiveTarget,
         space: &str, restart: &Restart, snapshot: &str,
-        ownership: &respire_app::lock::LibraryLock) -> Result<()> {
+        ownership: &respire_app::lock::LibraryLock, keys: &respire_app::SessionKeys, fence: &[u8]) -> Result<()> {
         let id = Uuid::from_bytes(self.scope.operation);
         let admitted = Uuid::from_bytes(self.scope.instance);
         let restarted = restart.instance;
@@ -114,13 +116,47 @@ impl Admitted {
             "restore target mismatch");
         let operation = SnapshotOperation { operation_id: id.to_string(), request_fingerprint: self.fingerprint.clone() };
         let terminal = operation_status(root, account, &operation)?.ok_or_else(|| anyhow::anyhow!("missing journal"))?;
-        ensure!(terminal.phase == "released" && !terminal.cleanup_pending && terminal.receipt.operation.as_ref() == Some(&operation)
+        ensure!(terminal.phase == "verified" && terminal.receipt.operation.as_ref() == Some(&operation)
             && terminal.receipt.restored == snapshot, "restore release mismatch");
-        let record = Completion { version: 2, operation: *id.as_bytes(), fingerprint: self.fingerprint.clone(),
+        let mut record = Completion { version: 3, operation: *id.as_bytes(), fingerprint: self.fingerprint.clone(),
             snapshot: snapshot.into(), intent: self.custody.intent_sha256(), scope_account: self.scope.account,
             profile: self.scope.profile, target: self.scope.target, restored_file: selected.identity_digest()?,
-            space: space.into(), admitted: *admitted.as_bytes(), restarted: *restarted.as_bytes() };
+            space: space.into(), admitted: *admitted.as_bytes(), restarted: *restarted.as_bytes(), release_proof: None };
+        let key = respire_app::memory::crypto::derive_subkey(&keys.urk, b"respire/backup/release-marker/v1")?;
+        record.release_proof = Some(respire_app::memory::crypto::encrypt_bytes(&key,
+            &serde_json::to_vec(&(hash(&serde_json::to_vec(&record)?), hash(fence)))?)?);
         self.custody.publish_terminal(profile, self.scope.archive, &serde_json::to_vec(&record)?)?;
+        Ok(())
+    }
+
+    pub fn resume_release(root: &Path, account: &str, keys: &respire_app::SessionKeys, id: Uuid,
+        lock: &respire_app::lock::LibraryLock, fence: Option<&[u8]>) -> Result<()> {
+        ensure!(lock.protects(root)?, "missing library ownership");
+        let op = ArchiveOperation::from_v4_bytes(*id.as_bytes())?;
+        let bytes = read_backup_terminal(root, op)?.ok_or_else(|| anyhow::anyhow!("missing release marker"))?;
+        let mut record: Completion = serde_json::from_slice(&bytes)?;
+        let (nonce, cipher) = record.release_proof.take().ok_or_else(|| anyhow::anyhow!("unverified marker"))?;
+        let key = respire_app::memory::crypto::derive_subkey(&keys.urk, b"respire/backup/release-marker/v1")?;
+        let (body, reservation): ([u8;32],[u8;32]) = serde_json::from_slice(&respire_app::memory::crypto::decrypt_bytes(&key,&cipher,&nonce)?)?;
+        let pin = ArchiveTarget::pin(respire_app::service::database_path(root)?.canonicalize()?)?;
+        ensure!(record.version == 3 && body == hash(&serde_json::to_vec(&record)?) && fence.is_none_or(|v| hash(v)==reservation)
+            && record.operation == *id.as_bytes() && record.profile == hash(root.as_os_str().as_encoded_bytes())
+            && record.scope_account == hash(account.as_bytes()) && record.target == hash(pin.path().as_os_str().as_encoded_bytes())
+            && record.restored_file == pin.identity_digest()?, "different release marker");
+        let operation = SnapshotOperation { operation_id:id.to_string(), request_fingerprint:record.fingerprint };
+        let status = operation_status(root,account,&operation)?.ok_or_else(|| anyhow::anyhow!("missing journal"))?;
+        ensure!(status.receipt.restored == record.snapshot && matches!(status.phase.as_str(),"verified"|"released"), "different restore");
+        if status.cleanup_pending || status.phase == "verified" {
+            ensure!(fence.is_some(), "missing restart reservation");
+            respire_app::snapshot::release_restore(root,&status.receipt)?;
+        }
+        respire_app::snapshot::ensure_no_incomplete_restore(root)?;
+        let custody = BackupArchiveHandoff::from_approved_intent(op,record.intent);
+        if let Err(e) = custody.discard(root) {
+            let prefix = format!(".backup-archive-{}.",id.simple());
+            ensure!(e.kind()==std::io::ErrorKind::NotFound && ["intent","archive","pending"].iter()
+                .all(|suffix| matches!(root.join(format!("{prefix}{suffix}")).symlink_metadata(), Err(e) if e.kind()==std::io::ErrorKind::NotFound)), "custody cleanup uncertain");
+        }
         Ok(())
     }
 }
@@ -135,13 +171,16 @@ pub(in crate::runtime_http::v1) async fn lookup(scope: RestScope, id: Uuid) -> V
     }).await?;
     let Some(raw) = raw else { return Ok(None) };
     let record: Completion = serde_json::from_slice(&raw).map_err(|_| transport::unavailable())?;
-    if record.version != 2 || record.operation != *id.as_bytes() || record.admitted == record.restarted
+    if !matches!(record.version,2|3) || record.operation != *id.as_bytes() || record.admitted == record.restarted
         || record.scope_account != hash(scope.account.as_bytes())
         || record.profile != hash(scope.canonical_profile.as_os_str().as_encoded_bytes()) { return Ok(None); }
     let verified = rest_dispatch::submit(scope.clone(), Access::Read, move |ctx| {
         reads::with_memory_store(ctx, Some(record.space), |store, _| {
             let pin = store.pin_backup_target().map_err(|_| transport::unavailable())?;
-            Ok(record.target == hash(pin.path().as_os_str().as_encoded_bytes())
+            let op = SnapshotOperation { operation_id:id.to_string(),request_fingerprint:record.fingerprint };
+            let released = operation_status(pin.path().parent().ok_or_else(transport::unavailable)?, &ctx.scope.account, &op)
+                .map_err(|_| transport::unavailable())?.is_some_and(|s| s.phase=="released" && !s.cleanup_pending && s.receipt.restored==record.snapshot);
+            Ok(released && record.target == hash(pin.path().as_os_str().as_encoded_bytes())
                 && pin.identity_digest().map_err(|_| transport::unavailable())? == record.restored_file)
         })
     }).await?;

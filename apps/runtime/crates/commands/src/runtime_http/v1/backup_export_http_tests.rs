@@ -1,5 +1,6 @@
 use super::*;
 use anyhow::{Context, Result};
+#[cfg(target_os = "macos")]
 use axum::{extract::ConnectInfo, routing, Router};
 use respire_app::{auth, service};
 use serde_json::json;
@@ -94,6 +95,9 @@ fn scoped_archive_over_loopback() -> Result<()> {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
             let bound = listener.local_addr()?;
             let app = crate::runtime_http::router(bound);
+            #[cfg(target_os = "linux")]
+            let app = app.merge(backup_routes(bound)).merge(super::super::operations::archive_confirmation_routes(bound));
+            #[cfg(target_os = "macos")]
             let app = app.merge(Router::new().route(EXPORT, routing::get(
                 move |ConnectInfo(crate::network::Peer(peer)): ConnectInfo<crate::network::Peer>, request: Request| get(bound, peer, request)
             )));

@@ -30,6 +30,13 @@ fn hex(bytes: &[u8]) -> String {
 
 #[test]
 fn shipped_supervisor_applies_exact_pending_archive_and_reopens_original_operation() -> Result<()> {
+    exercise(false)
+}
+#[test]
+fn exact_release_marker_resumes_without_replacing_the_database() -> Result<()> {
+    exercise(true)
+}
+fn exercise(interrupt: bool) -> Result<()> {
     let root = Fixture(std::env::temp_dir().canonicalize()?.join(format!("backup-{}", Uuid::new_v4())));
     use std::os::unix::fs::DirBuilderExt;
     fs::DirBuilder::new().mode(0o700).create(&root.0)?;
@@ -84,7 +91,7 @@ fn shipped_supervisor_applies_exact_pending_archive_and_reopens_original_operati
         })
         .context("ordinary Runtime executable missing")?;
     use std::io::{BufRead, BufReader, Read, Write};
-    let mut parent = Owned(
+    let launch = || -> Result<Owned> { Ok(Owned(
         Command::new(&executable)
             .env_clear()
             .env("HOME", profile)
@@ -95,7 +102,8 @@ fn shipped_supervisor_applies_exact_pending_archive_and_reopens_original_operati
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()?,
-    );
+    )) };
+    let mut parent = launch()?;
     let mut requests = parent.0.stdin.take().context("supervisor input")?;
     let mut replies = BufReader::new(parent.0.stdout.take().context("supervisor output")?);
     let mut send = |v: Value| -> Result<()> {
@@ -200,6 +208,40 @@ fn shipped_supervisor_applies_exact_pending_archive_and_reopens_original_operati
         "public bearer conferred native claim authority"
     );
     send(exact.clone())?;
+    if interrupt {
+        let prefix = format!(".backup-archive-{}.", Uuid::parse_str(&id)?.simple());
+        let deadline = Instant::now()+Duration::from_secs(15);
+        while !profile.join(format!("{prefix}archive")).is_file() {
+            ensure!(Instant::now()<deadline, "claim did not publish custody");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let obstacle=profile.join(format!("{prefix}pending"));
+        fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&obstacle)?;
+        ensure!(!parent.0.wait()?.success(), "expected exact cleanup to refuse the substituted pending file");
+        fs::remove_file(obstacle)?;
+        let live=respire_app::service::database_path(profile)?;
+        use std::os::unix::fs::MetadataExt;
+        let fingerprint=|| -> Result<_> { Ok((fs::metadata(&live)?.ino(),Sha256::digest(fs::read(&live)?))) };
+        let before=fingerprint()?;
+        for attempt in [Uuid::new_v4().to_string(),id.clone(),id.clone()] {
+            let mut retry=launch()?;
+            let mut input=retry.0.stdin.take().context("retry pipe")?;
+            writeln!(input,"{}",json!({"controller_pid":std::process::id(),"controller_birth":birth,
+                "session_sha256":hex(&Sha256::digest(&session)),"super_password":password,"resume_operation":attempt}))?;
+            drop(input);
+            let mut reply=String::new();
+            retry.0.stdout.take().context("retry result")?.read_to_string(&mut reply)?;
+            let success=retry.0.wait()?.success();
+            let fence=profile.join("runtime/autostart/launch/backup-restart");
+            if attempt!=id { ensure!(!success && reply.is_empty() && fence.exists(),"wrong UUID released reservation"); }
+            else {
+                let result:Value=serde_json::from_str(&reply)?;
+                ensure!(success && result["state"]=="completed" && result["operation_id"]==id && !fence.exists(),"release not completed");
+            }
+            ensure!(fingerprint()?==before,"retry changed SQLite");
+        }
+        return Ok(());
+    }
     let terminal = receive()?;
     ensure!(terminal["operation_id"] == id && terminal["state"] == "completed", "wrong terminal scope");
     ensure!(
