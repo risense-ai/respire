@@ -342,8 +342,13 @@ pub(in crate::runtime_http::v1) async fn confirm_local_restore(
                 {
                     hook();
                 }
-                ctx.library
-                    .restore_staged_backup(&target, staged.as_ref(), &manifest, store)
+                let outcome = ctx
+                    .library
+                    .restore_staged_backup(&target, staged.as_ref(), &manifest, store)?;
+                if let Some(warning) = outcome.post_commit_warning {
+                    eprintln!("command=backup_import status=post_commit_warning error={warning}");
+                }
+                Ok(())
             });
             drop(staged);
             match outcome {

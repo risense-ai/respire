@@ -38,7 +38,7 @@ impl RuntimeLibrary<'_> {
         staged: &std::path::Path,
         manifest: &Manifest,
         store: &crate::transport::local::LocalStore,
-    ) -> Result<()> {
+    ) -> Result<crate::transport::local::RestoreOutcome> {
         backup_archive::restore_verified_stage(self.0, self.1, live_database, staged, manifest, store)
     }
 }

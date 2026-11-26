@@ -359,7 +359,7 @@ pub(crate) fn restore_verified_stage(
     staged: &Path,
     manifest: &Manifest,
     store: &crate::transport::local::LocalStore,
-) -> Result<()> {
+) -> Result<crate::transport::local::RestoreOutcome> {
     let canonical = live_db.canonicalize()?;
     ensure!(canonical == live_db && store.backup_target()? == canonical, "restore target mismatch");
     let target_text = canonical.to_str().context("restore target must be UTF-8")?;
