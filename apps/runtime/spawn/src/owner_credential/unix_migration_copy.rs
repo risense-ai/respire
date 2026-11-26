@@ -37,6 +37,28 @@ impl MigrationCopy {
         &self.path
     }
 
+    /// Write the exact exclusive file without reopening its pathname or
+    /// leaking a writable handle. Drop this stage on any error.
+    pub fn write_exact_stage(
+        &mut self,
+        expected: u64,
+        write: impl FnOnce(&mut dyn std::io::Write) -> io::Result<()>,
+    ) -> io::Result<()> {
+        let verify = |length| -> io::Result<()> {
+            if check(&self.file, 0o600, false)?.len() != length
+                || !self.identity.still_names(self.parent.as_raw_fd(), &self.pending)
+            {
+                return Err(denied());
+            }
+            Ok(())
+        };
+        verify(0)?;
+        write(&mut &self.file)?;
+        verify(expected)?;
+        self.file.sync_all()?;
+        verify(expected)
+    }
+
     pub fn publish(mut self, final_name: &str) -> io::Result<()> {
         super::super::validate_migration_leaf(final_name)?;
         let final_name = CString::new(final_name).map_err(|_| denied())?;

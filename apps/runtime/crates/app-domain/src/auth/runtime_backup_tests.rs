@@ -116,3 +116,75 @@ fn split_import_header_requires_live_lineage_before_copying() -> Result<()> {
     assert_eq!(manifest.bytes, body.len() as u64);
     Ok(())
 }
+
+#[test]
+fn large_sqlite_import_uses_exact_owner_stage_and_cleans_up_on_rejection() -> Result<()> {
+    use crate::snapshot::backup_archive::BackupArchiveHeader;
+    use rusqlite::{Connection, OpenFlags};
+
+    let root = tempfile::tempdir()?;
+    let profile = root.path().canonicalize()?;
+    let store = detached_fixture(&profile)?;
+    let database = profile.join("rsrs.db");
+    let live = Connection::open(&database)?;
+    live.execute_batch(
+        "CREATE TABLE import_stage_fixture(payload BLOB NOT NULL);
+         INSERT INTO import_stage_fixture VALUES (zeroblob(33554432));",
+    )?;
+    let keys = SessionKeys::from_urk([7; 32])?;
+    let authority = RuntimeLibrary(&keys, "alice", &profile);
+    let draft = BackupExportDraft::new(store.prepare_backup_export(&profile)?.copy(|| Ok(()))?)?;
+    let proof = authority.prove_backup_snapshot(&draft)?;
+    let export = authority.authenticate_backup_export(draft.prepare(proof, || Ok(()))?)?;
+    let mut bytes = Vec::new();
+    export.write_verified(&mut bytes, || Ok(()))?;
+    let no_stage = || -> Result<bool> {
+        for entry in fs::read_dir(&profile)? {
+            if entry?.file_name().to_string_lossy().starts_with(".backup-import-") {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    };
+    let mut body = bytes.as_slice();
+    let authenticated = authority.authenticate_backup_import_header(BackupArchiveHeader::read(&mut body)?)?;
+    assert!(body.len() > 32 * 1024 * 1024);
+    let staged = authenticated.copy_into_owner_stage(body, &profile, &database, || Ok(()))?;
+    assert_eq!(staged.manifest().bytes, body.len() as u64);
+    let checked_path = staged.checked_path()?.to_path_buf();
+    let staged_db = Connection::open_with_flags(
+        &checked_path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )?;
+    assert_eq!(
+        staged_db.query_row("SELECT length(payload) FROM import_stage_fixture", [], |row| row.get::<_, u64>(0))?,
+        32 * 1024 * 1024,
+    );
+    drop(staged_db);
+    drop(staged);
+    assert!(no_stage()?);
+
+    let mut recover_header = bytes.as_slice();
+    let authenticated = authority.authenticate_backup_import_header(BackupArchiveHeader::read(&mut recover_header)?)?;
+    assert!(authenticated.copy_into_owner_stage(&recover_header[..65_537], &profile, &database, || Ok(())).is_err());
+    assert!(no_stage()?);
+
+    let mut body = bytes.as_slice();
+    let authenticated = authority.authenticate_backup_import_header(BackupArchiveHeader::read(&mut body)?)?;
+    let mut checks = 0;
+    assert!(authenticated.copy_into_owner_stage(body, &profile, &database, || {
+        checks += 1;
+        anyhow::ensure!(checks < 3, "fixture scope revoked after partial write");
+        Ok(())
+    }).is_err());
+    assert_eq!(checks, 3);
+    assert!(no_stage()?);
+
+    let other = profile.join("other.db");
+    fs::File::create(&other)?;
+    let mut body = bytes.as_slice();
+    let authenticated = authority.authenticate_backup_import_header(BackupArchiveHeader::read(&mut body)?)?;
+    assert!(authenticated.copy_into_owner_stage(body, &profile, &other, || Ok(())).is_err());
+    assert!(no_stage()?);
+    assert_eq!(live.query_row("SELECT length(payload) FROM import_stage_fixture", [], |row| row.get::<_, u64>(0))?, 32 * 1024 * 1024);
+    Ok(())
+}

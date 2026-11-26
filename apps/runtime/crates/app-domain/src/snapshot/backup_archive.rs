@@ -213,6 +213,12 @@ impl AuthenticatedBackupHeader {
     }
 }
 
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+#[path = "backup_import_stage.rs"]
+mod import;
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+pub use import::BackupImportStage;
+
 /// Authenticate before writing any DB bytes, and verify the exact final
 /// digest before returning. Do not open the output as SQLite or expose it
 /// unless this function and subsequent offline restore validation succeed.
