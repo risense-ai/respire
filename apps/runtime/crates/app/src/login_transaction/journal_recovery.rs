@@ -75,10 +75,11 @@ pub fn recovery_state() -> Result<respire_protocol::host_control::HostLoginRecov
 
 /// Public fields from the selected local session and the durable transaction journal.
 pub fn host_account_status(profile: &Path) -> Result<Value> {
-    let session: Option<Value> = read_original(profile)?.as_deref().map(serde_json::from_slice).transpose()?;
+    let bytes = read_original(profile)?;
+    let session: Option<Value> = bytes.as_deref().map(serde_json::from_slice).transpose()?;
     let journal = load_journal_metadata()?;
     let state = match journal.active.as_ref() {
-        None => "none",
+        None => pending_login::projection(profile, bytes.as_deref(), &journal)?,
         Some(active) => {
             let login_pending = active.operation_id.as_ref().is_some_and(|id| {
                 journal.operations.iter().any(|record| {

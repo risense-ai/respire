@@ -445,3 +445,96 @@ pub(in crate::runtime_http::v1::operations) async fn check_routes(
     }
     Ok(())
 }
+
+#[test]
+fn e2e_loopback_mirror_requires_feature_and_strict_offline_origin() -> Result<()> {
+    struct EnvRestore(&'static str, Option<std::ffi::OsString>);
+    impl EnvRestore {
+        fn set(key: &'static str, value: &str) -> Self {
+            let prev = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self(key, prev)
+        }
+    }
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            match &self.1 {
+                Some(prev) => std::env::set_var(self.0, prev),
+                None => std::env::remove_var(self.0),
+            }
+        }
+    }
+    let _serial = crate::TEST_ENV_LOCK
+        .lock()
+        .map_err(|_| anyhow::anyhow!("test lock poisoned"))?;
+    use std::io::Write;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let bound = listener.local_addr()?;
+    let payload = b"loopback-model-artifact";
+    let expected = resource(tempfile::tempdir()?.path().join("model.onnx"), payload);
+    let mirror = format!("http://{bound}");
+    let _mirror_env = EnvRestore::set("RSRS_E2E_LOOPBACK_MIRROR", &mirror);
+    let network = super::super::super::host_config::ModelNetwork::parse(&serde_json::json!({}))?;
+    let agent = network.agent()?;
+    let url = format!("{mirror}/respire/m3/resolve/0123456789abcdef0123456789abcdef01234567/model.onnx");
+    let resolved = origins(None);
+    #[cfg(not(feature = "e2e-loopback-mirror"))]
+    {
+        drop(listener);
+        assert_eq!(resolved?.len(), 3);
+        assert!(origins(Some(&mirror)).is_err());
+        let mut out = tempfile::tempfile()?;
+        assert!(transfer(&agent, &url, &mut out, &expected, &|_| Ok(())).is_err());
+    }
+    #[cfg(feature = "e2e-loopback-mirror")]
+    {
+        let server = std::thread::spawn(move || {
+            for _ in 0..4 {
+                let Ok((mut stream, _)) = listener.accept() else { break };
+                let mut req = [0_u8; 2048];
+                let n = std::io::Read::read(&mut stream, &mut req).unwrap_or(0);
+                let head = String::from_utf8_lossy(&req[..n]);
+                if head.contains("redirect-ext") {
+                    let _ = write!(stream, "HTTP/1.1 302 Found\r\nLocation: https://huggingface.co/ext/model.onnx\r\nConnection: close\r\n\r\n");
+                } else if head.contains("redirect-other") {
+                    let _ = write!(stream, "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:1/other.onnx\r\nConnection: close\r\n\r\n");
+                } else if head.contains("redirect-same") {
+                    let _ = write!(stream, "HTTP/1.1 302 Found\r\nLocation: /final/model.onnx\r\nConnection: close\r\n\r\n");
+                } else {
+                    let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", payload.len());
+                    let _ = stream.write_all(payload);
+                }
+            }
+        });
+        assert_eq!(resolved?, vec![mirror.clone()]);
+        assert_eq!(origins(Some(&mirror))?, vec![mirror.clone()]);
+        assert!(origins(Some("https://huggingface.co")).is_err());
+        let external_cfg = super::super::super::host_config::ModelNetwork::parse(
+            &serde_json::json!({"model_mirror": "https://hf-mirror.net"}),
+        )?;
+        assert!(external_cfg.origins(None).is_err());
+        let proxied = super::super::super::host_config::ModelNetwork::parse(
+            &serde_json::json!({"proxy_url": "http://127.0.0.1:3128"}),
+        )?;
+        assert!(proxied.agent().is_err());
+        let _http_proxy = EnvRestore::set("HTTP_PROXY", "http://127.0.0.1:1");
+        let _all_proxy = EnvRestore::set("ALL_PROXY", "http://127.0.0.1:1");
+        let isolated_agent = network.agent()?;
+        let mut out = tempfile::tempfile()?;
+        transfer(&isolated_agent, &format!("{mirror}/redirect-same"), &mut out, &expected, &|_| Ok(()))?;
+        for bad_url in [
+            format!("{mirror}/redirect-ext"),
+            format!("{mirror}/redirect-other"),
+            "http://127.0.0.1:1/other.onnx".to_owned(),
+            "https://huggingface.co/respire/m3/resolve/0123456789abcdef0123456789abcdef01234567/model.onnx".to_owned(),
+        ] {
+            let mut file = tempfile::tempfile()?;
+            let err = transfer(&isolated_agent, &bad_url, &mut file, &expected, &|_| Ok(()))
+                .err()
+                .context("disallowed loopback mirror source succeeded")?;
+            assert!(err.is::<SourceFailure>());
+        }
+        let _ = server.join();
+    }
+    Ok(())
+}

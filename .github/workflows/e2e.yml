@@ -49,7 +49,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: risense-ai/respire-resources
-          ref: ade89e47833f99baf7f6acba7592d59ffc789d0c
+          ref: 5b14b8ea189873d14055cb24994c04afae9e926c
           path: referee
           persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
@@ -63,7 +63,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          test "$(git -C referee rev-parse HEAD)" = ade89e47833f99baf7f6acba7592d59ffc789d0c
+          test "$(git -C referee rev-parse HEAD)" = 5b14b8ea189873d14055cb24994c04afae9e926c
           rustup toolchain install 1.95.0 --profile minimal
           test "$(rustc +1.95.0 -vV | sed -n 's/^host: //p')" = "$TARGET"
           if [[ "$RUNNER_OS" == Linux ]]; then
@@ -73,6 +73,7 @@ jobs:
             export RUSTFLAGS="-C target-feature=-crt-static -C embed-bitcode=no -C link-arg=-Wl,-rpath,$ORT_LIB_PATH"
           fi
           cargo +1.95.0 build --locked --manifest-path apps/runtime/Cargo.toml --target "$TARGET" --bin rsrs-runtime
+          cargo +1.95.0 build --locked --manifest-path apps/runtime/Cargo.toml --target "$TARGET" --target-dir "$RUNNER_TEMP/e2e-loopback-target" --bin rsrs-runtime --features e2e-loopback-mirror
           cargo +1.95.0 build --locked --manifest-path apps/cli/Cargo.toml --target "$TARGET" --bin rsrs
           runtime=$(node -p 'require("fs").realpathSync(process.argv[1])' "apps/runtime/target/$TARGET/debug/rsrs-runtime$EXE")
           cli=$(node -p 'require("fs").realpathSync(process.argv[1])' "apps/cli/target/$TARGET/debug/rsrs$EXE")
@@ -83,9 +84,12 @@ jobs:
             export TMPDIR
             node -e 'const p=require("os").tmpdir();require("assert").strictEqual(require("fs").realpathSync(p),p)'
           fi
+          download_runtime=$(node -p 'require("fs").realpathSync(process.argv[1])' "$RUNNER_TEMP/e2e-loopback-target/$TARGET/debug/rsrs-runtime$EXE")
+          [[ "$("$download_runtime" --version)" == *+e2e-loopback-mirror ]]
+          [[ "$("$runtime" --version)" != *+e2e-loopback-mirror ]]
           log=$(mktemp)
           runner_status=0
-          node scripts/e2e/compiled-scenarios.mjs "$runtime" "$cli" 2>&1 | tee "$log" || runner_status=$?
+          node scripts/e2e/compiled-scenarios.mjs "$runtime" "$cli" "$download_runtime" 2>&1 | tee "$log" || runner_status=$?
           verdict_status=0
           node scripts/e2e/compiled-verdict.mjs "$log" || verdict_status=$?
           if (( runner_status )); then exit "$runner_status"; fi

@@ -73,10 +73,16 @@ impl Drop for Local {
 pub(super) struct CurrentUser {
     // TokenUser embeds a pointer into its own checked, aligned OS buffer.
     _storage: Vec<usize>,
-    sid: PSID,
+    sid_offset: usize,
     managed_admin_default: bool,
 }
 impl CurrentUser {
+    fn sid(&self) -> PSID {
+        // SAFETY: `sid_offset` was validated against `_storage` byte bounds at construction,
+        // and `_storage` is never reallocated or mutated afterwards.
+        unsafe { self._storage.as_ptr().cast::<u8>().add(self.sid_offset).cast_mut().cast() }
+    }
+
     pub(super) fn query() -> io::Result<Self> {
         Self::query_with_managed_base(false)
     }
@@ -110,9 +116,13 @@ impl CurrentUser {
             !sid.is_null() && unsafe { IsValidSid(sid) } != 0,
             "invalid Windows token owner",
         )?;
+        let sid_offset = (sid as usize)
+            .checked_sub(ptr as usize)
+            .filter(|offset| *offset + 8 <= len as usize)
+            .ok_or_else(|| denied("invalid Windows token owner offset"))?;
         Ok(Self {
             _storage: storage,
-            sid,
+            sid_offset,
             // No alias when any native evidence is unavailable.
             managed_admin_default: managed && elevated_admin_owner(&token).unwrap_or(false),
         })
@@ -129,7 +139,7 @@ impl CurrentUser {
     fn owner_descriptor(&self, inheritance: &str) -> io::Result<Descriptor> {
         let mut raw = null_mut();
         // SAFETY: Valid SID retained by CurrentUser; conversion allocates a bounded SID string.
-        win(unsafe { ConvertSidToStringSidW(self.sid, &mut raw) })?;
+        win(unsafe { ConvertSidToStringSidW(self.sid(), &mut raw) })?;
         let sid = Local(raw.cast());
         let mut len = 0;
         while len < MAX_SID_WIDE && unsafe { *sid.0.cast::<u16>().add(len) } != 0 {
@@ -164,7 +174,7 @@ impl CurrentUser {
         win(unsafe { GetSecurityDescriptorOwner(descriptor.0 .0, &mut owner, &mut ignored) })?;
         let admins = KnownSid::new(WinBuiltinAdministratorsSid)?;
         check(
-            owner_matches(same(self.sid, owner), false, self.managed_admin_default, same(admins.ptr(), owner)),
+            owner_matches(same(self.sid(), owner), false, self.managed_admin_default, same(admins.ptr(), owner)),
             "Windows restore profile does not belong to the operating system user",
         )
     }
@@ -211,7 +221,7 @@ impl CurrentUser {
         let allow = unsafe { &*entry.cast::<ACCESS_ALLOWED_ACE>() };
         let account = std::ptr::from_ref(&allow.SidStart).cast_mut().cast();
         check(
-            allow.Mask == PRIVATE_RIGHTS && same(self.sid, account),
+            allow.Mask == PRIVATE_RIGHTS && same(self.sid(), account),
             "inherited model ACE is not full access for TokenUser",
         )
     }
@@ -235,7 +245,7 @@ impl CurrentUser {
         let admins = KnownSid::new(WinBuiltinAdministratorsSid)?;
         check(
             owner_matches(
-                same(self.sid, owner),
+                same(self.sid(), owner),
                 private,
                 managed_admin_default,
                 same(admins.ptr(), owner),
@@ -289,7 +299,7 @@ impl CurrentUser {
             if let Some(expected_flags) = owner_only_flags {
                 check(
                     header.AceFlags == expected_flags
-                        && same(self.sid, account)
+                        && same(self.sid(), account)
                         && allow.Mask == PRIVATE_RIGHTS,
                     "Windows credential ACL is not protected owner-only access",
                 )?;
@@ -297,7 +307,7 @@ impl CurrentUser {
                 // Base ACL may allow SYSTEM/Administrators to maintain the
                 // filesystem and other accounts to read/traverse, never mutate.
                 check(
-                    same(self.sid, account)
+                    same(self.sid(), account)
                         || same(system.ptr(), account)
                         || same(admins.ptr(), account)
                         || allow.Mask & !BASE_READ_ONLY == 0,

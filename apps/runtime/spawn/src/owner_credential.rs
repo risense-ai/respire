@@ -101,6 +101,7 @@ const LOCAL_SPACE_STAGE_FILES: &[&str] = &[
 #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 const LOCAL_SPACE_STAGING_SLOTS: u8 = 16;
 
+pub mod backup_proof;
 pub mod model_proof;
 pub mod proof;
 

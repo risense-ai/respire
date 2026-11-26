@@ -5,6 +5,7 @@ import {loadScenarios, runScenario} from '../../referee/test-cases/runner.mjs';
 import {withRuntime} from '../../referee/test-cases/targets.mjs';
 import {cliTarget} from '../../referee/test-cases/cli-e2e/command.mjs';
 import {prepareSwitch, settledSwitchTarget} from './switch-fixture.mjs';
+import {runDownload} from './download-fixture.mjs';
 
 // The frozen referee reports "HTTP status mismatch" without the received status.
 channel('undici:request:headers').subscribe(({request, response}) => {
@@ -13,7 +14,7 @@ channel('undici:request:headers').subscribe(({request, response}) => {
   }
 });
 
-const [binary, cli] = process.argv.slice(2);
+const [binary, cli, downloadBinary] = process.argv.slice(2);
 const scenarios = await loadScenarios();
 assert.deepEqual(scenarios.map(s => s.id), Array.from({length:7}, (_,n) => 'E2E-00'+(n+1)));
 let passed = 0;
@@ -22,6 +23,12 @@ for (const scenario of scenarios) {
   const target = scenario.target === 'cli' ? 'CLI' : scenario.target ? 'LEGACY RPC' : 'RUNTIME';
   const label = 'COMPILED '+target+' '+scenario.id+' '+scenario.title;
   try {
+    if (scenario.id === 'E2E-002') {
+      await runDownload(downloadBinary, scenario);
+      console.log('PASS '+label);
+      passed++;
+      continue;
+    }
     const models = ['E2E-003','E2E-004'].includes(scenario.id);
     // Only advertise inputs with an actual offline staging implementation.
     const provided = models ? [scenario.id === 'E2E-004' ? 'rollbackModel' : 'switchModel'] : [];
