@@ -7,8 +7,8 @@ export, not a history import. The legacy repository remains private.
 The export contains Cargo manifests and lockfile, the `core-ffi`,
 `memory-core`, and `protocol` crates, the frozen C ABI header and
 compatibility fixtures under `contracts/core-abi/`, the patched Tokenizers
-source under `vendor/tokenizers/`, native dependency notices under
-`third-party/`, and the source SDK builder and notice collector.
+source under `vendor/tokenizers/`, and native dependency notices under
+`third-party/`. Runtime links the Core FFI crate directly through Cargo.
 No release binaries, deployment data, SDK cache, or history are included.
 The only binary fixture is a documented 12-byte synthetic float vector.
 

@@ -1,5 +1,8 @@
 use super::*;
-use std::io::{self, Cursor};
+use std::{
+    io::{self, Cursor},
+    sync::atomic::{AtomicBool, Ordering},
+};
 
 pub(in crate::runtime_http::v1::operations) const TEST: &str =
     "runtime_http::v1::operations::model_download::tests::worker_publication_and_cancel_use_live_owner";
@@ -14,6 +17,53 @@ type GateHolder = (
     std::thread::JoinHandle<Result<()>>,
 );
 static PUBLISH_GATE: std::sync::Mutex<Option<GateHolder>> = std::sync::Mutex::new(None);
+
+static RELEASE_BODY: AtomicBool = AtomicBool::new(false);
+
+// Exercise streaming and cancellation over a real, private HTTP connection.
+fn slow_loopback(
+    output: &mut std::fs::File,
+    resource: &Resource,
+    progress: &dyn Fn(u64) -> Result<()>,
+) -> Result<()> {
+    use std::net::{Ipv4Addr, TcpListener, TcpStream};
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
+    let mut client = TcpStream::connect_timeout(&listener.local_addr()?, Duration::from_secs(2))?;
+    let (mut server, _) = listener.accept()?;
+    client.set_read_timeout(Some(Duration::from_secs(7)))?;
+    server.set_write_timeout(Some(Duration::from_secs(2)))?;
+    server.set_read_timeout(Some(Duration::from_secs(2)))?;
+    let request = b"GET /fixture HTTP/1.0\r\n\r\n";
+    let header = b"HTTP/1.0 200 OK\r\nContent-Length: 8192\r\n\r\n";
+    client.write_all(request)?;
+    std::thread::scope(|scope| -> Result<()> {
+        let writer = scope.spawn(move || -> io::Result<()> {
+            let mut received = [0; b"GET /fixture HTTP/1.0\r\n\r\n".len()];
+            server.read_exact(&mut received)?;
+            assert_eq!(&received, request);
+            server.write_all(header)?;
+            server.write_all(&[7; 1024])?;
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while !RELEASE_BODY.load(Ordering::Acquire) {
+                if std::time::Instant::now() >= deadline {
+                    return Err(io::Error::new(io::ErrorKind::TimedOut, "cancel not received"));
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            // The next read unblocks; copy_verified checks cancellation before publication.
+            server.write_all(&[7; 7168])?;
+            Ok(())
+        });
+        let mut received = [0; b"HTTP/1.0 200 OK\r\nContent-Length: 8192\r\n\r\n".len()];
+        client.read_exact(&mut received)?;
+        assert_eq!(&received, header);
+        let result = copy_verified(client, output, resource, progress);
+        writer
+            .join()
+            .map_err(|_| anyhow::anyhow!("fixture writer panicked"))??;
+        result
+    })
+}
 
 // Synthetic byte transport only; production always uses the HTTPS transfer function.
 fn synthetic_transfer(
@@ -42,6 +92,9 @@ fn synthetic_transfer(
             progress(0)?;
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+    if resource.path.file_name().and_then(|n| n.to_str()) == Some("slow.onnx") {
+        return slow_loopback(output, resource, progress);
     }
     if resource.path.file_name().and_then(|n| n.to_str()) == Some("corrupt.onnx") {
         return copy_verified(Cursor::new(b"invalid"), output, resource, progress);
@@ -99,7 +152,12 @@ pub(in crate::runtime_http::v1::operations) async fn check_worker(
                 assert_eq!(reply.status(), StatusCode::OK);
                 let snapshot: Value =
                     serde_json::from_slice(&to_bytes(reply.into_body(), 8192).await?)?;
-                if snapshot["state"] == state {
+                let transferring = state == "transferring"
+                    && snapshot["state"] == "running"
+                    && snapshot["progress_percent"]
+                        .as_u64()
+                        .is_some_and(|value| value > 0 && value < 90);
+                if snapshot["state"] == state || transferring {
                     return Ok::<_, anyhow::Error>(snapshot);
                 }
                 tokio::time::sleep(Duration::from_millis(5)).await;
@@ -158,38 +216,58 @@ pub(in crate::runtime_http::v1::operations) async fn check_worker(
     let snapshot = wait(failed, "failed").await?;
     assert_eq!(snapshot["error"]["code"], "model_mirror_fallback_exhausted");
     assert!(!corrupt.path.exists());
-    let mut held = resource(root.join("held.onnx"), bytes);
-    held.download = held
+    let mut slow = resource(root.join("slow.onnx"), &[7; 8192]);
+    slow.download = slow
         .download
-        .map(|s| s.replace("weights.onnx", "held.onnx"));
-    let cancelled = accept(vec![held.clone()]).await?;
-    wait(cancelled.clone(), "running").await?;
-    assert_eq!(
-        send(
-            app,
-            "POST",
-            "/v1/models/switch",
-            Some(TOKEN),
-            Some(json!({"model_id":"m3"}))
-        )
-        .await?
-        .status(),
-        StatusCode::CONFLICT
-    );
-    assert_eq!(
-        send(app, "DELETE", &cancelled, Some(TOKEN), None)
+        .map(|s| s.replace("weights.onnx", "slow.onnx"));
+    let mut previous = None;
+    for _ in 0..2 {
+        RELEASE_BODY.store(false, Ordering::Release);
+        let cancelled = accept(vec![slow.clone()]).await?;
+        wait(cancelled.clone(), "transferring").await?;
+        assert_eq!(
+            send(
+                app,
+                "POST",
+                "/v1/models/switch",
+                Some(TOKEN),
+                Some(json!({"model_id":"m3"}))
+            )
             .await?
             .status(),
-        StatusCode::ACCEPTED
-    );
-    wait(cancelled, "cancelled").await?;
-    assert!(!held.path.exists());
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while crate::rpc_serve::model_switch_running() {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-    })
-    .await?;
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            send(app, "DELETE", &cancelled, None, None).await?.status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            send(app, "DELETE", &cancelled, Some(TOKEN), None)
+                .await?
+                .status(),
+            StatusCode::ACCEPTED
+        );
+        RELEASE_BODY.store(true, Ordering::Release);
+        wait(cancelled.clone(), "cancelled").await?;
+        assert!(!slow.path.exists());
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while crate::rpc_serve::model_switch_running() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await?;
+        assert_ne!(previous.as_ref(), Some(&cancelled));
+        previous = Some(cancelled);
+        let mut remaining = std::fs::read_dir(&root)?
+            .map(|entry| entry.map(|file| file.path()))
+            .collect::<io::Result<Vec<_>>>()?;
+        remaining.sort();
+        assert_eq!(remaining, [gated.path.clone(), target.path.clone()]);
+        assert_eq!(std::fs::read(&target.path)?, bytes);
+        assert_eq!(std::fs::read(&gated.path)?, bytes);
+    }
+    let mut held = resource(root.join("held.onnx"), bytes);
+    held.download = held.download.map(|s| s.replace("weights.onnx", "held.onnx"));
     let revoked = accept(vec![held.clone()]).await?;
     wait(revoked, "running").await?;
     respire_app::auth::clear_runtime_session()?;

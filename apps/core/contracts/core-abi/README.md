@@ -367,11 +367,13 @@ not reproduce Core grouping rules.
 Final scores are user-facing results. Intermediate vectors, request plans and
 execution traces are not returned by these operations.
 
-SDK builds require Rust 1.95.0 with the exact release/commit recorded in manifest,
-panic=unwind, LTO disabled, and matching target/CRT. Windows uses the dynamic CRT.
-Cargo validates the pinned manifest and every file SHA-256 and stages runtime DLLs
-beside executables/tests. Distributions must also include runtime libraries and
-third-party notices (`stage-core-runtime.mjs`); an exe alone is incomplete on Windows.
+The historical private SDK used a pinned manifest to verify and stage prebuilt
+libraries. Runtime now links the in-tree `respire_core_ffi` crate through the
+Cargo path dependency in `apps/runtime/crates/core-sdk/Cargo.toml`. The Runtime
+release profile uses `panic = "unwind"` so the FFI boundary can catch unwinding
+panics. For distribution, `apps/runtime/scripts/stage-runtime-release.mjs`
+packages the target's required runtime libraries, Core license and third-party
+notices with the executable.
 
 Association contract: `related_business` accepts authorized snapshots, query,
 final hit IDs and local pair evidence. It returns `related` (ID/title/source/type)
