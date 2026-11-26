@@ -1,4 +1,5 @@
 use super::{Denied, OwnerBinding, OwnerLeaseRegistry};
+use respire_spawn::owner_credential::backup_proof::{self, BackupRestoreClaim};
 use respire_spawn::owner_credential::model_proof::{self, ModelAction, ModelClaim};
 
 impl OwnerLeaseRegistry {
@@ -26,6 +27,38 @@ impl OwnerLeaseRegistry {
         };
         let verified =
             model_proof::verify(record, claim, proof, now_ms).ok_or(Denied::UnusableCredential)?;
+        if !self.replay.consume(verified.nonce, verified.expires_at_ms) {
+            return Err(Denied::UnusableCredential);
+        }
+        Ok(())
+    }
+
+    /// Separate one-shot proof redemption for confirming a staged local backup restore.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::runtime_http::v1) fn consume_private_backup(
+        &mut self,
+        live: Option<&OwnerBinding>,
+        record: &[u8; 48],
+        operation_id: [u8; 16],
+        archive_sha256: [u8; 32],
+        target_sha256: [u8; 32],
+        proof: &str,
+        now_ms: u64,
+    ) -> Result<(), Denied> {
+        self.check_live(live)?;
+        let live = live.ok_or(Denied::NoOwner)?;
+        if !self.replay.observe(now_ms) {
+            return Err(Denied::UnusableCredential);
+        }
+        let claim = BackupRestoreClaim {
+            operation_id,
+            archive_sha256,
+            target_sha256,
+            instance: *live.instance.as_bytes(),
+            generation: live.generation,
+        };
+        let verified =
+            backup_proof::verify(record, claim, proof, now_ms).ok_or(Denied::UnusableCredential)?;
         if !self.replay.consume(verified.nonce, verified.expires_at_ms) {
             return Err(Denied::UnusableCredential);
         }

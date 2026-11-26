@@ -145,7 +145,28 @@ where
     T: Send + 'static,
     F: for<'a> FnOnce(&LibraryContext<'a>) -> V1Result<T> + Send + 'static,
 {
-    let deadline = Instant::now() + REQUEST_WAIT;
+    submit_with_wait(scope, access, REQUEST_WAIT, run).await
+}
+
+pub(super) async fn submit_backup_restore<T, F>(scope: RestScope, run: F) -> V1Result<T>
+where
+    T: Send + 'static,
+    F: for<'a> FnOnce(&LibraryContext<'a>) -> V1Result<T> + Send + 'static,
+{
+    submit_with_wait(scope, Access::Write, Duration::from_secs(60), run).await
+}
+
+async fn submit_with_wait<T, F>(
+    scope: RestScope,
+    access: Access,
+    wait: Duration,
+    run: F,
+) -> V1Result<T>
+where
+    T: Send + 'static,
+    F: for<'a> FnOnce(&LibraryContext<'a>) -> V1Result<T> + Send + 'static,
+{
+    let deadline = Instant::now() + wait;
     let cancelled = Arc::new(AtomicBool::new(false));
     let _cancel = CancelOnDrop(Arc::clone(&cancelled));
     let receiver = enqueue(scope, access, deadline, cancelled, run)?;

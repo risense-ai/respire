@@ -1,4 +1,1 @@
-[
-  "GET /v1/backups/export exportBackup",
-  "POST /v1/backups/import importBackup"
-]
+[]

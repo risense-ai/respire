@@ -85,6 +85,8 @@ pub(crate) struct OwnerDispatch {
     model_receiver: mpsc::Receiver<model_work::Work>,
     last_refresh: Option<Instant>,
     switching: Option<super::operations::model_switch::RunningSwitch>,
+    startup_swept: bool,
+    swept_profiles: std::collections::BTreeSet<std::path::PathBuf>,
 }
 
 pub(crate) fn start_dispatch() -> Option<OwnerDispatch> {
@@ -96,18 +98,30 @@ pub(crate) fn start_dispatch() -> Option<OwnerDispatch> {
         model_receiver: model_work::start()?,
         last_refresh: None,
         switching: None,
+        startup_swept: false,
+        swept_profiles: std::collections::BTreeSet::new(),
     })
 }
 
 impl OwnerDispatch {
     pub(crate) fn tick(&mut self, store: Option<&LocalStore>, ownership: &LibraryLock) -> Option<SoftLogout> {
+        if !self.startup_swept {
+            self.startup_swept = true;
+            if let Ok(dir) = respire_app::service::data_dir().canonicalize() {
+                if ownership.protects(&dir).unwrap_or(false) {
+                    super::operations::backup_import::sweep_orphaned_stages(&dir, ownership);
+                    self.swept_profiles.insert(dir);
+                }
+            }
+        }
         let now = Instant::now();
         if self
             .last_refresh
             .is_none_or(|last| now.duration_since(last) >= REFRESH_INTERVAL)
         {
             self.last_refresh = Some(now);
-            refresh(store.is_some(), ownership);
+            refresh(store.is_some(), ownership, &mut self.swept_profiles);
+            super::operations::backup_import::reap_stale();
         }
         match self.receiver.try_recv() {
             Ok(DispatchWork::SoftLogout(work)) => {
@@ -147,7 +161,11 @@ pub(crate) fn revoke() {
     }
 }
 
-fn refresh(ready: bool, ownership: &LibraryLock) {
+fn refresh(
+    ready: bool,
+    ownership: &LibraryLock,
+    swept_profiles: &mut std::collections::BTreeSet<std::path::PathBuf>,
+) {
     if !ready
         || !crate::rpc_serve::store_ready()
         || crate::rpc_worker::STOPPING.load(std::sync::atomic::Ordering::Acquire)
@@ -160,6 +178,9 @@ fn refresh(ready: bool, ownership: &LibraryLock) {
             if !ownership.protects(profile).unwrap_or(false) {
                 revoke();
                 return;
+            }
+            if swept_profiles.insert(profile.to_owned()) {
+                super::operations::backup_import::sweep_orphaned_stages(profile, ownership);
             }
             let live = binding(account, profile, instance, generation, vault_epoch);
             let base = crate::rpc_worker::runtime_dir();
@@ -425,4 +446,33 @@ pub(super) async fn host_logout(request: axum::extract::Request, peer: std::net:
         .map_err(|_| busy())?.map_err(|_| busy())?;
     use axum::response::IntoResponse;
     Ok(([(header::CONTENT_TYPE, "application/json"), (header::CACHE_CONTROL, "no-store")], r#"{"status":"completed"}"#).into_response())
+}
+
+/// Require a one-shot native owner proof bound to the operation UUID, archive digest, and target library.
+pub(super) async fn authorize_backup_restore(
+    operation_id: uuid::Uuid,
+    archive_sha256: [u8; 32],
+    target_sha256: [u8; 32],
+    proof: String,
+) -> V1Result<OwnerBinding> {
+    bounded_blocking(move || {
+        with_active(|owner, live| {
+            if !owner.matches(live) {
+                return Err(unauthorized());
+            }
+            let now = wall_ms().ok_or_else(unavailable)?;
+            owner
+                .consume_backup_restore(
+                    live,
+                    *operation_id.as_bytes(),
+                    archive_sha256,
+                    target_sha256,
+                    &proof,
+                    now,
+                )
+                .map_err(|_| unauthorized())?;
+            Ok(live.clone())
+        })
+    })
+    .await
 }

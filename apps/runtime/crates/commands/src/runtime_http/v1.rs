@@ -11,7 +11,6 @@ use std::net::SocketAddr;
 
 mod compatibility;
 mod diary;
-#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod backup_export;
 mod host_config;
 mod host_config_patch;
@@ -24,6 +23,7 @@ mod owner_operations;
 mod owner_request;
 mod owner_routes;
 mod owner_scope;
+mod private_backup_route;
 mod private_model_install;
 mod private_model_route;
 mod problem;
@@ -63,11 +63,24 @@ pub(super) fn router(bound: SocketAddr) -> Router {
                 owner_control::host_logout(request, peer, bound)))
         .merge(private_model_route::routes(bound))
         .merge(private_model_install::routes(bound))
+        .merge(private_backup_route::routes(bound))
         .merge(reads::routes(bound))
         .merge(host_config::routes(bound))
         .merge(recall::routes(bound))
         .merge(diary::routes(bound))
         .merge(writes::routes(bound))
+        .merge(bind(
+            Router::new(),
+            RouteSpec::new(Verb::Get, "/v1/backups/export", "exportBackup"),
+            move |ConnectInfo(crate::network::Peer(peer)): ConnectInfo<crate::network::Peer>,
+                  request: Request| backup_export::get(bound, peer, request),
+        ))
+        .merge(bind(
+            Router::new(),
+            RouteSpec::new(Verb::Post, "/v1/backups/import", "importBackup"),
+            move |ConnectInfo(crate::network::Peer(peer)): ConnectInfo<crate::network::Peer>,
+                  request: Request| operations::backup_import::enqueue(bound, peer, request),
+        ))
         .merge(operations::organize_split::routes(bound))
         .merge(operations::routes(bound));
     #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
@@ -115,7 +128,12 @@ fn health_capabilities(
     }
     let mut flags = Vec::new();
     if dispatch_and_scope_live {
-        flags.extend(["sse.operations.v1", "model.catalog.v2"]);
+        flags.extend([
+            "openapi.v1",
+            "backups.v1",
+            "sse.operations.v1",
+            "model.catalog.v2",
+        ]);
     }
     if scoped_auth {
         flags.push("auth.handshake.v1");
