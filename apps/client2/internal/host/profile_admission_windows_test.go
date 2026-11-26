@@ -108,3 +108,31 @@ func TestNewRefusesJunctionAsProfileLeaf(t *testing.T) {
 		t.Fatal("junction itself was accepted as the configured profile")
 	}
 }
+
+func TestRequestLedgerRefusesReplacedClientDirectory(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("RSRS_DATA_DIR", syntheticJunctionProfile(t, root))
+	m, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(m.Root, filepath.Join(m.DataRoot, "original-client2")); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(root, "physical", "replacement")
+	system := os.Getenv("SystemRoot")
+	cmd := exec.Command(filepath.Join(system, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+		"-NoProfile", "-NonInteractive", "-Command",
+		"$ErrorActionPreference='Stop'; New-Item -ItemType Junction -Path $env:RESPIRE_LINK -Target $env:RESPIRE_TARGET | Out-Null")
+	cmd.Env = []string{"SystemRoot=" + system, "WINDIR=" + system, "RESPIRE_LINK=" + m.Root, "RESPIRE_TARGET=" + target}
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("create synthetic nested junction: %v: %s", err, out)
+	}
+	t.Cleanup(func() { os.Remove(m.Root) })
+	if err := m.persistOperationsLocked(); !errors.Is(err, errProfileScope) {
+		t.Fatalf("ledger accepted replaced client directory: %v", err)
+	}
+	if entries, err := os.ReadDir(target); err != nil || len(entries) != 0 {
+		t.Fatalf("redirected ledger target changed: %v, %v", entries, err)
+	}
+}

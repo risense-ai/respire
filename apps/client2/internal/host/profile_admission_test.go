@@ -67,7 +67,7 @@ func checkReplacedProfileControls(t *testing.T, m *Manager) {
 
 func TestReplacedProfileStopsServingAndModelControls(t *testing.T) {
 	root := t.TempDir()
-	m := &Manager{DataRoot: root, profile: profileAdmission{root: root, reopen: func() (func(), error) {
+	m := &Manager{DataRoot: root, Root: filepath.Join(root, "client2"), profile: profileAdmission{root: root, reopen: func() (func(), error) {
 		return nil, errProfileScope
 	}}}
 	checkReplacedProfileControls(t, m)

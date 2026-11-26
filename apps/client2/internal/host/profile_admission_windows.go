@@ -2,6 +2,7 @@ package host
 
 import (
 	"encoding/binary"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -38,20 +39,71 @@ func admitProfile(root, configured string) (profileAdmission, func(), error) {
 		return profileAdmission{}, nil, err
 	}
 	expected := pins.root
+	clientDir := filepath.Join(expected, "client2")
+	if err := os.Mkdir(clientDir, 0700); err != nil && !errors.Is(err, os.ErrExist) {
+		identity.Close()
+		pins.close()
+		return profileAdmission{}, nil, err
+	}
+	if err := pins.pinClientDirectory(clientDir); err != nil {
+		identity.Close()
+		pins.close()
+		return profileAdmission{}, nil, err
+	}
+	clientID, err := openProfileDirectory(clientDir, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE)
+	if err != nil {
+		identity.Close()
+		pins.close()
+		return profileAdmission{}, nil, err
+	}
 	reopen := func() (func(), error) {
 		now, err := pinConfiguredProfile(configured)
 		if err != nil {
 			return nil, err
 		}
-		before, e1 := identity.Stat()
-		after, e2 := now.files[len(now.files)-1].Stat()
-		if e1 != nil || e2 != nil || !samePath(now.root, expected) || !os.SameFile(before, after) {
+		if !samePath(now.root, expected) || !sameProfileFile(identity, now.files[len(now.files)-1]) {
+			now.close()
+			return nil, errProfileScope
+		}
+		if err := now.pinClientDirectory(clientDir); err != nil {
+			now.close()
+			return nil, err
+		}
+		if !sameProfileFile(clientID, now.files[len(now.files)-1]) {
 			now.close()
 			return nil, errProfileScope
 		}
 		return now.close, nil
 	}
 	return profileAdmission{root: expected, reopen: reopen}, pins.close, nil
+}
+
+func sameProfileFile(original, current *os.File) bool {
+	before, err := original.Stat()
+	if err != nil {
+		return false
+	}
+	after, err := current.Stat()
+	return err == nil && os.SameFile(before, after)
+}
+
+// Installer preferences and the operation ledger live below this directory.
+// The caller already holds its parent. Pin the child without following it.
+func (p *profilePins) pinClientDirectory(path string) error {
+	file, err := openProfileDirectory(path, windows.FILE_SHARE_READ)
+	if err != nil {
+		return err
+	}
+	p.files = append(p.files, file)
+	h := windows.Handle(file.Fd())
+	var info windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(h, &info); err != nil {
+		return err
+	}
+	if info.FileAttributes & (windows.FILE_ATTRIBUTE_REPARSE_POINT|windows.FILE_ATTRIBUTE_DIRECTORY) != windows.FILE_ATTRIBUTE_DIRECTORY {
+		return errProfileScope
+	}
+	return verifyProfileDirectory(h, true)
 }
 
 func plainProfilePath(path string) bool {

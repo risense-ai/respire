@@ -1,6 +1,9 @@
 package host
 
-import "errors"
+import (
+	"errors"
+	"path/filepath"
+)
 
 var errProfileScope = errors.New("configured profile has no trusted local directory identity")
 
@@ -15,7 +18,7 @@ func (m *Manager) holdProfile() (func(), error) {
 	if m.profile.reopen == nil {
 		return func() {}, nil
 	}
-	if !samePath(m.DataRoot, m.profile.root) {
+	if !samePath(m.DataRoot, m.profile.root) || !samePath(m.Root, filepath.Join(m.profile.root, "client2")) {
 		return nil, errProfileScope
 	}
 	return m.profile.reopen()
