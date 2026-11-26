@@ -134,7 +134,7 @@ async function makeFixture(t, tag) {
 }
 
 test("validates all full component inventories without publication", async t => {
-  for (const [tag, github, npm] of [["runtime-v2.5.0-dev.1", 24, 0], ["cli-v2.5.0", 16, 9], ["client2-v2.5.0", 14, 0]]) {
+  for (const [tag, github, npm] of [["runtime-v2.5.0-dev.1", 18, 0], ["cli-v2.5.0", 16, 9], ["client2-v2.5.0", 14, 0]]) {
     const {input} = await makeFixture(t, tag);
     const result = await verifyLocalRelease(input);
     assert.equal(result.mode, "dry-run");

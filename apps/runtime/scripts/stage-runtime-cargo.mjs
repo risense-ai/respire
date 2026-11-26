@@ -50,7 +50,7 @@ async function sha256(path) {
   return hash.digest('hex');
 }
 
-export async function stageRuntimeCargo({root, tag, source, target, targetDir, cargoLog, outputParent}) {
+export async function stageRuntimeCargo({root, tag, source, target, targetDir, cargoLog, outputParent, intelProvider}) {
   assert(parseComponentTag(tag).component === 'runtime' &&
     expectedReleaseAssets(tag).github.includes(`rsrs-runtime-${target}.tar.gz`), 'Unknown Runtime target');
   outputParent = await canonical(outputParent);
@@ -79,7 +79,7 @@ export async function stageRuntimeCargo({root, tag, source, target, targetDir, c
       await copyFile(input, copy, constants.COPYFILE_EXCL);
       assert.equal(await sha256(copy), expected, 'Cargo build bytes differ from the original checksum');
     }
-    return await stageRuntime({root, tag, source, target, build, buildReceipt, outputParent});
+    return await stageRuntime({root, tag, source, target, build, buildReceipt, outputParent, intelProvider});
   } finally {
     assert.equal(dirname(await canonical(scratch)), outputParent, 'Refusing cleanup outside the owned output parent');
     await rm(scratch, {recursive: true});
@@ -91,6 +91,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   assert(args.length === 6,
     'Usage: stage-runtime-cargo.mjs <tag> <source-sha> <target> <target-dir> <cargo-json-log> <output-parent>');
   const [tag, source, target, targetDir, cargoLog, outputParent] = args;
+  assert.notEqual(target, "x86_64-apple-darwin", "Intel staging requires the verified provider from the native dry-run producer");
   const root = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
   const git = (...argv) => execFileSync('git', argv, {cwd: root, encoding: 'utf8'}).trim();
   assert.equal(git('rev-parse', 'HEAD'), source, 'Source SHA does not match checkout');

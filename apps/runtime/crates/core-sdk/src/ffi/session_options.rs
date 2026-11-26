@@ -23,6 +23,9 @@ use super::*;
 
         pub(crate) fn configure(&mut self, options: usize, api: usize, environment: usize, device: usize) -> Result<Option<String>> {
             anyhow::ensure!(options != 0 && api != 0 && environment != 0, "invalid borrowed probe session handles");
+            #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+            let provider = self.0.native.as_ref().map(|native| native.provider.clone());
+            #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
             let provider = if let Some(native) = &self.0.native {
                 Some(native.provider.clone())
             } else if device != 0 {
@@ -95,8 +98,13 @@ use super::*;
                 !options.is_null() && !api.is_null(),
                 "invalid Core native session options"
             );
+            // Paired Core selects CPU/CoreML before this callback on Intel macOS.
+            #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+            anyhow::ensure!(device.is_null(), "ORT API 20 does not support selected EP device handles");
             #[cfg(test)]
             fail_options_for_test()?;
+            #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+            let _ = environment;
             let api = unsafe { &*api.cast::<ort_sys::OrtApi>() };
             if let Some(native) = &context.native {
                 if native.provider == "CPUExecutionProvider" {
@@ -177,7 +185,9 @@ use super::*;
                         anyhow::bail!("configure custom host provider: {message}");
                     }
                 }
-            } else if !device.is_null() {
+            }
+            #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
+            if context.native.is_none() && !device.is_null() {
                 anyhow::ensure!(!environment.is_null(), "invalid Core native environment");
                 let name = unsafe { (api.EpDevice_EpName)(device.cast()) };
                 anyhow::ensure!(!name.is_null(), "missing Core selected provider name");
@@ -332,4 +342,40 @@ use super::*;
                 7
             }
         }
+    }
+
+    #[cfg(all(test, target_os = "macos", target_arch = "x86_64"))]
+    #[test]
+    fn intel_api20_session_options_device_contract() -> Result<()> {
+        // SAFETY: obtain a live API-20 table and allocate options from that same table.
+        let base = unsafe { ort_sys::OrtGetApiBase() };
+        anyhow::ensure!(!base.is_null(), "missing ORT API base");
+        let api = unsafe { ((*base).GetApi)(20) };
+        anyhow::ensure!(!api.is_null(), "missing ORT API 20");
+        let mut options = ptr::null_mut();
+        let status = unsafe { ((*api).CreateSessionOptions)(&mut options) };
+        if !status.0.is_null() {
+            unsafe { ((*api).ReleaseStatus)(status.0) };
+            anyhow::bail!("cannot create native session options");
+        }
+        // The Intel callback never accesses the environment or device handle.
+        let sentinel = ptr::dangling::<u8>() as usize;
+        let result = (|| -> Result<()> {
+            for native in [None, Some(crate::profiles::NativeProfile {
+                provider: "CPUExecutionProvider".to_owned(),
+                device_id: Some("0".to_owned()),
+                provider_options: [("enable_mem_pattern".to_owned(), "false".to_owned())].into(),
+            })] {
+                let expected = native.as_ref().map(|profile| profile.provider.clone());
+                let mut probe = ProbeOptions::new(native);
+                probe.0.profiling = None;
+                assert_eq!(probe.configure(options as usize, api as usize, sentinel, 0)?, expected);
+                let error = probe.configure(options as usize, api as usize, sentinel, sentinel).unwrap_err();
+                assert_eq!(error.to_string(), "ORT API 20 does not support selected EP device handles");
+            }
+            Ok(())
+        })();
+        // SAFETY: the live options were allocated above and the callbacks only borrowed them.
+        unsafe { ((*api).ReleaseSessionOptions)(options) };
+        result
     }
