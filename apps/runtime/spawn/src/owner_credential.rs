@@ -108,6 +108,8 @@ pub mod proof;
 pub use windows::migration_copy::MigrationCopy;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use unix::migration_copy::MigrationCopy;
+#[cfg(target_os = "linux")]
+pub use unix::migration_copy::MigrationSource;
 
 #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 fn validate_migration_leaf(name: &str) -> io::Result<()> {

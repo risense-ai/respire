@@ -23,6 +23,10 @@ pub use feedback::FeedbackCounts;
 mod schema_version;
 #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 mod migration_backup;
+#[cfg(target_os = "linux")]
+mod backup_export_source;
+#[cfg(target_os = "linux")]
+pub use backup_export_source::{BackupExportCopy, BackupExportSource};
 mod startup_schema;
 mod witness;
 pub use witness::{WitnessReport,witness_checkpoint_file,register_witness_functions};
