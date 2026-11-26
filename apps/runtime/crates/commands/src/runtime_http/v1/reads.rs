@@ -326,7 +326,7 @@ impl Call {
             }),
             Self::SpaceMembers(id) => {
                 check_space(ctx, Some(id))?;
-                respire_app::login_transaction::list_space_members(&ctx.scope.canonical_profile)
+                respire_app::login_transaction::owned_members(&ctx.scope.canonical_profile, ctx.ownership, &ctx.scope.account)
                     .map_err(|_| unavailable())
             }
             Self::ModelCatalog => super::models::catalog(ctx.store)

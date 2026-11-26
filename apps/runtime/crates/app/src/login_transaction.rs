@@ -9,17 +9,19 @@ use respire_protocol::{HostAuthIdentity, HostAuthOutcome, HostAuthResult};
 use respire_protocol::host_control::{HostAuthAccountOutcome, HostAuthAccountResult,
     HostAuthAuthorization, HostAuthLoginParams, HostAuthRegisterParams};
 
+mod pending_login;
+pub use pending_login::{request_login, LoginAdmission, LoginIntent};
 mod cold_keygen;
 mod login;
 pub use login::verify_login_merge_offer;
 mod identity;
-pub use identity::{control_identity_write, control_identity_write_result};
+pub use identity::{control_identity_write, control_identity_write_result, serving_soft_logout};
 #[cfg(test)]
 mod keygen_existing_protocol;
 mod keys;
 pub use keys::{control_key, control_key_result, control_key_rollback, control_key_complete, verify_key_receipt};
 mod space;
-pub use space::{committed_space_invite_member, control_space, list_space_members, SpaceInviteRequest, SpaceMemberView};
+pub use space::{owned_members, pending_invite, committed_space_invite_member, control_space, list_space_members, SpaceInviteRequest, SpaceMemberView};
 mod profile;
 pub use profile::control_profile_remove;
 

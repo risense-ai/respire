@@ -401,26 +401,36 @@ impl std::error::Error for SourcesExhausted {}
 fn response(agent: &ureq::Agent, url: &str, check: &impl Fn() -> Result<()>) -> Result<ureq::Response> {
     let mut next = url::Url::parse(url)?;
     let mut seen = std::collections::BTreeSet::new();
+    let loopback = super::super::host_config::e2e_loopback_origin().map_err(|_| SourceFailure)?;
     loop {
         check()?;
-        let host = next.host_str().context("model source host missing")?;
-        anyhow::ensure!(
-            next.scheme() == "https"
-                && next.username().is_empty()
-                && next.password().is_none()
-                && next.port().is_none()
-                && matches!(
-                    host,
-                    "hf-mirror.com"
-                        | "hf-mirror.net"
-                        | "huggingface.co"
-                        | "cdn-lfs.huggingface.co"
-                        | "cdn-lfs.hf.co"
-                        | "cdn-lfs-us-1.hf.co"
-                        | "cas-bridge.xethub.hf.co"
-                ),
-            SourceFailure
-        );
+        if let Some(expected_origin) = loopback.as_deref() {
+            anyhow::ensure!(
+                next.username().is_empty()
+                    && next.password().is_none()
+                    && next.origin().ascii_serialization() == expected_origin,
+                SourceFailure
+            );
+        } else {
+            let host = next.host_str().context("model source host missing")?;
+            anyhow::ensure!(
+                next.scheme() == "https"
+                    && next.username().is_empty()
+                    && next.password().is_none()
+                    && next.port().is_none()
+                    && matches!(
+                        host,
+                        "hf-mirror.com"
+                            | "hf-mirror.net"
+                            | "huggingface.co"
+                            | "cdn-lfs.huggingface.co"
+                            | "cdn-lfs.hf.co"
+                            | "cdn-lfs-us-1.hf.co"
+                            | "cas-bridge.xethub.hf.co"
+                    ),
+                SourceFailure
+            );
+        }
         anyhow::ensure!(seen.insert(next.to_string()), SourceFailure);
         let reply = agent
             .get(next.as_str())

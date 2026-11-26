@@ -21,6 +21,26 @@ impl RuntimeLibrary<'_> {
     pub fn seal_backup_manifest_header(&self, manifest: &Manifest) -> Result<Vec<u8>> {
         backup_archive::encode_header(self.0, self.1, manifest)
     }
+
+    /// Copy, strip local grants from, and seal one selected database into `stage_path`.
+    pub fn seal_portable_backup_export(
+        &self,
+        live_database: &std::path::Path,
+        stage_path: &std::path::Path,
+    ) -> Result<Vec<u8>> {
+        backup_archive::seal_database_header(self.0, self.1, live_database, stage_path)
+    }
+
+    /// Re-verify a staged archive against the active Vault and atomically apply it to `store`.
+    pub fn restore_staged_backup(
+        &self,
+        live_database: &std::path::Path,
+        staged: &std::path::Path,
+        manifest: &Manifest,
+        store: &crate::transport::local::LocalStore,
+    ) -> Result<crate::transport::local::RestoreOutcome> {
+        backup_archive::restore_verified_stage(self.0, self.1, live_database, staged, manifest, store)
+    }
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]

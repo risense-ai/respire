@@ -429,6 +429,22 @@ jobs:
             )
           fi
 
+          (
+            export RSRS_CORE_TEST_MODE=1
+            if [ "$RUNNER_OS" = macOS ]; then
+              TMPDIR="$(cd -- "$RUNNER_TEMP" && pwd -P)"
+              export TMPDIR
+            fi
+            run_native_case respire_spawn owner_credential::backup_proof::tests::verifies_exact_claim_and_rejects_mismatches
+            if [ "$RUNNER_OS" = Windows ]; then
+              run_native_case respire_spawn owner_credential::windows::restore_stage::tests::private_restore_stage_enforces_owner_only_acl_under_inherited_parent
+            fi
+            run_native_case respire_storage transport::local::migration_backup::tests::restore_separates_pre_commit_failures_from_post_commit_checks
+            run_native_case respire_commands runtime_http::v1::operations::backup_import::custody::tests::sweep_orphaned_stages_removes_crashed_stages_only
+            run_native_case respire_commands runtime_http::v1::operations::backup_import::custody::tests::staged_import_enforces_owner_only_permissions
+            run_native_case respire_commands runtime_http::v1::backup_export::tests::scoped_archive_over_loopback
+          )
+
       - name: Verify the native macOS device-local catalog and SQLite migration fence
         if: runner.os == 'macOS'
         shell: bash
@@ -514,6 +530,17 @@ jobs:
             route_gap_base=$(git rev-parse HEAD^)
           fi
           RSRS_CORE_TEST_MODE=1 node apps/runtime/scripts/test-v1-route-parity.mjs --reviewed-gap-ratchet --base "$route_gap_base"
+          cargo test --manifest-path apps/runtime/Cargo.toml --locked --target "$TARGET" -p respire_commands --features e2e-loopback-mirror --lib runtime_http::v1::operations::model_download -- --test-threads=1
+          node --test apps/runtime/scripts/stage-runtime-release.test.mjs
+          if [ "$TARGET" = "x86_64-unknown-linux-gnu" ]; then
+            cargo build --manifest-path apps/runtime/Cargo.toml --locked --release --target "$TARGET" --target-dir "$RUNNER_TEMP/e2e-stage-normal" --message-format=json -p respire_runtime --bin rsrs-runtime > "$RUNNER_TEMP/e2e-normal.jsonl"
+            cargo build --manifest-path apps/runtime/Cargo.toml --locked --release --target "$TARGET" --target-dir "$RUNNER_TEMP/e2e-stage-feature" --message-format=json -p respire_runtime --features e2e-loopback-mirror --bin rsrs-runtime > "$RUNNER_TEMP/e2e-feature.jsonl"
+            norm_ver="$("$RUNNER_TEMP/e2e-stage-normal/$TARGET/release/rsrs-runtime" --version)"
+            feat_ver="$("$RUNNER_TEMP/e2e-stage-feature/$TARGET/release/rsrs-runtime" --version)"
+            case "$norm_ver" in *+e2e-loopback-mirror*) exit 1 ;; esac
+            case "$feat_ver" in *+e2e-loopback-mirror*) ;; *) exit 1 ;; esac
+            node apps/runtime/scripts/test-e2e-loopback-stage-binary.mjs . "$TARGET" "$RUNNER_TEMP/e2e-stage-normal" "$RUNNER_TEMP/e2e-normal.jsonl" "$RUNNER_TEMP/e2e-stage-feature" "$RUNNER_TEMP/e2e-feature.jsonl" "$RUNNER_TEMP/e2e-stage-feature/$TARGET/release/rsrs-runtime"
+          fi
 
   cli-ci:
     name: cli-ci
