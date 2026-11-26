@@ -4,7 +4,7 @@ import "respire-client2/internal/i18n"
 
 import (
 	"context"
-	"embed"
+	_ "embed"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -24,9 +24,6 @@ import (
 )
 
 var version string
-
-//go:embed frontend/*
-var frontend embed.FS
 
 //go:embed build/icon.png
 var icon []byte
