@@ -3,10 +3,10 @@ use axum::{http::StatusCode, response::IntoResponse};
 use serde_json::{json, Value};
 use std::cell::Cell;
 
-fn scope() -> RestScope {
+fn scope() -> anyhow::Result<RestScope> {
     let mut scope = RestScope::receipt_fixture();
-    scope.canonical_profile = std::env::current_dir().unwrap().join("synthetic-owner-profile");
-    scope
+    scope.canonical_profile = std::env::current_dir()?.join("synthetic-owner-profile");
+    Ok(scope)
 }
 
 const TARGET: [u8; 32] = [7; 32];
@@ -29,7 +29,7 @@ fn checked<T>(result: V1Result<T>) -> anyhow::Result<T> {
 
 #[test]
 fn requires_fresh_scope_but_projects_terminal_receipt_across_restart() -> anyhow::Result<()> {
-    let owner = scope();
+    let owner = scope()?;
     let mut restarted = owner.clone();
     restarted.instance = Uuid::new_v4();
     restarted.generation += 1;
@@ -63,7 +63,7 @@ fn requires_fresh_scope_but_projects_terminal_receipt_across_restart() -> anyhow
 
 #[test]
 fn refuses_cross_owner_profile_or_operation_without_leaking_receipt() -> anyhow::Result<()> {
-    let owner = scope();
+    let owner = scope()?;
     let id = Uuid::new_v4();
     let archived = record(&owner, id, "completed");
     let mut other_owner = owner.clone();
@@ -78,8 +78,8 @@ fn refuses_cross_owner_profile_or_operation_without_leaking_receipt() -> anyhow:
 }
 
 #[test]
-fn fails_closed_before_staging_or_after_mid_read_revocation() {
-    let owner = scope();
+fn fails_closed_before_staging_or_after_mid_read_revocation() -> anyhow::Result<()> {
+    let owner = scope()?;
     let id = Uuid::new_v4();
     let read = Cell::new(false);
     let result = lookup_terminal(&owner, id, TARGET, || Err(transport::unauthorized()), |_| {
@@ -96,23 +96,25 @@ fn fails_closed_before_staging_or_after_mid_read_revocation() {
         reader(&record(&owner, id, "completed"))
     });
     assert_eq!(result.err().map(|e| e.into_response().status()), Some(StatusCode::UNAUTHORIZED));
+    Ok(())
 }
 
 #[test]
-fn rejects_legacy_pending_malformed_and_oversized_records() {
-    let owner = scope();
+fn rejects_legacy_pending_malformed_and_oversized_records() -> anyhow::Result<()> {
+    let owner = scope()?;
     let id = Uuid::new_v4();
     let mut legacy = record(&owner, id, "completed");
     if let Some(fields) = legacy.as_object_mut() {
         fields.remove("schema_version");
     }
     for bytes in [
-        serde_json::to_vec(&legacy).unwrap(),
-        serde_json::to_vec(&record(&owner, id, "installed")).unwrap(),
+        serde_json::to_vec(&legacy)?,
+        serde_json::to_vec(&record(&owner, id, "installed"))?,
         b"{".to_vec(),
         vec![b' '; LIMIT + 1],
     ] {
         let result = lookup_terminal(&owner, id, TARGET, || Ok(()), |_| Ok(Some(bytes)));
         assert_eq!(result.err().map(|e| e.into_response().status()), Some(StatusCode::SERVICE_UNAVAILABLE));
     }
+    Ok(())
 }
