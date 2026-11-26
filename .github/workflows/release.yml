@@ -1,12 +1,14 @@
 name: Component native release dry run
 
 on:
+  push:
+    tags: ['runtime-v*', 'cli-v*', 'client2-v*']
   workflow_dispatch:
   pull_request:
     branches: [main]
     types: [opened, reopened, synchronize, labeled]
     paths:
-      - '.github/workflows/runtime-release-dry-run.yml'
+      - '.github/workflows/release.yml'
       - 'apps/core/**'
       - 'apps/runtime/**'
       - 'apps/cli/**'
@@ -25,6 +27,21 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  tag-plan:
+    name: Validate component tag plan
+    if: github.repository == 'risense-ai/respire' && github.event_name == 'push' && github.ref_type == 'tag' && !github.event.deleted
+    runs-on: ubuntu-22.04
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Resolve component and legacy tag offline
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          node scripts/component-release-plan.mjs tag "$GITHUB_REF_NAME"
+
   eligible:
     if: >-
       github.repository == 'risense-ai/respire' &&

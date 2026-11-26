@@ -1,9 +1,17 @@
 // The pinned referee owns every request, assertion, executable and process lifetime.
 import assert from 'node:assert/strict';
+import {channel} from 'node:diagnostics_channel';
 import {loadScenarios, runScenario} from '../../referee/test-cases/runner.mjs';
 import {withRuntime} from '../../referee/test-cases/targets.mjs';
 import {cliTarget} from '../../referee/test-cases/cli-e2e/command.mjs';
 import {prepareSwitch} from './switch-fixture.mjs';
+
+// The frozen referee reports "HTTP status mismatch" without the received status.
+channel('undici:request:headers').subscribe(({request, response}) => {
+  if (request.method === 'POST' && request.path === '/v1/models/switch') {
+    console.log('Model switch admission: expected HTTP 202, received ' + response.statusCode);
+  }
+});
 
 const [binary, cli] = process.argv.slice(2);
 const scenarios = await loadScenarios();
@@ -30,7 +38,13 @@ for (const scenario of scenarios) {
     console.log('PASS '+label);
     passed++;
   } catch (error) {
-    console.error('FAIL '+label+' — '+error.message);
+    if (error.cmd?.includes('Set-Acl')) {
+      const code = Number.isInteger(error.code) ? error.code : 'unreported';
+      const signal = ['SIGTERM','SIGKILL'].includes(error.signal) ? error.signal : 'unreported';
+      console.error('FAIL '+label+' — synthetic ACL setup expected exit 0; exit='+code+' signal='+signal+' killed='+(error.killed===true));
+    } else {
+      console.error('FAIL '+label+' — '+error.message);
+    }
   }
 }
 const failures=scenarios.length-passed;

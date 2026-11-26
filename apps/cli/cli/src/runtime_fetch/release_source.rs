@@ -1,3 +1,5 @@
+use respire::update_check::component_version_is_dev;
+
 /// The chosen repository and version travel together through metadata,
 /// archive and GitHub asset-API recovery. Only discovery can choose legacy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,32 +74,14 @@ impl ExactRuntimeRelease {
                 .as_deref()
                 .is_some_and(|date| !date.is_empty())
             && (source == RuntimeReleaseSource::Legacy
-                || component_runtime_is_dev(version) == Some(self.prerelease))
+                || component_version_is_dev(version) == Some(self.prerelease))
     }
 }
 
 const RELEASE_PAGE_LIMIT: u32 = 40;
 const RELEASE_PAGE_SIZE: usize = 100;
 
-fn component_runtime_is_dev(version: &str) -> Option<bool> {
-    let (core, suffix) = version
-        .split_once('-')
-        .map_or((version, None), |(core, suffix)| (core, Some(suffix)));
-    let canonical_number = |text: &str| {
-        text.parse::<u64>()
-            .is_ok_and(|number| number <= 9_007_199_254_740_991 && number.to_string() == text)
-    };
-    if core.split('.').count() != 3 || !core.split('.').all(canonical_number) {
-        return None;
-    }
-    match suffix {
-        None => Some(false),
-        Some(suffix) => suffix
-            .strip_prefix("dev.")
-            .filter(|number| canonical_number(number))
-            .map(|_| true),
-    }
-}
+
 fn runtime_listing_choice(
     source: RuntimeReleaseSource,
     channel: RuntimeChannel,
@@ -125,7 +109,7 @@ fn runtime_listing_choice(
             );
             if source == RuntimeReleaseSource::Monorepo {
                 anyhow::ensure!(
-                    component_runtime_is_dev(version) == Some(entry.prerelease),
+                    component_version_is_dev(version) == Some(entry.prerelease),
                     "invalid monorepo Runtime component tag or channel"
                 );
             }
@@ -178,7 +162,7 @@ fn resolve_runtime_release_with(
             if let Some(release) = exact(source, version)? {
                 anyhow::ensure!(
                     source != RuntimeReleaseSource::Monorepo
-                        || component_runtime_is_dev(version).is_some(),
+                        || component_version_is_dev(version).is_some(),
                     "invalid exact monorepo Runtime component tag"
                 );
                 anyhow::ensure!(

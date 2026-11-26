@@ -16,7 +16,10 @@
 //!    `RSRS_REGISTRY` swaps the registry (tests / mirrors).
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+mod published_channels;
+pub use published_channels::{component_version_is_dev, Choice};
 
 use anyhow::{anyhow, Result};
 
@@ -41,12 +44,11 @@ pub fn enabled() -> bool {
     )
 }
 
-fn registry() -> String {
+fn registry_override() -> Option<String> {
     respire_client_host::env::var("RSRS_REGISTRY")
         .ok()
         .map(|s| s.trim().trim_end_matches('/').to_owned())
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| DEFAULT_REGISTRY.to_owned())
 }
 
 /// Semver compare: returns true when `a > b`. Compare numeric segments
@@ -96,18 +98,19 @@ pub fn is_newer(a: &str, b: &str) -> bool {
 }
 
 /// Read cache: (last-checked timestamp, last latest version, last success).
-fn read_cache(path: &Path) -> Option<(i64, String, bool)> {
+fn read_cache(path: &Path) -> Option<(i64, String, bool, bool)> {
     let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
     Some((
         v["checked_at"].as_i64().unwrap_or(0),
         v["latest"].as_str().unwrap_or("").to_owned(),
         v["ok"].as_bool().unwrap_or(false),
+        v["exact"].as_bool().unwrap_or(false),
     ))
 }
 
-fn write_cache(path: &Path, latest: &str, ok: bool) {
+fn write_cache(path: &Path, latest: &str, ok: bool, exact: bool) {
     let now = chrono::Utc::now().timestamp();
-    let v = serde_json::json!({ "checked_at": now, "latest": latest, "ok": ok });
+    let v = serde_json::json!({ "checked_at": now, "latest": latest, "ok": ok, "exact": exact });
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -116,9 +119,16 @@ fn write_cache(path: &Path, latest: &str, ok: bool) {
 
 /// `latest` and `dev` dist-tags. Failure returns None.
 pub fn fetch_dist_tags() -> Option<(String, String)> {
-    let url = format!("{}/{}", registry(), PACKAGE.replace('/', "%2f"));
+    fetch_channel_choices().map(|(stable, dev)| (stable.version, dev.version))
+}
+
+pub fn fetch_channel_choices() -> Option<(Choice, Choice)> {
+    let deadline = Instant::now() + Duration::from_secs(TIMEOUT_SECS);
+    let registry = registry_override();
+    let primary = published_channels::lookup(registry.is_some());
+    let url = format!("{}/{}", registry.as_deref().unwrap_or(DEFAULT_REGISTRY), PACKAGE.replace('/', "%2f"));
     let resp = ureq::get(&url)
-        .timeout(Duration::from_secs(TIMEOUT_SECS))
+        .timeout(deadline.checked_duration_since(Instant::now())?)
         .call()
         .ok()?;
     let value: serde_json::Value = resp.into_json().ok()?;
@@ -135,23 +145,39 @@ pub fn fetch_dist_tags() -> Option<(String, String)> {
         .unwrap_or("")
         .trim()
         .to_owned();
-    if latest.is_empty() && dev.is_empty() {
-        return None;
-    }
+    let select = |index: usize, alias| {
+        let version = &primary[index];
+        published_channels::choose(version, alias, index == 1, || value["versions"].get(version.as_str()).cloned())
+    };
+    let latest = select(0, latest);
+    let dev = select(1, dev);
+    if latest.version.is_empty() && dev.version.is_empty() { return None; }
     Some((latest, dev))
 }
 
 /// Fetch the latest version from the npm registry. Failure (offline/timeout/404/non-JSON) -> None.
 /// Proxy: ureq reads `HTTPS_PROXY`/`HTTP_PROXY` by default.
 pub fn fetch_latest() -> Option<String> {
-    let url = format!("{}/{}/latest", registry(), PACKAGE);
+    stable_choice().map(|choice| choice.version)
+}
+
+fn stable_choice() -> Option<Choice> {
+    let deadline = Instant::now() + Duration::from_secs(TIMEOUT_SECS);
+    let registry = registry_override();
+    let primary = published_channels::lookup(registry.is_some());
+    let url = format!("{}/{}/latest", registry.as_deref().unwrap_or(DEFAULT_REGISTRY), PACKAGE);
     let resp = ureq::get(&url)
-        .timeout(Duration::from_secs(TIMEOUT_SECS))
+        .timeout(deadline.checked_duration_since(Instant::now())?)
         .call()
         .ok()?;
     let v: serde_json::Value = resp.into_json().ok()?;
     let ver = v["version"].as_str()?.trim().to_owned();
-    (!ver.is_empty()).then_some(ver)
+    let version = &primary[0];
+    Some(published_channels::choose(version, (!ver.is_empty()).then_some(ver)?, false, || {
+        let url = format!("{DEFAULT_REGISTRY}/{PACKAGE}/{version}");
+        ureq::get(&url).timeout(deadline.checked_duration_since(Instant::now())?)
+            .call().ok()?.into_json().ok()
+    }))
 }
 
 /// Check result.
@@ -165,6 +191,7 @@ pub struct UpdateStatus {
     pub outdated: bool,
     /// Whether this came from cache (no network).
     pub cached: bool,
+    exact: bool,
 }
 
 impl UpdateStatus {
@@ -182,11 +209,16 @@ impl UpdateStatus {
         }
     }
 
+    pub fn install_command(&self) -> String {
+        let choice = Choice { version: self.latest.clone(), exact: self.exact };
+        format!("npm i -g {}", choice.install_spec(false))
+    }
+
     /// User-facing hint line (only worth showing when outdated).
     pub fn message(&self) -> String {
         format!(
-            "PROMOTE rsrs CLI has a new version: {} -> {} (local {}) - update: npm i -g rsrs-cli@latest",
-            self.current, self.latest, self.current
+            "PROMOTE rsrs CLI has a new version: {} -> {} (local {}) - update: {}",
+            self.current, self.latest, self.current, self.install_command()
         )
     }
 }
@@ -205,8 +237,8 @@ pub fn check(force: bool) -> Option<UpdateStatus> {
     let now = chrono::Utc::now().timestamp();
     let cached = read_cache(&path);
     if !force {
-        if let Some((ts, latest, ok)) = &cached {
-            if now - ts < THROTTLE_SECS {
+        if let Some((ts, latest, ok, exact)) = &cached {
+            if now - ts < THROTTLE_SECS && (!*exact || registry_override().is_none()) {
                 // Inside the window: reuse the cached conclusion (failures are cached too,
                 // so we do not hit the network again the same day).
                 return ok.then(|| UpdateStatus {
@@ -214,22 +246,24 @@ pub fn check(force: bool) -> Option<UpdateStatus> {
                     current,
                     latest: latest.clone(),
                     cached: true,
+                    exact: *exact,
                 });
             }
         }
     }
-    match fetch_latest() {
-        Some(latest) => {
-            write_cache(&path, &latest, true);
+    match stable_choice() {
+        Some(Choice { version: latest, exact }) => {
+            write_cache(&path, &latest, true, exact);
             Some(UpdateStatus {
                 outdated: is_newer(&latest, &current),
                 current,
                 latest,
                 cached: false,
+                exact,
             })
         }
         None => {
-            write_cache(&path, "", false);
+            write_cache(&path, "", false, false);
             None
         }
     }
@@ -299,6 +333,7 @@ mod tests {
                 latest: latest.into(),
                 outdated: is_newer(latest, current),
                 cached: false,
+                exact: false,
             };
             assert_eq!(status.comparison(), expected);
         }
@@ -311,6 +346,7 @@ mod tests {
             latest: "0.2.44".into(),
             outdated: true,
             cached: false,
+            exact: false,
         };
         let m = s.message();
         assert!(m.contains("0.2.42") && m.contains("0.2.44"), "{m}");
@@ -327,8 +363,8 @@ mod tests {
         std::fs::create_dir_all(&dir)?;
         let path = dir.join("update_check.json");
         assert!(read_cache(&path).is_none(), "no cache when file is missing");
-        write_cache(&path, "0.2.99", true);
-        let (ts, latest, ok) =
+        write_cache(&path, "0.2.99", true, false);
+        let (ts, latest, ok, _) =
             read_cache(&path).ok_or_else(|| anyhow!("expected cache after write"))?;
         assert!(ok && latest == "0.2.99");
         assert!(
