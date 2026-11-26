@@ -8,7 +8,6 @@ pub(super) struct Request {
     challenge: [u8; 32],
     supervisor_pid: u32,
     supervisor_birth: u64,
-    tag: [u8; 32],
 }
 
 pub(super) struct Armed {
@@ -74,8 +73,6 @@ impl Request {
             &live.instance.to_string(),
         )
         .map_err(|_| transport::unauthorized())?;
-        backup_grant::verify_request(&record, &self.challenge, &scope, &self.tag)
-            .map_err(|_| transport::unauthorized())?;
         Ok(Armed {
             scope,
             challenge: self.challenge,
@@ -85,6 +82,10 @@ impl Request {
 }
 
 impl Armed {
+    pub(super) fn binding(&self) -> [u8; 32] {
+        backup_grant::request_binding(&self.challenge, &self.scope)
+    }
+
     pub(super) fn current(&self) -> bool {
         supervisor_is_current(self.scope.supervisor_pid, self.scope.supervisor_birth)
     }
@@ -101,17 +102,7 @@ impl Armed {
         let epoch = live.vault_epoch.as_bytes();
         let tag = backup_grant::issue(&self.record, &self.challenge, &self.scope, &intent, epoch)
             .map_err(|_| transport::unavailable())?;
-        let witness = serde_json::to_vec(
-            &json!({"owner": live.account, "profile": live.canonical_profile,
-            "epoch": live.vault_epoch.to_string()}),
-        )
-        .map_err(|_| transport::unavailable())?;
-        let nonce = self.challenge[..16]
-            .try_into()
-            .map_err(|_| transport::unavailable())?;
-        let signature = backup_grant::vault_observation(&self.record, &nonce, &witness)
-            .map_err(|_| transport::unavailable())?;
-        receipt["handoff"] = json!({"grant":tag,"vault":witness,"vault_tag":signature});
+        receipt["grant"] = json!(tag);
         Ok(())
     }
 }

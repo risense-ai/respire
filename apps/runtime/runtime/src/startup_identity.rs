@@ -66,10 +66,16 @@ pub(crate) fn authorize(supervised: bool, boot_token: Option<&str>, port: u16) -
         let grant: LaunchGrant = serde_json::from_slice(&bytes)
             .map_err(|_| anyhow::anyhow!("invalid runtime launch grant JSON"))?;
         validate_grant(&grant, &context, supervised, nonce, now_ms()?)?;
+        #[cfg(target_os = "linux")]
+        respire_commands::backup_restart::check(&context.root, Some(&grant))?;
         verify_authority(Some(&grant), &context)?;
         claim(&directory, nonce, &bytes)?;
         fs::remove_file(&path).context("consumed runtime launch grant could not be removed")?;
         sync_directory(&directory)?;
+        #[cfg(target_os = "linux")]
+        if respire_commands::backup_restart::owned_by_supervisor(&context.root, &grant)? {
+            super::backup_supervisor::unlock_child(&grant)?;
+        }
         let instance_id = grant.instance_id.clone();
         (Some(grant), instance_id)
     } else {
@@ -77,6 +83,8 @@ pub(crate) fn authorize(supervised: bool, boot_token: Option<&str>, port: u16) -
             !supervised,
             "supervised startup requires a one-time host launch grant"
         );
+        #[cfg(target_os = "linux")]
+        respire_commands::backup_restart::check(&context.root, None)?;
         verify_authority(None, &context)?;
         (None, uuid::Uuid::new_v4().to_string())
     };
@@ -155,6 +163,8 @@ fn verify_managed_boot_inner(check_login_recovery: bool) -> Result<()> {
     if startup.private_control {
         verify_authority_for_mode(startup.grant.as_ref(), &startup.context, startup.paused_control)
     } else {
+        #[cfg(target_os = "linux")]
+        respire_commands::backup_restart::check(&startup.context.root, startup.grant.as_ref())?;
         verify_authority(startup.grant.as_ref(), &startup.context)
     }
 }
@@ -228,6 +238,44 @@ fn current_context(port: u16) -> Result<LaunchContext> {
         image_sha256: hash_file(&image_path)?,
         image_path,
         port,
+    })
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn backup_launch(port: u16) -> Result<LaunchGrant> {
+    anyhow::ensure!(!respire_app::login_transaction::auth_recovery_pending()?, "account recovery required");
+    let context = current_context(port)?;
+    let control = context.root.join("runtime/autostart");
+    anyhow::ensure!(context.profile == context.root, "backup supervisor requires the installation profile");
+    for name in ["registration.json", "maintenance.json", "offline-keygen.json", "account-active.json"] {
+        anyhow::ensure!(
+            read_private_file(&control.join(name))?.is_none(),
+            "another host controls this installation"
+        );
+    }
+    verify_authority(None, &context)?;
+    let nonce = uuid::Uuid::new_v4().to_string();
+    let now = now_ms()?;
+    Ok(LaunchGrant {
+        schema_version: 1,
+        protocol_version: respire_commands::rpc_worker::PROTOCOL_V,
+        nonce: nonce.clone(),
+        instance_id: nonce,
+        installation_id: hash(context.root.as_os_str().as_encoded_bytes()),
+        installation_root: context.root,
+        profile: context.profile,
+        account_id: context.account_id,
+        sync_generation: context.sync_generation,
+        image_path: context.image_path,
+        image_sha256: context.image_sha256,
+        supervisor_pid: std::process::id(),
+        supervisor_birth: process_birth(std::process::id())?.context("backup supervisor birth")?,
+        managed_id: None,
+        registration_sha256: None,
+        maintenance: None,
+        port,
+        issued_at_ms: now,
+        expires_at_ms: now.checked_add(60000).context("launch expiry")?,
     })
 }
 

@@ -298,27 +298,15 @@ fn stop_outcome(clean: bool, forced: bool, unfinished_empty: bool) -> RuntimeSto
     }
 }
 
-#[cfg(test)]
-static FIXTURE_FINALIZER: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-
-/// Select the normal finalizer only inside the named, explicitly isolated
-/// libtest child. Ordinary unit tests retain their parking behavior.
-#[cfg(test)]
-pub(crate) fn enable_fixture_shutdown_finalizer(exact_child_test: &str) -> anyhow::Result<()> {
-    let args: Vec<_> = std::env::args_os().skip(1).collect();
-    anyhow::ensure!(args.windows(2).any(|pair| pair[0] == "--exact" && pair[1] == exact_child_test)
-        && std::thread::current().name() == Some(exact_child_test),
-        "shutdown finalizer requires an exact isolated fixture child");
-    FIXTURE_FINALIZER.set(()).map_err(|_| anyhow::anyhow!("fixture shutdown finalizer already selected"))
-}
-
 fn stop_process(code: i32) -> ! {
     #[cfg(test)]
-    if FIXTURE_FINALIZER.get().is_none() {
+    {
+        let _ = code;
         loop {
             std::thread::park();
         }
     }
+    #[cfg(not(test))]
     {
         let mut exit_code = code;
         if let Err(error) = respire_app::core_sdk::worker::shutdown() {

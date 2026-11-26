@@ -267,10 +267,75 @@ pub fn open_to_stage(
 }
 
 #[cfg(target_os = "linux")]
-#[path = "backup_archive_restore.rs"]
-mod restore;
+use crate::snapshot::{self, RestoreStatus, SnapshotOperation};
 #[cfg(target_os = "linux")]
-pub use restore::{BackupVaultIdentity, restore_approved_archive_locked};
+use respire_spawn::owner_credential::{ArchiveOperation, BackupArchiveHandoff, ReadyBackupArchive};
+
+#[cfg(target_os = "linux")]
+pub fn restore_approved_archive_locked(
+    root: &Path,
+    custody: &Path,
+    selected: &respire_spawn::owner_credential::ArchiveTarget,
+    account: &str,
+    epoch: uuid::Uuid,
+    keys: &crate::SessionKeys,
+    expected_snapshot: Option<&str>,
+    operation: &SnapshotOperation,
+    ownership: &crate::lock::LibraryLock,
+    grant: respire_spawn::owner_credential::backup_grant::VerifiedGrant,
+    authorize: impl Fn() -> Result<()>,
+) -> Result<Option<RestoreStatus>> {
+    grant.check_fresh()?;
+    ensure!(grant.vault_epoch() == *epoch.as_bytes() && grant.scope().account == <[u8; 32]>::from(Sha256::digest(account.as_bytes())),
+        "archive confirmation differs from Vault owner or epoch");
+    ensure!(ownership.protects(root)? && expected_snapshot.is_none_or(snapshot::valid_id), "invalid archive restore target");
+    authorize()?;
+    ensure!(snapshot::operation_status(root, account, operation)?.is_none(), snapshot::OperationConflict);
+    selected.verify()?;
+    ensure!(crate::service::database_path(root)?.canonicalize()? == selected.path(), "selected database changed");
+    let id = uuid::Uuid::parse_str(&operation.operation_id)?;
+    grant.check_fresh()?;
+    let scope = grant.scope();
+    let hash = |bytes: &[u8]| -> [u8; 32] { Sha256::digest(bytes).into() };
+    ensure!(scope.operation == *id.as_bytes() && scope.target_identity == selected.identity_digest()?
+        && scope.target == hash(selected.path().as_os_str().as_encoded_bytes())
+        && scope.profile == hash(custody.canonicalize()?.as_os_str().as_encoded_bytes())
+        && operation.request_fingerprint == grant.fingerprint(), "archive confirmation scope changed");
+    let intent_sha256 = grant.intent();
+    let archive_sha256 = scope.archive;
+    let op = ArchiveOperation::from_v4_bytes(*id.as_bytes())?;
+    let handoff = BackupArchiveHandoff::from_approved_intent(op, intent_sha256);
+    let ready = ReadyBackupArchive::open(custody, handoff)?.require_archive_digest(archive_sha256)?;
+    let library = crate::service::database_path(root)?.canonicalize()?;
+    let library = library.to_str().context("selected library must be UTF-8")?;
+    let library_digest = format!("{:x}", Sha256::digest(library.as_bytes()));
+    let (scratch, manifest) = ready.consume(|mut reader| {
+        let decode = || -> Result<_> {
+            let header = BackupArchiveHeader::read(&mut reader)?.authenticate(keys, account)?;
+            ensure!(snapshot::valid_id(&header.manifest.id) && expected_snapshot.is_none_or(|id| id == header.manifest.id) && header.manifest.source_library == library_digest,
+                "archive differs from confirmed snapshot or selected library");
+            chrono::DateTime::parse_from_rfc3339(&header.manifest.created_at)?;
+            authorize()?;
+            let path = root.join(format!(".backup-restore-{}.db", uuid::Uuid::new_v4().simple()));
+            let file = snapshot::private_new(&path)?;
+            let scratch = snapshot::PreparedRestoreCopy { path };
+            let manifest = header.copy_to_stage(reader, file, &authorize)?;
+            Ok((scratch, manifest))
+        };
+        decode().map_err(std::io::Error::other)
+    })?;
+    snapshot::validate_manifest_database(&scratch.path, &manifest)?;
+    authorize()?;
+    let snapshot_id = manifest.id.clone();
+    snapshot::restore_source_with_hook(root, account, keys, &snapshot_id, ownership, Some(operation),
+        Some((manifest, &scratch.path)), &|phase| {
+            authorize()?;
+            if matches!(phase, "after_backups" | "before_replace") { grant.check_fresh()?; selected.verify()?; }
+            Ok(())
+        })?;
+    snapshot::operation_status(root, account, operation)
+}
+
 
 #[cfg(test)]
 #[path = "backup_archive_tests.rs"]

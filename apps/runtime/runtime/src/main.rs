@@ -1,9 +1,11 @@
 //! Standalone `rsrs-runtime` binary: the loopback RPC host split out of the
 //! CLI binary (runtime split WP-3, milestone M1 "two runnable binaries").
 //!
-//! The CLI or Client2 owns startup, supervision and shutdown through RPC.
-//! This executable serves in the foreground and never launches another Runtime.
+//! Ordinary serve runs in the foreground under its host. The opt-in Linux
+//! backup supervisor owns its reserved children across an offline restore.
 
+#[cfg(target_os = "linux")]
+mod backup_supervisor;
 mod auth_control;
 mod config_control;
 mod host_control;
@@ -107,6 +109,11 @@ fn usage() -> &'static str {
 }
 
 fn run(boot_token: Option<String>) -> Result<i32> {
+    #[cfg(target_os = "linux")]
+    if std::env::args().nth(1).as_deref() == Some("--backup-supervisor") {
+        anyhow::ensure!(boot_token.is_none() && std::env::args_os().count() == 2, "backup supervisor accepts inherited input only");
+        return backup_supervisor::run();
+    }
     if std::env::args().nth(1).as_deref() == Some("--startup-control-internal") {
         anyhow::ensure!(
             boot_token.is_none() && std::env::args_os().count() == 2,

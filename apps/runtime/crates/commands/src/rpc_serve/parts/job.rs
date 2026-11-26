@@ -129,6 +129,8 @@ pub fn serve(flags: RuntimeFlags) -> Result<()> {
     start_host_plugin_reader()?;
     // Probe and bind only the existing loopback HTTP/TCP transport; no legacy
     // pipe/socket fallback is necessary.
+    #[cfg(target_os = "linux")]
+    crate::backup_restart::before_bind(&respire_app::service::main_data_dir(), &process_identity().instance_id)?;
     let bound = crate::runtime_http::bind_runtime(flags.port, &flags.host)?;
     {
         let mut url = WEB_URL.lock().unwrap_or_else(|err| err.into_inner());

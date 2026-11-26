@@ -6,6 +6,7 @@ use sha2::Sha256;
 /// Digests are of the full archive wire and UTF-8 canonical target database path.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct ArchiveClaim {
+    pub receiver_binding: Option<[u8; 32]>,
     pub query_only: bool,
     pub inspect_only: bool,
     pub operation: [u8; 16],
@@ -35,6 +36,10 @@ fn mac(record: &[u8; 48], claim: ArchiveClaim, time: u64) -> Option<Hmac<Sha256>
     mac.update(&claim.archive);
     mac.update(&claim.target);
     mac.update(&claim.target_identity);
+    if let Some(binding) = claim.receiver_binding {
+        mac.update(b"receiver/v1\0");
+        mac.update(&binding);
+    }
     mac.update(&time.to_be_bytes());
     Some(mac)
 }

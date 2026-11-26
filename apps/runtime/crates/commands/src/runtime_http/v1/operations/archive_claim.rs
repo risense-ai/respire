@@ -56,32 +56,14 @@ pub(in crate::runtime_http::v1) fn retire_pending_archives() {
 impl Job {
     /// Queue receiver transfers the same Job and PendingBackupArchive it received.
     pub(in crate::runtime_http::v1::operations) fn stage_archive(
-        self,
+        mut self,
         target: ArchiveTarget,
         digest: [u8; 32],
         wire: PendingBackupArchive,
     ) -> V1Result<()> {
         static SLOT: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
-        self.stage_in_slot(target, digest, wire, Instant::now() + TTL, &SLOT)
-    }
-    #[cfg(test)]
-    pub(in crate::runtime_http::v1::operations) fn stage_fixture(
-        self, target: ArchiveTarget, digest: [u8; 32], wire: PendingBackupArchive, short: bool,
-    ) -> V1Result<()> {
-        static SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(16);
-        let ttl = if short { Duration::from_millis(100) } else { TTL };
-        self.stage_in_slot(target, digest, wire, Instant::now() + ttl, &SLOTS)
-    }
-
-    fn stage_in_slot(
-        mut self,
-        target: ArchiveTarget,
-        digest: [u8; 32],
-        wire: PendingBackupArchive,
-        deadline: Instant,
-        slots: &'static tokio::sync::Semaphore,
-    ) -> V1Result<()> {
-        let slot = slots.try_acquire().map_err(|_| transport::unavailable())?;
+        let deadline = Instant::now() + TTL;
+        let slot = SLOT.try_acquire().map_err(|_| transport::unavailable())?;
         let handle = tokio::runtime::Handle::try_current().map_err(|_| transport::unavailable())?;
         let id = Uuid::parse_str(&self.id()?).map_err(|_| transport::invalid())?;
         let operation =
@@ -274,19 +256,12 @@ pub(in crate::runtime_http::v1) fn routes(bound: SocketAddr) -> Router {
         PATH,
         post(
             move |ConnectInfo(crate::network::Peer(peer)): ConnectInfo<crate::network::Peer>,
-                  request: Request| serve(bound, peer, request, true),
+                  request: Request| serve(bound, peer, request),
         ),
     )
 }
 
-#[cfg(test)]
-pub(in crate::runtime_http::v1) fn fixture_routes(bound: SocketAddr) -> Router {
-    Router::new().route("/fixture/archive-claim", post(
-        move |ConnectInfo(crate::network::Peer(peer)): ConnectInfo<crate::network::Peer>, request: Request|
-            serve(bound, peer, request, false)))
-}
-
-async fn serve(bound: SocketAddr, peer: SocketAddr, request: Request, require_handoff: bool) -> V1Result<Response> {
+async fn serve(bound: SocketAddr, peer: SocketAddr, request: Request) -> V1Result<Response> {
     let (parts, stream) = request.into_parts();
     owner_request::admit_selected(&parts, peer, bound)?;
     if parts.uri.query().is_some()
@@ -307,7 +282,7 @@ async fn serve(bound: SocketAddr, peer: SocketAddr, request: Request, require_ha
         .map_err(|_| transport::invalid())?
         .map_err(|_| transport::invalid())?;
     let frame: Frame = serde_json::from_slice(&bytes).map_err(|_| transport::invalid())?;
-    if require_handoff && !frame.inspect_only && !frame.query_only && frame.handoff.is_none() {
+    if !frame.inspect_only && !frame.query_only && frame.handoff.is_none() {
         return Err(transport::unauthorized());
     }
     let id = Uuid::parse_str(&frame.operation_id).map_err(|_| transport::invalid())?;
@@ -323,7 +298,8 @@ async fn serve(bound: SocketAddr, peer: SocketAddr, request: Request, require_ha
     let deadline = Instant::now() + Duration::from_secs(2);
     let receipt = owner_control::bounded_blocking(move || {
         owner_control::with_active(|owner, live: &OwnerBinding| {
-            let claim = ArchiveClaim {
+            let mut claim = ArchiveClaim {
+                receiver_binding: None,
                 query_only: frame.query_only,
                 inspect_only: frame.inspect_only,
                 operation: *id.as_bytes(),
@@ -333,6 +309,8 @@ async fn serve(bound: SocketAddr, peer: SocketAddr, request: Request, require_ha
                 instance: *live.instance.as_bytes(),
                 generation: live.generation,
             };
+            let armed = frame.handoff.map(|request| request.arm(claim, live)).transpose()?;
+            claim.receiver_binding = armed.as_ref().map(handoff::Armed::binding);
             let mut fresh = || {
                 Instant::now() < deadline
                     && owner_control::wall_ms()
@@ -362,7 +340,6 @@ async fn serve(bound: SocketAddr, peer: SocketAddr, request: Request, require_ha
                 }
                 return Err(transport::unauthorized());
             }
-            let armed = frame.handoff.map(|request| request.arm(claim, live)).transpose()?;
             let mut receipt = entry.claim_archive(claim, || scope_matches() && fresh()
                 && armed.as_ref().is_none_or(handoff::Armed::current))?;
             if let Some(armed) = armed { armed.deliver(&mut receipt, live)?; }

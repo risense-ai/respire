@@ -69,9 +69,10 @@ pub(super) fn router(bound: SocketAddr) -> Router {
         .merge(operations::routes(bound));
     #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
     let router = router.merge(device_spaces::routes(bound));
-    #[cfg(target_os = "linux")]
-    let router = router.merge(backup_export::backup_routes(bound))
-        .merge(operations::archive_confirmation_routes(bound));
+    #[cfg(target_os="linux")]
+    let router = if crate::backup_restart::private_backup_control() {
+        router.merge(backup_export::private_routes(bound)).merge(operations::archive_confirmation_routes(bound))
+    } else { router };
     router
 }
 

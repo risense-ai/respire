@@ -29,6 +29,9 @@ pub(in crate::runtime_http::v1) async fn post(
     }
     let mut query = transport::query(parts.uri.query())?;
     let selected = query.remove("space_id");
+    if parts.uri.path() == "/api/runtime/private-backup/import" && selected.as_deref() != Some("main") {
+        return Err(transport::invalid());
+    }
     if !query.is_empty() { return Err(transport::invalid()); }
     let permit = UPLOADS.try_acquire().map_err(|_| transport::unavailable())?;
     let resolve = |selected: Option<String>, scope: transport::RestScope| async move {

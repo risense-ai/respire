@@ -8,7 +8,7 @@ import test from "node:test";
 import {workflowIdentity} from "./assemble-component-ci.mjs";
 
 const repo = "risense-ai/respire";
-const workflow = repo + "/.github/workflows/runtime-release-dry-run.yml@";
+const workflow = repo + "/.github/workflows/release.yml@";
 const initial = {
   GITHUB_ACTIONS: "true", RUNNER_ENVIRONMENT: "github-hosted", GITHUB_REPOSITORY: repo,
   GITHUB_SHA: "a".repeat(40), GITHUB_WORKFLOW_SHA: "b".repeat(40),

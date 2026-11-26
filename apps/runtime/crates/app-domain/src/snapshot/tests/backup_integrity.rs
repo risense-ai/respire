@@ -377,11 +377,7 @@ fn confirmed_archive_uses_exact_custody_and_only_installs_once() -> Result<()> {
         let tag = backup_grant::issue(&owner, &receiver.challenge(), &exact, &intent, &[16;16])?;
         Ok(receiver.accept(intent, [16;16], &tag)?)
     };
-    let vault = backup_archive::BackupVaultIdentity::fixture("account", &custody, uuid::Uuid::from_bytes([16;16]));
-    for (name, epoch) in [("wrong", [16;16]), ("account", [17;16])] {
-        let other = backup_archive::BackupVaultIdentity::fixture(name, &custody, uuid::Uuid::from_bytes(epoch));
-        assert!(other.check(&issue(intent, digest)?).is_err());
-    }
+    let epoch = uuid::Uuid::from_bytes([16;16]);
     let operation = SnapshotOperation { operation_id: uuid.to_string(), request_fingerprint: issue(intent, digest)?.fingerprint() };
     let mut other = operation.clone();
     other.operation_id = uuid::Uuid::new_v4().to_string();
@@ -401,12 +397,17 @@ fn confirmed_archive_uses_exact_custody_and_only_installs_once() -> Result<()> {
         (id.as_str(), &other, intent, digest),
         ("11111111111111111111111111111111", &operation, intent, digest),
     ] {
-        assert!(backup_archive::restore_approved_archive_locked(&root, &custody, &selected, &vault, &keys, target,
+        assert!(backup_archive::restore_approved_archive_locked(&root, &custody, &selected, "account", epoch, &keys, Some(target),
             operation, &ownership, issue(intent, digest)?, || Ok(())).is_err());
         assert_eq!(digest_file(&live)?, before);
         assert!(!root.join(RECOVERY_FILE).exists());
     }
-    let apply = || backup_archive::restore_approved_archive_locked(&root, &custody, &selected, &vault, &keys, &id,
+    for (owner, epoch) in [("wrong", epoch), ("account", uuid::Uuid::from_bytes([17;16]))] {
+        assert!(backup_archive::restore_approved_archive_locked(&root, &custody, &selected, owner, epoch, &keys,
+            Some(&id), &operation, &ownership, issue(intent, digest)?, || Ok(())).is_err());
+        assert_eq!(digest_file(&live)?, before);
+    }
+    let apply = || backup_archive::restore_approved_archive_locked(&root, &custody, &selected, "account", epoch, &keys, Some(&id),
         &operation, &ownership, issue(intent, digest)?, || Ok(()));
     let status = apply()?.context("missing installed operation")?;
     assert_eq!(status.phase, "installed");

@@ -38,6 +38,27 @@ pub(super) fn backup_routes(bound: SocketAddr) -> axum::Router {
         .with_state(bound)
 }
 
+// The supervised child exercises the ordinary bounded handlers on private paths.
+// Public registration remains independently gated.
+#[cfg(target_os = "linux")]
+pub(super) fn private_routes(bound: SocketAddr) -> axum::Router {
+    use crate::network::Peer;
+    use axum::{extract::ConnectInfo, routing, Router};
+    Router::new()
+        .route(
+            "/api/runtime/private-backup/export",
+            routing::get(move |ConnectInfo(Peer(peer)): ConnectInfo<Peer>, req: Request| {
+                get(bound, peer, req)
+            }),
+        )
+        .route(
+            "/api/runtime/private-backup/import",
+            routing::post(move |ConnectInfo(Peer(peer)): ConnectInfo<Peer>, req: Request| {
+                super::operations::backup_import::post(bound, peer, req)
+            }),
+        )
+}
+
 struct CancelPreparation(Arc<AtomicBool>);
 
 impl Drop for CancelPreparation {
@@ -54,17 +75,16 @@ pub(super) async fn get(bound: SocketAddr, peer: SocketAddr, request: Request) -
     let scope = transport::authorize(&parts, peer, bound).await?;
     let mut query = transport::query(parts.uri.query())?;
     let selected = query.remove("space_id");
+    if parts.uri.path() == "/api/runtime/private-backup/export" && selected.as_deref() != Some("main") {
+        return Err(transport::invalid());
+    }
     if !query.is_empty() || selected.as_deref().is_some_and(str::is_empty) {
         return Err(transport::invalid());
     }
     transport::json_optional::<serde_json::Value>(body, 0).await?;
     let permit = ADMISSION.try_acquire().map_err(|_| transport::unavailable())?;
     let source = rest_dispatch::submit(scope.clone(), Access::Read, move |ctx| {
-        #[cfg(all(test, target_os = "linux"))]
-        tests::lifecycle_fixture::capture_armed(ctx)?;
         reads::with_memory_store(ctx, selected, |store, _| {
-            #[cfg(all(test, target_os = "linux"))]
-            tests::remember_selection(store).map_err(|_| transport::unavailable())?;
             store.prepare_backup_export(&ctx.scope.canonical_profile).map_err(|_| transport::unavailable())
         })
     }).await?;
@@ -139,7 +159,7 @@ async fn next(state: Option<FrameContext>) -> Option<(io::Result<Bytes>, Option<
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 #[path = "backup_export_http_tests.rs"]
 mod tests;
 

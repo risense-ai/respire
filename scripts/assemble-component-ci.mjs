@@ -7,7 +7,7 @@ import {finalizeComponent} from "./finalize-component-receipt.mjs";
 import {localFanoutPlan, parseComponentTag} from "./component-release-plan.mjs";
 
 const repository = "risense-ai/respire";
-const workflow = repository + "/.github/workflows/runtime-release-dry-run.yml@";
+const workflow = repository + "/.github/workflows/release.yml@";
 const commitPattern = /^[0-9a-f]{40}$(?![\s\S])/;
 const idPattern = /^[1-9][0-9]*$(?![\s\S])/;
 
