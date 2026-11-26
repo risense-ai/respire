@@ -108,7 +108,8 @@ fn scoped_archive_over_loopback() -> Result<()> {
                     app.into_make_service_with_connect_info::<crate::network::Peer>(),
                 ).await
             });
-            let result = tokio::task::spawn_blocking(move || verify_http(bound, &root, urk)).await;
+            let handle = tokio::runtime::Handle::current();
+            let result = tokio::task::spawn_blocking(move || verify_http(bound, &root, urk, handle)).await;
             server.abort();
             let _ = server.await;
             result?
@@ -122,7 +123,7 @@ fn scoped_archive_over_loopback() -> Result<()> {
     Ok(())
 }
 
-fn verify_http(bound: SocketAddr, root: &Path, urk: [u8; 32]) -> Result<()> {
+fn verify_http(bound: SocketAddr, root: &Path, urk: [u8; 32], handle: tokio::runtime::Handle) -> Result<()> {
     let base = format!("http://{bound}");
     let agent = ureq::AgentBuilder::new().try_proxy_from_env(false).timeout(WAIT).build();
     let get = |name: &str| agent.get(&format!("{base}{name}"));
@@ -251,7 +252,17 @@ fn verify_http(bound: SocketAddr, root: &Path, urk: [u8; 32]) -> Result<()> {
     let parent_extra = save("main", "post-export parent memory to discard")?;
     let child_extra = save(space, "post-export child memory to discard")?;
     assert_eq!(list_ids("main")?, BTreeSet::from([parent.clone(), parent_extra.clone()]));
-    assert_eq!(list_ids(space)?, BTreeSet::from([child.clone(), child_extra]));
+    assert_eq!(list_ids(space)?, BTreeSet::from([child.clone(), child_extra.clone()]));
+
+    use super::super::operations::backup_import::{confirm_local_restore, LocalRestoreConfirmation};
+    let main_db = service::database_path(root)?.canonicalize()?;
+    let child_db = root
+        .join(".respire-local-spaces-v1")
+        .join(space)
+        .join("onememory.db")
+        .canonicalize()?;
+    let child_digest: [u8; 32] = Sha256::digest(&child_wire).into();
+    let main_digest: [u8; 32] = Sha256::digest(&main_wire).into();
 
     let accepted_child = post(&format!("/v1/backups/import?space_id={space}"))
         .set("Content-Type", "application/octet-stream")
@@ -260,9 +271,61 @@ fn verify_http(bound: SocketAddr, root: &Path, urk: [u8; 32]) -> Result<()> {
     let receipt_child: Value = accepted_child.into_json()?;
     assert_eq!(receipt_child["status"], "pending");
     let child_op = receipt_child["operation_id"].as_str().context("child restore operation_id missing")?;
+    let child_uuid = uuid::Uuid::parse_str(child_op)?;
+    assert_eq!(backup_stage_count(root)?, 1);
+
+    // 202 acceptance stages only; database writes must wait for explicit local confirmation.
+    thread::sleep(Duration::from_millis(100));
+    let pending_status: Value = get(&format!("/v1/operations/{child_op}"))
+        .set("Authorization", &format!("Bearer {TOKEN}")).call()?.into_json()?;
+    assert_eq!(pending_status["state"], "pending");
+    assert_eq!(list_ids(space)?, BTreeSet::from([child.clone(), child_extra.clone()]));
+
+    let mut wrong_digest = child_digest;
+    wrong_digest[0] ^= 1;
+    for bad in [
+        LocalRestoreConfirmation { operation_id: uuid::Uuid::new_v4(), archive_sha256: child_digest, target: child_db.clone() },
+        LocalRestoreConfirmation { operation_id: child_uuid, archive_sha256: wrong_digest, target: child_db.clone() },
+        LocalRestoreConfirmation { operation_id: child_uuid, archive_sha256: child_digest, target: main_db.clone() },
+    ] {
+        assert!(handle.block_on(confirm_local_restore(bad)).is_err());
+    }
+    assert_eq!(list_ids(space)?, BTreeSet::from([child.clone(), child_extra]));
+    assert_eq!(backup_stage_count(root)?, 1);
+
+    // Bounded pending queue holds up to 2 pending imports and releases on operation cancel.
+    let cancel_accepted = post("/v1/backups/import?space_id=main")
+        .set("Content-Type", "application/octet-stream")
+        .send_bytes(&main_wire)?;
+    assert_eq!(cancel_accepted.status(), 202);
+    let cancel_receipt: Value = cancel_accepted.into_json()?;
+    let cancel_op = cancel_receipt["operation_id"].as_str().context("cancel operation_id missing")?;
+    let cancel_uuid = uuid::Uuid::parse_str(cancel_op)?;
+    assert_eq!(backup_stage_count(root)?, 2);
+    ensure!(
+        matches!(upload_main(&main_wire[..12 + header_size]), Err(ureq::Error::Status(503, _))),
+        "pending custody limit should reject a third upload with 503"
+    );
+    let cancelled = agent.delete(&format!("{base}/v1/operations/{cancel_op}"))
+        .set("Authorization", &format!("Bearer {TOKEN}")).call()?;
+    assert_eq!(cancelled.status(), 202);
+    let cancel_json: Value = cancelled.into_json()?;
+    assert_eq!(cancel_json["state"], "cancelled");
+    assert_eq!(backup_stage_count(root)?, 1);
+    assert!(handle.block_on(confirm_local_restore(LocalRestoreConfirmation {
+        operation_id: cancel_uuid, archive_sha256: main_digest, target: main_db.clone(),
+    })).is_err());
+
+    handle.block_on(confirm_local_restore(LocalRestoreConfirmation {
+        operation_id: child_uuid, archive_sha256: child_digest, target: child_db.clone(),
+    }))?;
     wait_completed(child_op)?;
     assert_eq!(list_ids(space)?, BTreeSet::from([child.clone()]));
-    assert_eq!(list_ids("main")?, BTreeSet::from([parent.clone(), parent_extra]));
+    assert_eq!(list_ids("main")?, BTreeSet::from([parent.clone(), parent_extra.clone()]));
+    assert_eq!(backup_stage_count(root)?, 0);
+    assert!(handle.block_on(confirm_local_restore(LocalRestoreConfirmation {
+        operation_id: child_uuid, archive_sha256: child_digest, target: child_db,
+    })).is_err());
 
     let accepted_main = post("/v1/backups/import?space_id=main")
         .set("Content-Type", "application/octet-stream")
@@ -271,6 +334,11 @@ fn verify_http(bound: SocketAddr, root: &Path, urk: [u8; 32]) -> Result<()> {
     let receipt_main: Value = accepted_main.into_json()?;
     assert_eq!(receipt_main["status"], "pending");
     let main_op = receipt_main["operation_id"].as_str().context("main restore operation_id missing")?;
+    let main_uuid = uuid::Uuid::parse_str(main_op)?;
+    assert_eq!(list_ids("main")?, BTreeSet::from([parent.clone(), parent_extra]));
+    handle.block_on(confirm_local_restore(LocalRestoreConfirmation {
+        operation_id: main_uuid, archive_sha256: main_digest, target: main_db,
+    }))?;
     wait_completed(main_op)?;
     assert_eq!(list_ids("main")?, BTreeSet::from([parent]));
     assert_eq!(list_ids(space)?, BTreeSet::from([child]));

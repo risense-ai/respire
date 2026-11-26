@@ -154,13 +154,16 @@ async fn handle(
 
     let deadline = Instant::now() + Duration::from_secs(2);
     let snapshot = owner_control::bounded_blocking(move || {
+        super::backup_import::reap_stale();
         transport::with_scope(&scope, || {
             let entry = state::registry().lookup(&scope, id)?;
             if matches!(route, Route::Cancel) {
                 if Instant::now() >= deadline {
                     return Err(transport::unavailable());
                 }
-                entry.cancel()
+                let snapshot = entry.cancel()?;
+                super::backup_import::discard_cancelled(id);
+                Ok(snapshot)
             } else {
                 entry.snapshot()
             }
