@@ -60,7 +60,7 @@ fn exact_private_commit_retires_pending_invite() -> Result<()> {
     replacement["token"] = json!("replacement");
     private_write(&root.join("session.json"), &serde_json::to_vec(&replacement)?)?;
     assert_eq!(owned_members(&root, &ownership._root_lock, "fixture")?, json!({"members":[]}));
-    replacement.as_object_mut().unwrap().remove("auth_salt");
+    replacement.as_object_mut().context("invalid replacement session object")?.remove("auth_salt");
     private_write(&root.join("session.json"), &serde_json::to_vec(&replacement)?)?;
     assert!(pending_invite(&root, &ownership._root_lock, "fixture", request()?, || true).is_err());
     private_write(&root.join("session.json"), &original)?;
