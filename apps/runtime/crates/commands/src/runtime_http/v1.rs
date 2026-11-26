@@ -58,6 +58,9 @@ pub(super) fn router(bound: SocketAddr) -> Router {
         .with_state(state)
         .merge(owner_handshake::routes(bound))
         .merge(owner_routes::routes(bound))
+        .merge(bind(Router::new(), RouteSpec::new(Verb::Post, "/v1/host/transactions/logout", "executeLogoutTransaction"),
+            move |ConnectInfo(crate::network::Peer(peer)): ConnectInfo<crate::network::Peer>, request: Request|
+                owner_control::host_logout(request, peer, bound)))
         .merge(private_model_route::routes(bound))
         .merge(private_model_install::routes(bound))
         .merge(reads::routes(bound))

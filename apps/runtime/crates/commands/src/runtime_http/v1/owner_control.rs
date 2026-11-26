@@ -28,9 +28,49 @@ const WORK_DEADLINE: Duration = Duration::from_secs(2);
 const REFRESH_INTERVAL: Duration = Duration::from_millis(250);
 
 enum DispatchWork {
+    SoftLogout(SoftLogout),
     Scoped(Work),
     Local(super::rest_dispatch::Work),
     ModelSwitch(Box<super::operations::model_switch::PendingSwitch>),
+}
+
+/// Internal queue entry. Only a purpose-authorized host request may construct one.
+pub(crate) struct SoftLogout {
+    owner: OwnerBinding,
+    id: String,
+    key: String,
+    params: respire_protocol::identity_write_control::HostIdentityWriteParams,
+    reply: oneshot::Sender<anyhow::Result<()>>,
+}
+
+impl SoftLogout {
+    fn begin_drain(&self, held: &LibraryLock) -> bool {
+        !self.reply.is_closed() && with_active(|native, live| {
+            use sha2::{Digest, Sha256};
+            let account_id = format!("{:x}", Sha256::digest(live.account.as_bytes()));
+            let matches = native.matches(live) && *live == self.owner
+                && self.params.binding.profile == live.canonical_profile
+                && self.params.binding.launch_id == live.instance.to_string()
+                && self.params.binding.expected_account_id.as_deref() == Some(account_id.as_str())
+                && held.protects(&live.canonical_profile).unwrap_or(false);
+            // Fence new unlocks before releasing the verified owner scope.
+            Ok(matches && crate::rpc_worker::STOPPING.compare_exchange(false, true,
+                std::sync::atomic::Ordering::AcqRel, std::sync::atomic::Ordering::Acquire).is_ok())
+        }).unwrap_or(false)
+    }
+
+    pub(crate) fn finish(self, held: &LibraryLock, clean: bool) {
+        let outcome = (|| {
+            anyhow::ensure!(clean, "logout resource cleanup incomplete");
+            let receipt = respire_app::login_transaction::serving_soft_logout(
+                held, &self.id, &self.key, &self.params)?;
+            anyhow::ensure!(receipt.operation_id == self.id && receipt.outcome ==
+                respire_protocol::identity_write_control::HostIdentityWriteOutcome::Committed,
+                "logout journal did not confirm the admitted operation");
+            Ok(())
+        })();
+        let _ = self.reply.send(outcome);
+    }
 }
 
 struct Work {
@@ -60,7 +100,7 @@ pub(crate) fn start_dispatch() -> Option<OwnerDispatch> {
 }
 
 impl OwnerDispatch {
-    pub(crate) fn tick(&mut self, store: Option<&LocalStore>, ownership: &LibraryLock) {
+    pub(crate) fn tick(&mut self, store: Option<&LocalStore>, ownership: &LibraryLock) -> Option<SoftLogout> {
         let now = Instant::now();
         if self
             .last_refresh
@@ -70,6 +110,9 @@ impl OwnerDispatch {
             refresh(store.is_some(), ownership);
         }
         match self.receiver.try_recv() {
+            Ok(DispatchWork::SoftLogout(work)) => {
+                if work.begin_drain(ownership) { return Some(work); }
+            }
             Ok(DispatchWork::Scoped(work)) => service_work(work, store, ownership),
             Ok(DispatchWork::Local(work)) => super::rest_dispatch::service(work, store, ownership),
             Ok(DispatchWork::ModelSwitch(work)) if self.switching.is_none() => {
@@ -83,6 +126,7 @@ impl OwnerDispatch {
         if let Ok(work) = self.model_receiver.try_recv() {
             model_work::service(work, store, ownership);
         }
+        None
     }
 }
 
@@ -338,4 +382,47 @@ fn busy() -> Problem {
         "runtime_unavailable",
         "Runtime unavailable",
     )
+}
+
+/// Handle the bodyless logout request from a verified native owner.
+pub(super) async fn host_logout(request: axum::extract::Request, peer: std::net::SocketAddr,
+    bound: std::net::SocketAddr) -> V1Result<Response> {
+    use respire_protocol::{ControlBinding, HostAuthIdentity, identity_write_control::{
+        HostIdentityWriteOperation, HostIdentityWriteParams, HOST_IDENTITY_WRITE_SCHEMA_V}};
+    use sha2::{Digest, Sha256};
+    let (parts, body) = request.into_parts();
+    super::owner_request::admit_selected(&parts, peer, bound)?;
+    if parts.method != axum::http::Method::POST || parts.uri.path() != "/v1/host/transactions/logout"
+        || parts.uri.query().is_some() || parts.headers.contains_key(header::COOKIE)
+        || parts.headers.contains_key(header::ORIGIN) { return Err(unauthorized()); }
+    let field = |name| super::owner_request::single(&parts.headers, name)
+        .ok().flatten().ok_or_else(unauthorized);
+    let id = uuid::Uuid::parse_str(field("x-respire-operation-id")?).map_err(|_| unauthorized())?;
+    let proof = field("x-respire-host-proof")?.to_owned();
+    let mut revision = [0; 32];
+    hex::decode_to_slice(field("x-respire-session-revision")?, &mut revision).map_err(|_| unauthorized())?;
+    tokio::time::timeout(Duration::from_secs(1), axum::body::to_bytes(body, 0)).await
+        .map_err(|_| busy())?.map_err(|_| Problem::new(StatusCode::BAD_REQUEST, "invalid_body", "Expected empty body"))?;
+    let (send, receive) = oneshot::channel();
+    bounded_blocking(move || with_active(|native, live| {
+        if !native.matches(live) { return Err(unauthorized()); }
+        native.authorize_logout(live, id, &revision, &proof, wall_ms().ok_or_else(unavailable)?)
+            .map_err(|_| unauthorized())?;
+        let account_id = format!("{:x}", Sha256::digest(live.account.as_bytes()));
+        let identity = HostAuthIdentity::Bound { account_id: account_id.clone(), session_sha256: hex::encode(revision) };
+        let root = respire_app::service::main_data_dir().canonicalize().map_err(|_| unavailable())?;
+        respire_app::login_transaction::verify_locked_auth_identity(&root, &live.canonical_profile, &identity)
+            .map_err(|_| unauthorized())?;
+        let params = HostIdentityWriteParams { schema_version: HOST_IDENTITY_WRITE_SCHEMA_V,
+            binding: ControlBinding { installation_root: root, profile: live.canonical_profile.clone(),
+                launch_id: live.instance.to_string(), expected_account_id: Some(account_id) },
+            identity: identity.clone(), source_identity: identity, operation: HostIdentityWriteOperation::Logout { full: false } };
+        QUEUE.get().ok_or_else(unavailable)?.try_send(DispatchWork::SoftLogout(SoftLogout {
+            owner: live.clone(), id: id.to_string(), key: id.to_string(), params, reply: send,
+        })).map_err(|_| busy())
+    })).await?;
+    tokio::time::timeout(Duration::from_secs(30), receive).await.map_err(|_| busy())?
+        .map_err(|_| busy())?.map_err(|_| busy())?;
+    use axum::response::IntoResponse;
+    Ok(([(header::CONTENT_TYPE, "application/json"), (header::CACHE_CONTROL, "no-store")], r#"{"status":"completed"}"#).into_response())
 }

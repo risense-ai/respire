@@ -91,6 +91,32 @@ pub fn verify(record: &[u8; 48], header: &str, now_ms: u64) -> Option<VerifiedPr
     })
 }
 
+/// A bodyless soft logout has a separate signing domain. The operation UUID is
+/// also its idempotency key. The record rotates with the verified Vault owner.
+fn logout_key(record: &[u8; 48], operation: &[u8; 16], instance: &[u8; 16],
+    generation: u64, revision: &[u8; 32]) -> Option<[u8; 48]> {
+    let mut mac = HmacSha256::new_from_slice(&record[..KEY_LEN]).ok()?;
+    mac.update(b"respire-host-post-bodyless-soft-logout-v1");
+    mac.update(operation);
+    mac.update(instance);
+    mac.update(&generation.to_be_bytes());
+    mac.update(revision);
+    let mut key = *record;
+    key[..KEY_LEN].copy_from_slice(&mac.finalize().into_bytes());
+    Some(key)
+}
+
+pub fn issue_soft_logout(record: &[u8; 48], operation: &[u8; 16], instance: &[u8; 16],
+    generation: u64, revision: &[u8; 32], now: u64) -> Option<OwnerProof> {
+    issue(&logout_key(record, operation, instance, generation, revision)?, 1, now)
+}
+
+pub fn verify_soft_logout(record: &[u8; 48], operation: &[u8; 16], instance: &[u8; 16],
+    generation: u64, revision: &[u8; 32], proof: &str, now: u64) -> Option<VerifiedProof> {
+    verify(&logout_key(record, operation, instance, generation, revision)?, proof, now)
+        .filter(|verified| verified.scopes() == 1)
+}
+
 fn valid_scopes(scopes: u8) -> bool {
     // Bits 0..=5: grants:read, grants:revoke, stats:read, query-log:read,
     // reviews:read, sync-conflicts:read, in canonical contract enum order.
@@ -234,4 +260,22 @@ mod tests {
         );
         Ok(())
     }
+}
+
+#[cfg(test)]
+#[test]
+fn soft_logout_signature_binds_session_operation_and_serving_instance() {
+    let (record, operation, instance, revision) = ([4; 48], [5; 16], [6; 16], [7; 32]);
+    let proof = issue_soft_logout(&record, &operation, &instance, 3, &revision, 100).unwrap();
+    let valid = |op, inst, gen, rev, time| verify_soft_logout(
+        &record, &op, &inst, gen, &rev, proof.as_str(), time).is_some();
+    assert!(valid(operation, instance, 3, revision, 101));
+    assert!(!valid(instance, instance, 3, revision, 101));
+    assert!(!valid(operation, operation, 3, revision, 101));
+    assert!(!valid(operation, instance, 4, revision, 101));
+    assert!(!valid(operation, instance, 3, [8; 32], 101));
+    assert!(!valid(operation, instance, 3, revision, 101 + PROOF_MAX_AGE_MS));
+    assert!(verify(&record, proof.as_str(), 101).is_none());
+    let ordinary = issue(&record, 1, 100).unwrap();
+    assert!(verify_soft_logout(&record, &operation, &instance, 3, &revision, ordinary.as_str(), 101).is_none());
 }

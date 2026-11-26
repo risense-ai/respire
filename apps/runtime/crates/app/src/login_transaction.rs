@@ -13,7 +13,7 @@ mod cold_keygen;
 mod login;
 pub use login::verify_login_merge_offer;
 mod identity;
-pub use identity::{control_identity_write, control_identity_write_result};
+pub use identity::{control_identity_write, control_identity_write_result, serving_soft_logout};
 #[cfg(test)]
 mod keygen_existing_protocol;
 mod keys;

@@ -128,6 +128,15 @@ impl OwnerLeaseRegistry {
         })
     }
 
+    pub(super) fn consume_logout(&mut self, live: &OwnerBinding,
+        proof: respire_spawn::owner_credential::proof::VerifiedProof, now: u64) -> Result<(), Denied> {
+        self.check_live(Some(live))?;
+        let expires = proof.issued_at_ms().checked_add(respire_spawn::owner_credential::proof::PROOF_MAX_AGE_MS)
+            .ok_or(Denied::UnusableCredential)?;
+        if self.replay.observe(now) && self.replay.consume(proof.nonce(), expires) { Ok(()) }
+        else { Err(Denied::UnusableCredential) }
+    }
+
     pub(super) fn revoke(&mut self) {
         self.revoked = true;
         #[cfg(test)]
