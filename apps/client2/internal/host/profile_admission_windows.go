@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"syscall"
 	"unicode/utf16"
 	"unsafe"
@@ -77,7 +78,11 @@ func admitProfile(root, configured string) (profileAdmission, func(), error) {
 		}
 		return now.close, nil
 	}
-	return profileAdmission{root: expected, reopen: reopen}, pins.close, nil
+	closeIdentity := sync.OnceFunc(func() {
+		clientID.Close()
+		identity.Close()
+	})
+	return profileAdmission{root: expected, reopen: reopen, closeIdentity: closeIdentity}, pins.close, nil
 }
 
 // An elevated token can default new objects to the Administrators group.

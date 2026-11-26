@@ -64,6 +64,7 @@ func realRuntimeManagerAt(t *testing.T, configure func(*testing.T, string) strin
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(m.profile.close)
 	if m.hostAuthority != nil || m.startupControl == nil {
 		t.Fatal("production New wiring changed")
 	}

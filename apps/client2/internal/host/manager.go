@@ -241,6 +241,13 @@ func New() (*Manager, error) {
 		return nil, err
 	}
 	defer release()
+	// Transfer identity handles to the manager only after initialization.
+	initialized := false
+	defer func() {
+		if !initialized {
+			profile.close()
+		}
+	}()
 	if profile.reopen != nil {
 		for _, name := range []string{"preferences.json", "requests.json"} {
 			if err := checkModelUninstallPath(filepath.Join(profile.root, "client2", name)); err != nil {
@@ -259,6 +266,7 @@ func New() (*Manager, error) {
 	if err := m.loadOperations(); err != nil {
 		return nil, err
 	}
+	initialized = true
 	return m, nil
 }
 

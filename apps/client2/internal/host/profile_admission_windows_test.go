@@ -52,6 +52,7 @@ func TestNewBindsConfiguredJunctionToPhysicalProfile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(m.profile.close)
 	want := filepath.Join(root, "physical", "profile")
 	if m.profile.reopen == nil || !samePath(m.DataRoot, want) {
 		t.Fatalf("unexpected admitted directory %q", m.DataRoot)
@@ -66,15 +67,28 @@ func TestNewBindsConfiguredJunctionToPhysicalProfile(t *testing.T) {
 	if err == nil {
 		t.Fatal("admitted directory moved while held")
 	}
+	// Windows also excludes a parent rename while its retained child handle
+	// is still below it. Move that child first to exercise actual replacement
+	// of the configured directory at the exact original canonical pathname.
+	if err := os.Rename(m.Root, filepath.Join(root, "physical", "original-client2")); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.Rename(want, moved); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Rename(filepath.Join(root, "physical", "replacement"), want); err != nil {
 		t.Fatal(err)
 	}
+	if err := createProfileClientDirectory(filepath.Join(want, "client2")); err != nil {
+		t.Fatal(err)
+	}
 	replacement, err := pinConfiguredProfile(selected)
 	if err != nil {
 		t.Fatalf("replacement should pass standalone owner checks: %v", err)
+	}
+	if err := replacement.pinClientDirectory(filepath.Join(want, "client2")); err != nil {
+		replacement.close()
+		t.Fatalf("replacement client directory should pass owner checks: %v", err)
 	}
 	replacement.close()
 	if _, err := m.installModelEngines(t.Context()); !errors.Is(err, errJunctionTakeover) {
@@ -116,6 +130,7 @@ func TestRequestLedgerRefusesReplacedClientDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(m.profile.close)
 	if err := os.Rename(m.Root, filepath.Join(m.DataRoot, "original-client2")); err != nil {
 		t.Fatal(err)
 	}
