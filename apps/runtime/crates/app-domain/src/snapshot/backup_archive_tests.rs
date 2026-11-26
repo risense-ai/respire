@@ -141,3 +141,55 @@ fn native_snapshot_envelope_preserves_committed_wal_and_excludes_grants() -> Res
     assert_eq!(live.query_row("SELECT count(*) FROM access_grants", [], |row| row.get::<_, u64>(0))?, 1);
     Ok(())
 }
+
+
+#[cfg(target_os = "linux")]
+#[test]
+fn authenticated_upload_enters_exact_native_custody_once() -> Result<()> {
+    use respire_spawn::owner_credential::ArchiveOperation;
+    use std::{fs, os::unix::fs::PermissionsExt};
+
+    let owner = tempfile::tempdir()?;
+    let root = owner.path().canonicalize()?;
+    let root = root.as_path();
+    fs::set_permissions(root, fs::Permissions::from_mode(0o700))?;
+    let selected = root.join("rsrs.db");
+    let unrelated = root.join("other.db");
+    fs::write(&selected, "active library remains untouched")?;
+    fs::write(&unrelated, "unrelated fixture library")?;
+    let db = vec![63; 2 * 64 * 1024 + 1];
+    let keys = crate::SessionKeys::from_urk([7; 32])?;
+    let mut document = manifest("alice", &db);
+    let path = selected.to_str().context("fixture path must be UTF-8")?;
+    document.source_library = format!("{:x}", Sha256::digest(path.as_bytes()));
+    let mut wire = Vec::new();
+    seal_to_stage(&keys, "alice", document, db.as_slice(), &mut wire, || Ok(()))?;
+
+    let operation = ArchiveOperation::from_v4_bytes(*uuid::Uuid::new_v4().as_bytes())?;
+    let stage = |wire: &[u8], target: &Path| {
+        let mut bytes = wire;
+        BackupArchiveHeader::read(&mut bytes)?.authenticate(&keys, "alice")?
+            .stage_for_restore(bytes, root, target, operation, || Ok(()))
+    };
+
+    let mut altered = wire.clone();
+    if let Some(last) = altered.last_mut() { *last ^= 1; }
+    assert!(stage(&wire, &unrelated).is_err());
+    assert!(stage(&altered, &selected).is_err());
+    assert!(stage(&wire[..wire.len() - 1], &selected).is_err());
+    assert_eq!(fs::read_dir(root)?.count(), 2, "no partial upload is retained");
+
+    let pending = stage(&wire, &selected)?;
+    let handoff = pending.handoff();
+    let ready = pending.publish(|| Ok(()))?;
+    let actual = ready.consume(|reader| {
+        let mut received = Vec::new();
+        reader.read_to_end(&mut received)?;
+        Ok(received)
+    })?;
+    assert_eq!(actual, wire);
+    handoff.discard(root)?;
+    assert_eq!(fs::read_dir(root)?.count(), 2);
+    assert_eq!(fs::read(&selected)?, b"active library remains untouched");
+    Ok(())
+}
