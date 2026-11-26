@@ -1,0 +1,39 @@
+name: Darwin backup export qualification
+on:
+  pull_request:
+    types: [opened]
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  verify:
+    if: github.repository == 'risense-ai/respire' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'verify/card-010-darwin-backup-export' && github.event.pull_request.draft == true && github.run_attempt == 1
+    runs-on: macos-15
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Verify exact backup export source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD^)" = a09cba45ebfc9a3b8d36deefeee5d9d041e94395
+          test "$(git diff --name-only HEAD^ HEAD)" = .github/workflows/verify-backup-export-darwin.yml
+          test "$RUNNER_OS/$RUNNER_ARCH" = macOS/ARM64
+      - name: Install pinned native Rust
+        run: rustup toolchain install 1.95.0 --profile minimal
+      - name: Exercise exact native loopback and filesystem ownership test
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(rustc +1.95.0 -vV | sed -n 's/^host: //p')" = aarch64-apple-darwin
+          log="$RUNNER_TEMP/darwin-backup-export.log"
+          cargo +1.95.0 test --locked --manifest-path apps/runtime/Cargo.toml \
+            --target aarch64-apple-darwin --target-dir "$RUNNER_TEMP/runtime-target" \
+            -p respire_commands --lib runtime_http::v1::backup_export::tests::scoped_archive_over_loopback \
+            -- --exact --test-threads=1 --format pretty 2>&1 | tee "$log"
+          grep -Fx "test runtime_http::v1::backup_export::tests::scoped_archive_over_loopback ... ok" "$log"
+          grep -E "^test result: ok\. 1 passed; 0 failed; 0 ignored;" "$log"
