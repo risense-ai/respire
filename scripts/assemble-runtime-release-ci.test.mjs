@@ -1,0 +1,109 @@
+import assert from "node:assert/strict";
+import {createHash} from "node:crypto";
+import {access, mkdir, mkdtemp, readFile, rename, rm, writeFile} from "node:fs/promises";
+import {tmpdir} from "node:os";
+import {join} from "node:path";
+import {test} from "node:test";
+import {assembleRuntimeNative} from "./assemble-runtime-release-ci.mjs";
+
+const tag = "runtime-v2.0.0-dev.31";
+const provenance = {
+  repository:"risense-ai/respire",event:"workflow_dispatch",source:"c".repeat(40),workflow_sha:"d".repeat(40),
+  workflow_ref:"risense-ai/respire/.github/workflows/runtime-release-dry-run.yml@refs/heads/main",run_id:"12345",run_attempt:"2",
+};
+const profiles = [
+  ["windows-x64","x86_64-pc-windows-msvc","Windows","x64"],
+  ["windows-arm64","aarch64-pc-windows-msvc","Windows","arm64"],
+  ["linux-gnu-x64","x86_64-unknown-linux-gnu","Linux","x64","adjacent-dynamic"],
+  ["linux-gnu-arm64","aarch64-unknown-linux-gnu","Linux","arm64","adjacent-dynamic"],
+  ["linux-musl-x64","x86_64-unknown-linux-musl","Linux","x64","static"],
+  ["linux-musl-arm64","aarch64-unknown-linux-musl","Linux","arm64","static"],
+  ["macos-intel","x86_64-apple-darwin","macOS","x64","adjacent-dynamic"],
+  ["macos-arm64","aarch64-apple-darwin","macOS","arm64","static"],
+];
+const digest = value=>createHash("sha256").update(value).digest("hex");
+const caseResults = [
+  ["host-control-no-wall-clock-deadline","delayed-input-survives-and-closed-input-is-rejected"],
+  ["client-json-bad-config","scoped-structured-invalid-config-envelope","invalid-client-config-bytes-preserved",
+    "inference-settings-preserved-on-rejection","scoped-recovery-preserves-inference-settings"],
+  ["remember-result","recover-original-receipt-and-read-back-without-replay"],
+  ["stop-clean-drained","standalone-stop-accepted","standalone-normal-exit","standalone-identity-bound-final-drained-receipt",
+    "standalone-listener-closed-after-exit"],
+  ["mcp-initialize-tools-list","initialize","tools/list","tools/call:memory_status","same-process-after-call"],
+].flatMap(([testID,...names])=>names.map(name=>({test_id:"runtime."+testID,name,status:"passed"})));
+
+async function fixture(t) {
+  const root = await mkdtemp(join(tmpdir(),"native-assembly-synthetic-"));
+  t.after(()=>rm(root,{recursive:true,force:true}));
+  const evidence = join(root,"evidence"), payload = join(root,"payload"), output = join(root,"assembled");
+  await mkdir(evidence);
+  await mkdir(payload);
+  async function stage([lane,target,os,arch,loader]) {
+    const e=join(evidence,`runtime-${lane}-evidence-12345-2`), p=join(payload,`runtime-${lane}-payload-12345-2`);
+    await mkdir(e);
+    await mkdir(p);
+    const image=`rsrs-runtime-${target}${os==="Windows"?".exe":""}`, arc=`rsrs-runtime-${target}.tar.gz`;
+    const binary="synthetic binary "+target, packageBytes="synthetic archive "+target;
+    await writeFile(join(p,image),binary);
+    await writeFile(join(p,arc),packageBytes);
+    const meta=`runtime-build-${target}.json`;
+    const data=JSON.stringify({schema_version:2,runtime_version:"2.0.0-dev.31",tag:"v2.0.0-dev.31",channel:"dev",
+      target_triple:target,source_commit:provenance.source,archive_file:arc,archive_sha256:digest(packageBytes),
+      binary_file:image,binary_sha256:digest(binary)});
+    await writeFile(join(p,meta),data);
+    await writeFile(join(e,`runtime-${lane}.json`),JSON.stringify({schema:1,mode:"dry-run",...provenance,
+      target,tag,native_identity:{runner_os:os,runner_arch:arch.toUpperCase(),node_arch:arch,rust_host:target.replace(/-musl$/,"-gnu")},
+      native_loader:loader,provider_archive_sha256:lane.startsWith("linux-gnu")
+        ?"769d1d3ea8ab6cd69f737c9dd4d4462aa4ad0ccfa106eaf506efc40d7bead5db":"e".repeat(64),
+      packaged_native_smoke:{passed:true,case_results:caseResults},
+      artifact_sha256:{[image]:digest(binary),[arc]:digest(packageBytes),[meta]:digest(data)},
+    }));
+  }
+  for (const profile of profiles) await stage(profile);
+  async function alter(lane, change) {
+    const path=join(evidence,`runtime-${lane}-evidence-12345-2`,`runtime-${lane}.json`);
+    const body=JSON.parse(await readFile(path,"utf8"));
+    change(body);
+    await writeFile(path,JSON.stringify(body));
+  }
+  return {evidence,payload,output,alter,run:(identity=provenance)=>assembleRuntimeNative({
+    tag,provenance:identity,evidenceRoot:evidence,payloadRoot:payload,output,
+  })};
+}
+
+test("synthetic complete native matrix binds each asset and writes exact mirror evidence",async t=>{
+  const {run,output}=await fixture(t);
+  const result=await run();
+  assert.equal(Object.keys(result.receipt.assets).length,24);
+  assert.deepEqual(result.provenance,provenance);
+  assert.equal(JSON.parse(await readFile(join(output,"component-release-receipt.json"),"utf8")).scope,
+    "same-attempt-native-runtime-and-local-byte-parity");
+});
+
+test("missing target, foreign attempt, fork event, duplicate case and wrong native architecture fail closed",async t=>{
+  const {run,output,evidence,alter}=await fixture(t);
+  await assert.rejects(run({...provenance,event:"pull_request"}),/restricted to main dispatch/);
+  const lane=join(evidence,"runtime-macos-intel-evidence-12345-2");
+  await rename(lane,lane+"-stale");
+  await assert.rejects(run(),/Incomplete or unexpected/);
+  await rename(lane+"-stale",lane);
+  await alter("macos-intel",body=>{body.run_attempt="1";});
+  await assert.rejects(run(),/run_attempt/);
+  await alter("macos-intel",body=>{body.run_attempt="2";body.native_identity.node_arch="arm64";});
+  await assert.rejects(run(),/host identity/);
+  await alter("macos-intel",body=>{body.native_identity.node_arch="x64";body.packaged_native_smoke.case_results[0]=caseResults[1];});
+  await assert.rejects(run(),/smoke scope/);
+  await assert.rejects(access(output),{code:"ENOENT"});
+});
+
+test("old provider and provenance mismatch cannot seal assembled bytes",async t=>{
+  const {run,output,alter}=await fixture(t);
+  await alter("linux-gnu-arm64",body=>{body.provider_archive_sha256="1".repeat(64);});
+  await assert.rejects(run(),/GNU provider differs/);
+  await alter("linux-gnu-arm64",body=>{
+    body.provider_archive_sha256="769d1d3ea8ab6cd69f737c9dd4d4462aa4ad0ccfa106eaf506efc40d7bead5db";
+    body.artifact_sha256["runtime-build-aarch64-unknown-linux-gnu.json"]="0".repeat(64);
+  });
+  await assert.rejects(run(),/Assembled bytes differ/);
+  await assert.rejects(access(output),{code:"ENOENT"});
+});

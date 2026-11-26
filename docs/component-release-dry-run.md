@@ -128,3 +128,31 @@ monorepo and legacy layouts. This receipt does not attest to native execution;
 retain the separate native evidence. Missing files, failed verification or
 missing receipts prevent a complete component result. The matrix and expected
 inventory are not evidence that the newly added hosted jobs have passed.
+
+### Runtime final same-attempt consumer
+
+`assemble-runtime-release-ci.mjs` is a protected-by-inventory consumer, not
+a new workflow job or publication path. Once all eight native lanes have
+reviewed provider inputs and successful native smoke, run it only in the
+trusted-main dispatch workspace. Download two separate artifact groups
+from the current workflow run, without merging the artifact directories:
+
+- `runtime-<lane>-evidence-<run>-<attempt>`: one existing native JSON receipt.
+- `runtime-<lane>-payload-<run>-<attempt>`: exact Runtime executable, archive
+  and schema-2 build metadata.
+
+Pass the Runtime tag, absolute evidence root, absolute payload root and a
+fresh output directory, all under `RUNNER_TEMP`. The consumer rejects a
+missing or extra lane, wrong run or attempt, source/workflow mismatches,
+wrong native host or smoke case coverage, and assets whose final byte
+digests differ from the matching native smoke receipt. A digest mismatch
+removes the owned local candidate. Upload at most the final receipt after
+success; it is not a release or supplier attestation.
+
+Do not enable this consumer for a partial matrix. The two musl producers
+still need reviewed, native static ONNX Runtime inputs (not the GNU
+provider), and native Intel macOS needs a reviewed 1.28-compatible provider,
+not an older binary or a Rosetta result. Their builders must verify the
+provider source/pin and redistribution notices before packaging; receipt
+digest presence alone does not approve a provider. The unimplemented lanes'
+receipt format does not assert that hosted smoke or packaging has passed.
