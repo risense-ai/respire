@@ -4,6 +4,7 @@ import {assembleLocalRelease} from "./assemble-component-release.mjs";
 
 // The caller supplies an exclusive runner temp directory. link() commits a fully
 // closed file on the same volume and fails if the destination already exists.
+// This guarantees atomic visibility. Directory entries are not synced for crash recovery.
 export async function finalizeComponent({tag, source, batches, output, makeResult}) {
   await mkdir(output, {mode: 0o700});
   const identity = await lstat(output, {bigint: true});
@@ -32,19 +33,25 @@ export async function finalizeComponent({tag, source, batches, output, makeResul
   } catch {
     throw new Error("COMPONENT_RECEIPT_FAILED");
   } finally {
-    // Clean only private staging names. A competing final receipt is never removed.
-    await checkOwner();
-    if (staging) {
-      await unlink(join(staging, "receipt.json")).catch(error => {
-        if (error.code !== "ENOENT") throw error;
-      });
-      await rmdir(staging);
-    }
-    if (!committed) {
-      if (assembled) await rm(assembled.root, {recursive: true});
-      await rmdir(output).catch(error => {
-        if (!["ENOTEMPTY", "EEXIST"].includes(error.code)) throw error;
-      });
+    try {
+      // Clean only private staging names. A competing final receipt is never removed.
+      await checkOwner();
+      if (staging) {
+        await unlink(join(staging, "receipt.json")).catch(error => {
+          if (error.code !== "ENOENT") throw error;
+        });
+        await rmdir(staging);
+      }
+      if (!committed) {
+        if (assembled) await rm(assembled.root, {recursive: true});
+        await rmdir(output).catch(error => {
+          if (!["ENOTEMPTY", "EEXIST"].includes(error.code)) throw error;
+        });
+      }
+    } catch {
+      if (!committed) throw new Error("COMPONENT_RECEIPT_FAILED");
+      // The visible final receipt remains valid; private staging can be reclaimed
+      // with the exclusive runner temp directory at the end of the job.
     }
   }
 }

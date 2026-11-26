@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import {createHash} from "node:crypto";
 import {execFileSync} from "node:child_process";
-import {lstat, open, readFile, readdir, realpath} from "node:fs/promises";
+import {lstat, open, readdir, realpath} from "node:fs/promises";
 import {dirname, isAbsolute, join, relative, resolve, sep} from "node:path";
 import {pathToFileURL} from "node:url";
 import {finalizeComponent} from "./finalize-component-receipt.mjs";
-import {workflowIdentity} from "./assemble-component-ci.mjs";
+import {readWorkflowEvent, workflowIdentity} from "./assemble-component-ci.mjs";
 import {expectedReleaseAssets, localFanoutPlan, parseComponentTag} from "./component-release-plan.mjs";
 
 const profiles = {
@@ -150,20 +150,29 @@ export async function assembleRuntimeNative(inputs) {
   }
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+async function run() {
   assert.equal(process.argv.length, 6,
     "Usage: assemble-runtime-release-ci.mjs <tag> <same-attempt-evidence-root> <same-attempt-payload-root> <fresh-output>");
   const [tag, evidenceRoot, payloadRoot, output] = process.argv.slice(2);
   const env = process.env;
   assert(isAbsolute(env.GITHUB_EVENT_PATH ?? ""), "Missing GitHub event path");
-  const provenance = workflowIdentity(env, JSON.parse(await readFile(env.GITHUB_EVENT_PATH,"utf8")));
+  const provenance = workflowIdentity(env, await readWorkflowEvent(env.GITHUB_EVENT_PATH));
   const root = await directory(env.GITHUB_WORKSPACE ?? "");
   assert.equal(await directory(resolve(dirname(process.argv[1]), "..")), root, "Assembler checkout mismatch");
-  const git = (...args)=>execFileSync("git",args,{cwd:root,encoding:"utf8"}).trim();
+  const git = (...args)=>execFileSync("git",args,{cwd:root,encoding:"utf8",stdio:"pipe"}).trim();
   assert.equal(git("rev-parse","HEAD"), provenance.source, "Checkout must match Actions event SHA");
   assert.equal(git("status","--porcelain","--untracked-files=no"), "", "Tracked checkout must be clean");
   const temporary = await directory(env.RUNNER_TEMP ?? "");
   assert([await directory(evidenceRoot),await directory(payloadRoot),resolve(output)].every(path=>below(temporary,path)),
     "Inputs and output must remain inside RUNNER_TEMP");
   await assembleRuntimeNative({tag, provenance, evidenceRoot, payloadRoot, output});
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  try {
+    await run();
+  } catch {
+    console.error("RUNTIME_NATIVE_RECEIPT_FAILED");
+    process.exitCode = 1;
+  }
 }

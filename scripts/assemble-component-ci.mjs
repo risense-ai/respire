@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import {execFileSync} from "node:child_process";
-import {lstat, readFile, realpath} from "node:fs/promises";
+import {lstat, open, realpath} from "node:fs/promises";
 import {dirname, isAbsolute, join, relative, resolve, sep} from "node:path";
 import {pathToFileURL} from "node:url";
 import {finalizeComponent} from "./finalize-component-receipt.mjs";
@@ -10,6 +10,27 @@ const repository = "risense-ai/respire";
 const workflow = repository + "/.github/workflows/runtime-release-dry-run.yml@";
 const commitPattern = /^[0-9a-f]{40}$(?![\s\S])/;
 const idPattern = /^[1-9][0-9]*$(?![\s\S])/;
+
+// GitHub event payloads are bounded even when the file changes during reading.
+export async function readWorkflowEvent(path) {
+  const limit = 25 * 1024 * 1024;
+  const initial = await lstat(path);
+  assert(initial.isFile() && initial.size > 0 && initial.size <= limit);
+  const handle = await open(path, "r");
+  try {
+    const bytes = Buffer.alloc(initial.size + 1);
+    let offset = 0;
+    while (offset < bytes.length) {
+      const {bytesRead} = await handle.read(bytes, offset, bytes.length - offset);
+      if (!bytesRead) break;
+      offset += bytesRead;
+    }
+    assert.equal(offset, initial.size);
+    return JSON.parse(new TextDecoder("utf-8", {fatal: true}).decode(bytes.subarray(0, offset)));
+  } finally {
+    await handle.close();
+  }
+}
 
 export function workflowIdentity(env, event) {
   assert.equal(env.GITHUB_ACTIONS, "true", "Requires GitHub Actions");
@@ -63,14 +84,14 @@ async function run(args, env) {
   const plan = parseComponentTag(tag);
   assert.equal(npm !== "-", plan.component === "cli", "Exactly CLI needs npm packs");
   assert(isAbsolute(env.GITHUB_EVENT_PATH ?? ""), "Missing GitHub event path");
-  const provenance = workflowIdentity(env, JSON.parse(await readFile(env.GITHUB_EVENT_PATH, "utf8")));
+  const provenance = workflowIdentity(env, await readWorkflowEvent(env.GITHUB_EVENT_PATH));
   const workspace = await exactDirectory(env.GITHUB_WORKSPACE ?? "");
   const checkout = resolve(dirname(process.argv[1]), "..");
   assert.equal(await realpath(checkout), workspace, "Assembler is not running from the Actions checkout");
-  const source = execFileSync("git", ["rev-parse", "HEAD"], {cwd: workspace, encoding: "utf8"}).trim();
+  const source = execFileSync("git", ["rev-parse", "HEAD"], {cwd: workspace, encoding: "utf8", stdio: "pipe"}).trim();
   assert.equal(source, provenance.source, "Checkout must match the Actions event SHA");
   assert.equal(execFileSync("git", ["status", "--porcelain", "--untracked-files=no"],
-    {cwd: workspace, encoding: "utf8"}).trim(), "", "Tracked checkout must be clean");
+    {cwd: workspace, encoding: "utf8", stdio: "pipe"}).trim(), "", "Tracked checkout must be clean");
 
   const temp = await exactDirectory(env.RUNNER_TEMP ?? "");
   const directories = [await exactDirectory(github), ...(npm === "-" ? [] : [await exactDirectory(npm)])];
@@ -94,5 +115,10 @@ async function run(args, env) {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  await run(process.argv.slice(2), process.env);
+  try {
+    await run(process.argv.slice(2), process.env);
+  } catch {
+    console.error("COMPONENT_RECEIPT_FAILED");
+    process.exitCode = 1;
+  }
 }
