@@ -9,6 +9,8 @@ use respire_protocol::{HostAuthIdentity, HostAuthOutcome, HostAuthResult};
 use respire_protocol::host_control::{HostAuthAccountOutcome, HostAuthAccountResult,
     HostAuthAuthorization, HostAuthLoginParams, HostAuthRegisterParams};
 
+mod pending_login;
+pub use pending_login::{request_login, LoginAdmission, LoginIntent};
 mod cold_keygen;
 mod login;
 pub use login::verify_login_merge_offer;
