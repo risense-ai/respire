@@ -202,15 +202,11 @@ pub(crate) fn initialize(core: &mut crate::Core, selection: &Selection) -> Resul
     }
     if selection.backend_profile.backend == "host_transport" { core.load_model(config, &[], &[])?; }
     else {
-        selection.verify()?;
-        let weights = std::fs::read(&selection.profile.weights.as_ref().context("weights missing")?.path)?;
-        let tokenizer = std::fs::read(&selection.profile.tokenizer.as_ref().context("tokenizer missing")?.path)?;
-        // Recheck the exact bytes passed to Core, including concurrent file replacement.
-        use sha2::{Digest, Sha256};
-        for (bytes, resource) in [(&weights, &selection.profile.weights), (&tokenizer, &selection.profile.tokenizer)] {
-            let resource = resource.as_ref().context("resource missing")?;
-            anyhow::ensure!(bytes.len() as u64 == resource.size && format!("{:x}",Sha256::digest(bytes)).eq_ignore_ascii_case(&resource.sha256), "model resource changed while loading");
-        }
+        let read = |resource: &Resource| {
+            crate::model_selection::read_verified(&resource.path, resource.size, &resource.sha256)
+        };
+        let weights = read(selection.profile.weights.as_ref().context("weights missing")?)?;
+        let tokenizer = read(selection.profile.tokenizer.as_ref().context("tokenizer missing")?)?;
         core.load_model(config, &weights, &tokenizer)?;
     }
     *loaded = Some(identity);
