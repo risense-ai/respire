@@ -61,7 +61,26 @@ const buildEnv = {...cleanLoaderEnv};
 // Override inputs are permitted by local source builds but never by this hosted producer.
 for (const key of ['ORT_LIB_PATH', 'ORT_LIB_LOCATION', 'ORT_LIB_PROFILE', 'ORT_SKIP_DOWNLOAD',
   'ORT_PREFER_DYNAMIC_LINK', 'RUSTFLAGS', 'CARGO_ENCODED_RUSTFLAGS']) delete buildEnv[key];
-let ortArchiveSha256;
+let ortArchiveSha256, intelProvider;
+if (lane === 'macos-intel') {
+  assert.equal(run('/usr/bin/uname', ['-m']).trim(), 'x86_64');
+  assert.notEqual(run('/usr/sbin/sysctl', ['-in', 'sysctl.proc_translated']).trim(), '1');
+  assert.equal(run('/usr/bin/xcodebuild', ['-version']).trim(), 'Xcode 16.4\nBuild version 16F6');
+  assert.equal(run('/usr/bin/xcrun', ['--sdk', 'macosx', '--show-sdk-version']).trim(), '15.5');
+  for (const crate of ['ort', 'ort-sys']) {
+    const tree = run('cargo', ['+1.95.0', 'tree', '--locked', '--manifest-path', 'apps/runtime/Cargo.toml',
+      '--target', target, '-p', 'respire_runtime', '-e', 'features', '-i', crate + '@2.0.0-rc.13']);
+    assert.equal(Math.max(...Array.from(tree.matchAll(/ort(?:-sys)? feature "api-(\d+)"/g), m => Number(m[1]))), 20);
+  }
+  intelProvider = join(work, 'intel-provider');
+  mkdirSync(intelProvider);
+  const observation = JSON.parse(run('python3', ['-I', 'apps/runtime/scripts/inspect-intel-nuget.py', intelProvider],
+    {env: {...cleanLoaderEnv, DOTNET_CLI_UI_LANGUAGE: 'en-US', DOTNET_CLI_TELEMETRY_OPTOUT: '1', DOTNET_NOLOGO: '1'}}));
+  ortArchiveSha256 = observation.package_sha256;
+  run('cargo', ['+1.95.0', 'fetch', '--locked', '--manifest-path', 'apps/runtime/Cargo.toml', '--target', target]);
+  Object.assign(buildEnv, {ORT_LIB_PATH: intelProvider, ORT_SKIP_DOWNLOAD: '1', ORT_PREFER_DYNAMIC_LINK: '1',
+    CARGO_NET_OFFLINE: 'true'});
+}
 if (platform === 'linux') {
   const ort = join(work, 'pinned-ort');
   run('bash', ['apps/runtime/scripts/prepare-gnu-ort.sh', target, ort], {stdio: 'inherit', env: cleanLoaderEnv});
@@ -103,6 +122,9 @@ if (platform === 'linux') {
   assertNativePE(join(profile, 'DirectML.dll'), arch);
   const ort = join(profile, 'onnxruntime.dll');
   if (existsSync(ort)) assertNativePE(ort, arch);
+} else if (lane === 'macos-intel') {
+  // The packaged proof checks Mach-O architecture, LC_RPATH and the worker's live mapping.
+  loaderMode = 'adjacent-dynamic';
 } else {
   const ort = join(profile, 'libonnxruntime.dylib');
   const inspect = (command, ...args) => run(command, args, {env: cleanLoaderEnv});
@@ -114,7 +136,7 @@ if (platform === 'linux') {
   });
 }
 
-const batch = await stageRuntimeCargo({root, tag, source, target, targetDir, cargoLog, outputParent: work});
+const batch = await stageRuntimeCargo({root, tag, source, target, targetDir, cargoLog, outputParent: work, intelProvider});
 const names = [image, archive, reportName].sort();
 assert.deepEqual(readdirSync(batch.directory).sort(), names, 'Unexpected files in the staged batch');
 const assets = join(root, 'release-assets');
@@ -141,6 +163,17 @@ assert.equal(smoke.archive_sha256, hashes[archive]);
 assert(Array.isArray(smoke.case_results) && smoke.case_results.length > 0 &&
   smoke.case_results.every(result => result.status === 'passed'), 'Incomplete native smoke coverage');
 
+let inference;
+if (lane === 'macos-intel') {
+  inference = JSON.parse(run('python3', ['-I', 'apps/runtime/scripts/prove-packaged-intel.py', root, work, join(assets, archive)],
+    {env: cleanLoaderEnv, timeout: 180000}));
+  assert.equal(inference.binary_sha256, hashes[image]);
+  assert.equal(inference.archive_sha256, hashes[archive]);
+  assert.equal(inference.source, source);
+  assert.equal(inference.run_id, env.GITHUB_RUN_ID);
+  assert.equal(inference.attempt, env.GITHUB_RUN_ATTEMPT);
+}
+
 const directory = join(root, 'release-evidence');
 mkdirSync(directory);
 writeFileSync(join(directory, `runtime-${lane}.json`), JSON.stringify({
@@ -149,6 +182,7 @@ writeFileSync(join(directory, `runtime-${lane}.json`), JSON.stringify({
   run_id: env.GITHUB_RUN_ID, run_attempt: env.GITHUB_RUN_ATTEMPT,
   target, tag, artifact_sha256: hashes,
   native_identity: {runner_os: env.RUNNER_OS, runner_arch: env.RUNNER_ARCH, node_arch: arch, rust_host: rustHost},
+  ...(inference && {packaged_inference: inference}),
   ...(loaderMode && {native_loader: loaderMode}),
   ...(ortArchiveSha256 && {provider_archive_sha256: ortArchiveSha256}),
   packaged_native_smoke: {passed: true, case_results: smoke.case_results},

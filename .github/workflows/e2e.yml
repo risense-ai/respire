@@ -1,16 +1,38 @@
-name: Compiled black-box acceptance
+name: Compiled acceptance and Client2 preview
 on:
   workflow_dispatch:
   pull_request:
+    branches: [main]
+    types: [opened, reopened, synchronize, ready_for_review, labeled]
     paths:
       - 'apps/**'
       - 'contracts/**'
       - 'packages/**'
       - '.github/workflows/e2e.yml'
-permissions:
-  contents: read
+      - 'scripts/e2e/**'
+      - 'scripts/pr-preview/**'
+  pull_request_target:
+    branches: [main]
+    types: [opened, reopened, synchronize, labeled]
+permissions: {}
+concurrency:
+  group: e2e-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+env:
+  PR_NUMBER: ${{ github.event.pull_request.number }}
+  PR_HEAD: ${{ github.event.pull_request.head.sha }}
 jobs:
   compiled:
+    # Relevant ready PRs run automatically. A same-repository draft can opt in
+    # with the compiled-e2e label. Unrelated label events do not rerun the matrix.
+    if: >-
+      github.repository == 'risense-ai/respire' &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository &&
+        (github.event.action != 'labeled' || github.event.label.name == 'compiled-e2e') &&
+        (!github.event.pull_request.draft || contains(github.event.pull_request.labels.*.name, 'compiled-e2e'))))
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -55,4 +77,144 @@ jobs:
           runtime=$(node -p 'require("fs").realpathSync(process.argv[1])' "apps/runtime/target/$TARGET/debug/rsrs-runtime$EXE")
           cli=$(node -p 'require("fs").realpathSync(process.argv[1])' "apps/cli/target/$TARGET/debug/rsrs$EXE")
           node -e 'for(const p of process.argv.slice(1))console.log(require("crypto").createHash("sha256").update(require("fs").readFileSync(p)).digest("hex"),p)' "$runtime" "$cli"
-          node referee/test-cases/runner.mjs --runtime-bin "$runtime" --cli-bin "$cli" --synthetic-ready --verify
+          if [[ "$RUNNER_OS" == macOS ]]; then
+            scratch=$(mktemp -d "$RUNNER_TEMP/compiled-e2e.XXXXXXXX")
+            TMPDIR=$(cd "$scratch" && pwd -P)
+            export TMPDIR
+            node -e 'const p=require("os").tmpdir();require("assert").strictEqual(require("fs").realpathSync(p),p)'
+          fi
+          log=$(mktemp)
+          runner_status=0
+          node scripts/e2e/compiled-scenarios.mjs "$runtime" "$cli" 2>&1 | tee "$log" || runner_status=$?
+          verdict_status=0
+          node scripts/e2e/compiled-verdict.mjs "$log" || verdict_status=$?
+          if (( runner_status )); then exit "$runner_status"; fi
+          exit "$verdict_status"
+  detect:
+    if: (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.repository == 'risense-ai/respire' && github.event.pull_request.head.repo.full_name == github.repository && (github.event.action != 'labeled' || github.event.label.name == 'ui-preview')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      eligible: ${{ steps.paths.outputs.eligible }}
+      digest: ${{ steps.input.outputs.digest }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event.pull_request.base.sha }}
+          persist-credentials: false
+      - name: Inspect changed paths without running PR code
+        id: paths
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'ui-preview') }}
+        run: |
+          set -euo pipefail
+          git -c "http.extraHeader=Authorization: Basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)" fetch --no-tags --depth=1 origin "refs/pull/$PR_NUMBER/head"
+          test "$(git rev-parse FETCH_HEAD)" = "$PR_HEAD"
+          gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files" --jq '.[] | .filename, (.previous_filename // empty)' > "$RUNNER_TEMP/paths"
+          if [[ "$GITHUB_EVENT_NAME" == pull_request ]]; then
+            grep -Eq '^(\.github/workflows/e2e\.yml$|scripts/pr-preview/)' "$RUNNER_TEMP/paths" || exit 0
+          elif [[ "$LABEL" != true ]]; then
+            grep -Eq '^apps/client2/(.*/)?(frontend|desktop)/' "$RUNNER_TEMP/paths" || exit 0
+          fi
+          echo eligible=true >> "$GITHUB_OUTPUT"
+      - if: steps.paths.outputs.eligible == 'true'
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: risense-ai/respire-resources
+          ref: ade89e47833f99baf7f6acba7592d59ffc789d0c
+          path: referee
+          persist-credentials: false
+      - if: steps.paths.outputs.eligible == 'true'
+        id: input
+        run: |
+          set -euo pipefail
+          mkdir -p stage/build/ref
+          git -C referee archive ade89e47833f99baf7f6acba7592d59ffc789d0c test-cases prototypes | tar -x -C stage/build/ref
+          cp scripts/pr-preview/{Dockerfile,record.mjs,canonical.py} stage/build/
+          curl -fsSL 'https://raw.githubusercontent.com/wailsapp/wails/7b11001b92b712210b27d8cb53430e83f67ad8e4/v3/internal/assetserver/bundledassets/runtime.js' -o stage/build/wails.js
+          echo '8326f27a4c511e71cf1e64eb8b861fd201b9cf0ca6035bfd65fc4dfd2cb0f25b  stage/build/wails.js' | sha256sum -c -
+          echo 'cabeda57d6c8f41f29b7d9b8fc1a71d9fa44f956821278467b4183bd15426036  scripts/pr-preview/inputs.py' | sha256sum -c -
+          digest=$(python3 scripts/pr-preview/inputs.py "$PR_HEAD" stage/input/bundle)
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+      - if: steps.paths.outputs.eligible == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: preview-input-${{ github.run_id }}-${{ github.run_attempt }}
+          path: stage/
+          if-no-files-found: error
+          retention-days: 1
+  record:
+    needs: detect
+    if: needs.detect.outputs.eligible == 'true'
+    permissions: {}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    outputs:
+      media: ${{ steps.media.outputs.artifact-id }}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: preview-input-${{ github.run_id }}-${{ github.run_attempt }}
+          path: stage
+      - name: Record with synthetic data on isolated loopback
+        env:
+          EXPECTED: ${{ needs.detect.outputs.digest }}
+        run: |
+          set -euo pipefail
+          docker build -t preview-recorder stage/build
+          mkdir media
+          chmod 777 media
+          docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges --pids-limit 256 --memory 2g --shm-size 256m --tmpfs /tmp:rw,size=256m -v "$PWD/stage/input:/input:ro" -v "$PWD/media:/out:rw" preview-recorder "$PR_HEAD" "$EXPECTED"
+          python3 - <<'PY'
+          import pathlib,re
+          root=pathlib.Path('media')
+          assert {p.name for p in root.iterdir()}=={'en.png','zh.png','en.mp4','zh.mp4'}
+          for p in root.iterdir():
+              assert not p.is_symlink() and p.is_file() and 32<=p.stat().st_size<=5242880
+              assert not re.search(rb'-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----|github_pat_[A-Za-z0-9_]{25,}|gh[pousr]_[A-Za-z0-9]{30,}|AKIA[A-Z0-9]{16}',p.read_bytes())
+          PY
+      - name: Decode and re-encode on a separate isolated container
+        run: |
+          set -euo pipefail
+          mkdir canonical
+          chmod 777 canonical
+          timeout 180 docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges --pids-limit 64 --memory 768m --cpus 2 --tmpfs /tmp:rw,size=360m -v "$PWD/media:/raw:ro" -v "$PWD/canonical:/clean:rw" --entrypoint python3 preview-recorder /app/canonical.py /raw /clean
+          python3 - <<'PYTHON'
+          from pathlib import Path
+          paths = list(Path("canonical").iterdir())
+          assert {p.name for p in paths} == {"en.png","en.mp4","zh.png","zh.mp4"}
+          assert all(not p.is_symlink() and p.is_file() and 32 <= p.stat().st_size <= 5242880 for p in paths)
+          assert sum(p.stat().st_size for p in paths) <= 12 * 1024 * 1024
+          PYTHON
+      - id: media
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ui-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
+          path: canonical/
+          if-no-files-found: error
+          retention-days: 3
+  publish:
+    needs: record
+    if: github.event_name == 'pull_request_target'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    concurrency: ui-preview-branch-writer
+    permissions:
+      actions: read
+      contents: write
+      pull-requests: read
+      checks: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+          sparse-checkout: scripts/pr-preview
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          MEDIA_ID: ${{ needs.record.outputs.media }}
+        run: python3 scripts/pr-preview/publish.py publish
