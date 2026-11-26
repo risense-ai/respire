@@ -93,13 +93,25 @@ fn scoped_archive_over_loopback() -> Result<()> {
                 move |ConnectInfo(crate::network::Peer(peer)): ConnectInfo<crate::network::Peer>,
                       request: Request| get(bound, peer, request),
             )));
+            #[cfg(target_os = "linux")]
+            let (app, tickets) = {
+                let (worker, tickets) = tokio::sync::mpsc::channel(1);
+                let target = service::database_path(&root)?.canonicalize()?;
+                let app = app.merge(Router::new().route("/v1/backups/import", routing::post(
+                    move |ConnectInfo(crate::network::Peer(peer)): ConnectInfo<crate::network::Peer>,
+                          request: Request| super::super::operations::backup_import::post(
+                              bound, peer, request, target.clone(), worker.clone(),
+                          ),
+                )));
+                (app, tickets)
+            };
             let server = tokio::spawn(async move {
                 axum::serve(
                     crate::network::Listener(listener),
                     app.into_make_service_with_connect_info::<crate::network::Peer>(),
                 ).await
             });
-            let result = tokio::task::spawn_blocking(move || verify_http(bound, &root, urk)).await;
+            let result = tokio::task::spawn_blocking(move || verify_http(bound, &root, urk, #[cfg(target_os = "linux")] tickets)).await;
             server.abort();
             let _ = server.await;
             result?
@@ -113,7 +125,9 @@ fn scoped_archive_over_loopback() -> Result<()> {
     Ok(())
 }
 
-fn verify_http(bound: SocketAddr, root: &Path, urk: [u8; 32]) -> Result<()> {
+fn verify_http(bound: SocketAddr, root: &Path, urk: [u8; 32],
+    #[cfg(target_os = "linux")] mut tickets: tokio::sync::mpsc::Receiver<super::super::operations::backup_import::Ticket>,
+) -> Result<()> {
     let base = format!("http://{bound}");
     let agent = ureq::AgentBuilder::new().try_proxy_from_env(false).timeout(WAIT).build();
     let get = |name: &str| agent.get(&format!("{base}{name}"));
@@ -155,6 +169,65 @@ fn verify_http(bound: SocketAddr, root: &Path, urk: [u8; 32]) -> Result<()> {
         let mut wire = Vec::new();
         response.into_reader().take(2 * 1024 * 1024 + 1).read_to_end(&mut wire)?;
         ensure!(wire.len() <= 2 * 1024 * 1024, "fixture archive exceeded its byte budget");
+        #[cfg(target_os = "linux")]
+        {
+            let upload = |payload: &[u8]| post("/v1/backups/import?space_id=main")
+                .set("Content-Type", "application/octet-stream").send_bytes(payload);
+            let reject = |payload: &[u8]| -> Result<()> {
+                ensure!(matches!(upload(payload), Err(ureq::Error::Status(400, _))), "invalid upload accepted");
+                ensure!(tickets.is_empty(), "rejected upload reached confirmation worker");
+                Ok(())
+            };
+            if space == "main" {
+                reject(b"invalid envelope")?;
+                reject(&wire[..wire.len()-1])?;
+                let mut bad_seal = wire.clone();
+                let field = br#""sealed_manifest_digest":""#;
+                let seal = bad_seal.windows(field.len()).position(|bytes| bytes == field)
+                    .context("fixture seal missing")? + field.len();
+                bad_seal[seal] = if bad_seal[seal] == b'A' { b'B' } else { b'A' };
+                reject(&bad_seal)?;
+                {
+                    use std::{io::Write, net::{Shutdown, TcpStream}};
+                    let mut stream = TcpStream::connect(bound)?;
+                    stream.set_read_timeout(Some(WAIT))?;
+                    stream.set_write_timeout(Some(WAIT))?;
+                    write!(stream, "POST /v1/backups/import HTTP/1.1\r\nHost: {bound}\r\nAuthorization: Bearer {TOKEN}\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", wire.len())?;
+                    stream.write_all(&wire[..wire.len()/2])?;
+                    stream.shutdown(Shutdown::Write)?;
+                    let mut reply = Vec::new();
+                    stream.take(8192).read_to_end(&mut reply)?;
+                    ensure!(!reply.starts_with(b"HTTP/1.1 202"), "aborted upload accepted");
+                    ensure!(tickets.is_empty(), "aborted upload reached worker");
+                }
+                let mut corrupt = wire.clone();
+                *corrupt.last_mut().context("empty archive")? ^= 1;
+                reject(&corrupt)?;
+                reject(&vec![0; 2 * 1024 * 1024 + 1])?;
+                let accepted = upload(&wire)?;
+                assert_eq!(accepted.status(), 202);
+                let receipt: Value = accepted.into_json()?;
+                let ticket = tickets.try_recv()?;
+                let id = ticket.operation_id().map_err(|_| anyhow::anyhow!("missing registry ID"))?;
+                assert_eq!(receipt, json!({"operation_id": id, "status": "pending"}));
+                let status: Value = get(&format!("/v1/operations/{id}"))
+                    .set("Authorization", &format!("Bearer {TOKEN}")).call()?.into_json()?;
+                assert_eq!(status["state"], "pending");
+                assert_eq!(ticket.target, service::database_path(root)?.canonicalize()?);
+                assert_eq!(ticket.archive_sha256, <[u8; 32]>::from(Sha256::digest(&wire)));
+                let handoff = ticket.pending.handoff();
+                let ready = ticket.pending.publish(|| Ok(()))?;
+                ready.consume(|input| {
+                    let mut staged = Vec::new();
+                    input.read_to_end(&mut staged)?;
+                    assert_eq!(staged, wire);
+                    Ok(())
+                })?;
+                handoff.discard(root)?;
+            } else {
+                reject(&wire)?;
+            }
+        }
         let output = tempfile::NamedTempFile::new_in(root)?;
         open_to_stage(&keys, "backup-fixture", wire.as_slice(), output.as_file(), || Ok(()))?;
         let db = rusqlite::Connection::open(output.path())?;
