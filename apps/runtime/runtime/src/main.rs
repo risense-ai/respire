@@ -30,10 +30,7 @@ use respire_commands::net_rpc;
 use respire_commands::rpc_serve::{self, RuntimeFlags};
 use respire_protocol::RuntimeIdentity;
 
-#[cfg(not(feature = "e2e-loopback-mirror"))]
 const VERSION: &str = env!("CARGO_PKG_VERSION");
-#[cfg(feature = "e2e-loopback-mirror")]
-const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "+e2e-loopback-mirror");
 
 fn main() -> ExitCode {
     for name in [

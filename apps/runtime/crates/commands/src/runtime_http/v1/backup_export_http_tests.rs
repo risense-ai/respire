@@ -83,6 +83,13 @@ fn scoped_archive_over_loopback() -> Result<()> {
 
     let (stop, stopped) = std::sync::mpsc::channel::<()>();
     let (ready, started) = std::sync::mpsc::channel();
+    let orphan_file = root.join(".backup-archive-0123456789abcdef0123456789abcdef.pending");
+    let orphan_dir = root.join(".backup-export-0123456789abcdef0123456789abcdef");
+    let keep_file = root.join("unrelated-keep.txt");
+    fs::write(&orphan_file, b"stale")?;
+    fs::create_dir(&orphan_dir)?;
+    fs::write(orphan_dir.join("prepared.db"), b"stale")?;
+    fs::write(&keep_file, b"keep")?;
     let profile = root.clone();
     let dispatch = thread::spawn(move || -> Result<()> {
         let lock = respire_app::lock::LibraryLock::acquire(&profile, WAIT)?;
@@ -93,9 +100,7 @@ fn scoped_archive_over_loopback() -> Result<()> {
         let (store, _) = service::open_runtime_store(&lock)?;
         let mut dispatcher = crate::runtime_http::start_owner_dispatch().context("fixture dispatcher unavailable")?;
         ready.send(())?;
-        while let Err(std::sync::mpsc::RecvTimeoutError::Timeout) =
-            stopped.recv_timeout(Duration::from_millis(5))
-        {
+        while let Err(std::sync::mpsc::RecvTimeoutError::Timeout) = stopped.recv_timeout(Duration::from_millis(5)) {
             dispatcher.tick(Some(&store), &lock);
         }
         Ok(())
@@ -263,17 +268,17 @@ fn verify_http(bound: SocketAddr, root: &Path, urk: [u8; 32]) -> Result<()> {
         ensure!(Instant::now() < owner_deadline, "native owner credential not ready");
         thread::sleep(Duration::from_millis(10));
     }
+    assert_eq!(backup_stage_count(root)?, 0);
+    assert!(root.join("unrelated-keep.txt").exists());
     let health: Value = get("/v1/health").call()?.into_json()?;
     assert_eq!(health["status"], "ready");
     let health_instance = health["instance_id"].as_str().context("serving instance ID")?;
     let (live_instance, live_generation) = crate::rpc_serve::with_verified_owner_scope(
         |_, _, instance, generation, _| (instance, generation),
-    )
-    .context("live owner scope missing")?;
+    ).context("live owner scope missing")?;
     assert_eq!(live_instance.to_string(), health_instance);
     let record = respire_spawn::owner_credential::read_owner_credential(
-        &crate::rpc_worker::runtime_dir(),
-        &live_instance.to_string(),
+        &crate::rpc_worker::runtime_dir(), &live_instance.to_string(),
     )?;
     let main_db = service::database_path(root)?.canonicalize()?;
     let child_db = root.join(".respire-local-spaces-v1").join(space).join("onememory.db").canonicalize()?;
@@ -287,11 +292,8 @@ fn verify_http(bound: SocketAddr, root: &Path, urk: [u8; 32]) -> Result<()> {
     let sign_confirm = |op: uuid::Uuid, archive: [u8; 32], target: [u8; 32]| -> Result<String> {
         let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as u64;
         let claim = respire_spawn::owner_credential::backup_proof::BackupRestoreClaim {
-            operation_id: *op.as_bytes(),
-            archive_sha256: archive,
-            target_sha256: target,
-            instance: *live_instance.as_bytes(),
-            generation: live_generation,
+            operation_id: *op.as_bytes(), archive_sha256: archive, target_sha256: target,
+            instance: *live_instance.as_bytes(), generation: live_generation,
         };
         let proof = respire_spawn::owner_credential::backup_proof::issue(record.as_bytes(), claim, now_ms)
             .context("backup confirmation proof issue failed")?;
@@ -301,10 +303,8 @@ fn verify_http(bound: SocketAddr, root: &Path, urk: [u8; 32]) -> Result<()> {
         agent.post(&format!("{base}/api/runtime/private-backup/confirm"))
             .set("x-respire-backup-proof", proof)
             .send_json(json!({
-                "schema_version": 1,
-                "operation_id": op.to_string(),
-                "archive_sha256": hex::encode(archive),
-                "target_sha256": hex::encode(target),
+                "schema_version": 1, "operation_id": op.to_string(),
+                "archive_sha256": hex::encode(archive), "target_sha256": hex::encode(target),
             }))
     };
 
@@ -529,6 +529,27 @@ fn verify_http(bound: SocketAddr, root: &Path, urk: [u8; 32]) -> Result<()> {
     assert_eq!(list_ids(space)?, BTreeSet::from([child]));
     assert_eq!(backup_stage_count(root)?, 0);
     ensure!(matches!(call_confirm(main_uuid, main_digest, main_target, &main_confirm_proof), Err(ureq::Error::Status(401, _))));
+    // Idle TTL expiration removes staged custody on disk without any follow-up HTTP request.
+    let ttl_op = {
+        let _ttl = super::super::operations::backup_import::set_pending_ttl_for_test(Duration::from_millis(200));
+        let ttl_reply = post(&format!("/v1/backups/import?space_id={space}"))
+            .set("Content-Type", "application/octet-stream").send_bytes(&child_wire)?;
+        assert_eq!(ttl_reply.status(), 202);
+        let ttl_receipt: Value = ttl_reply.into_json()?;
+        let id = ttl_receipt["operation_id"].as_str().context("ttl operation_id missing")?.to_owned();
+        assert_eq!(backup_stage_count(root)?, 1);
+        let ttl_deadline = Instant::now() + WAIT;
+        while backup_stage_count(root)? != 0 {
+            ensure!(Instant::now() < ttl_deadline, "idle TTL did not reap staged backup custody");
+            thread::sleep(Duration::from_millis(20));
+        }
+        id
+    };
+    let ttl_uuid = uuid::Uuid::parse_str(&ttl_op)?;
+    let ttl_status: Value = get(&format!("/v1/operations/{ttl_op}")).set("Authorization", &format!("Bearer {TOKEN}")).call()?.into_json()?;
+    assert_eq!(ttl_status["state"], "cancelled");
+    let ttl_proof = sign_confirm(ttl_uuid, child_digest, child_target)?;
+    ensure!(matches!(call_confirm(ttl_uuid, child_digest, child_target, &ttl_proof), Err(ureq::Error::Status(404, _))));
     Ok(())
 }
 

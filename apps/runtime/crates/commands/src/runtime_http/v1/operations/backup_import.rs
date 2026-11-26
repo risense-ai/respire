@@ -11,11 +11,13 @@ use axum::{
 };
 use respire_app::snapshot::{backup_archive::BackupArchiveHeader, Manifest};
 use sha2::{Digest, Sha256};
+#[path = "backup_import_custody.rs"]
+mod custody;
 #[path = "backup_import_stream.rs"]
 mod stream;
+pub(in crate::runtime_http::v1) use custody::sweep_orphaned_stages;
 use std::{
     collections::BTreeMap,
-    io::Write,
     net::SocketAddr,
     path::PathBuf,
     sync::{Arc, Mutex, OnceLock},
@@ -30,9 +32,45 @@ const MAX_PENDING: usize = 2;
 static UPLOADS: Semaphore = Semaphore::const_new(2);
 static PENDING_IMPORTS: OnceLock<Mutex<BTreeMap<Uuid, PendingImport>>> = OnceLock::new();
 #[cfg(test)]
+static PENDING_TTL_OVERRIDE: OnceLock<Mutex<Option<Duration>>> = OnceLock::new();
+#[cfg(test)]
 static BEFORE_RESTORE_COMMIT: OnceLock<Mutex<Option<Box<dyn FnOnce() + Send>>>> = OnceLock::new();
 #[cfg(test)]
 static DURING_RESTORE_COMMIT: OnceLock<Mutex<Option<Box<dyn FnOnce() + Send>>>> = OnceLock::new();
+
+#[cfg(test)]
+pub(in crate::runtime_http::v1) struct PendingTtlGuard;
+
+#[cfg(test)]
+impl Drop for PendingTtlGuard {
+    fn drop(&mut self) {
+        if let Some(slot) = PENDING_TTL_OVERRIDE.get() {
+            if let Ok(mut guard) = slot.lock() {
+                *guard = None;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+pub(in crate::runtime_http::v1) fn set_pending_ttl_for_test(ttl: Duration) -> PendingTtlGuard {
+    let slot = PENDING_TTL_OVERRIDE.get_or_init(|| Mutex::new(None));
+    if let Ok(mut guard) = slot.lock() {
+        *guard = Some(ttl);
+    }
+    PendingTtlGuard
+}
+
+fn pending_ttl() -> Duration {
+    #[cfg(test)]
+    if let Some(ttl) = PENDING_TTL_OVERRIDE
+        .get()
+        .and_then(|slot| slot.lock().ok().and_then(|guard| *guard))
+    {
+        return ttl;
+    }
+    PENDING_TTL
+}
 
 #[cfg(test)]
 pub(in crate::runtime_http::v1) fn set_before_restore_hook(hook: Box<dyn FnOnce() + Send>) {
@@ -56,10 +94,10 @@ struct PendingImport {
     target: PathBuf,
     target_sha256: [u8; 32],
     archive_sha256: [u8; 32],
-    staged: tempfile::TempPath,
+    staged: custody::StagedImport,
     manifest: Manifest,
     job: state::Job,
-    created_at: Instant,
+    expires_at: Instant,
 }
 
 pub(in crate::runtime_http::v1) struct LocalRestoreConfirmation {
@@ -76,10 +114,10 @@ fn pending_map() -> &'static Mutex<BTreeMap<Uuid, PendingImport>> {
 fn is_entry_stale(
     owner: &transport::RestScope,
     entry: &Entry,
-    created_at: Instant,
+    expires_at: Instant,
     now: Instant,
 ) -> bool {
-    now.saturating_duration_since(created_at) >= PENDING_TTL
+    now >= expires_at
         || entry.cancelled().unwrap_or(true)
         || !transport::scope_is_live(owner)
 }
@@ -87,13 +125,16 @@ fn is_entry_stale(
 /// Strictly leaf-locked: inspects candidates under PENDING_IMPORTS, drops lock before checking
 /// session/operation state, then removes expired entries before dropping temp files or finishing jobs.
 pub(in crate::runtime_http::v1) fn reap_stale() {
+    let Some(map) = PENDING_IMPORTS.get() else {
+        return;
+    };
     let snapshot: Vec<(Uuid, transport::RestScope, Arc<Entry>, Instant)> = {
-        let Ok(guard) = pending_map().lock() else {
+        let Ok(guard) = map.lock() else {
             return;
         };
         guard
             .iter()
-            .map(|(id, entry)| (*id, entry.owner.clone(), entry.job.entry(), entry.created_at))
+            .map(|(id, entry)| (*id, entry.owner.clone(), entry.job.entry(), entry.expires_at))
             .collect()
     };
     if snapshot.is_empty() {
@@ -102,14 +143,14 @@ pub(in crate::runtime_http::v1) fn reap_stale() {
     let now = Instant::now();
     let stale_ids: Vec<Uuid> = snapshot
         .into_iter()
-        .filter(|(_, owner, entry, created_at)| is_entry_stale(owner, entry, *created_at, now))
+        .filter(|(_, owner, entry, expires_at)| is_entry_stale(owner, entry, *expires_at, now))
         .map(|(id, _, _, _)| id)
         .collect();
     if stale_ids.is_empty() {
         return;
     }
     let removed: Vec<PendingImport> = {
-        let Ok(mut guard) = pending_map().lock() else {
+        let Ok(mut guard) = map.lock() else {
             return;
         };
         stale_ids.into_iter().filter_map(|id| guard.remove(&id)).collect()
@@ -187,22 +228,24 @@ pub(in crate::runtime_http::v1) async fn enqueue(
             },
         )
         .ok_or_else(transport::unavailable)??;
-        let mut temp = tempfile::Builder::new()
-            .prefix(".backup-archive-")
-            .suffix(".pending")
-            .tempfile_in(&scope.canonical_profile)
-            .map_err(|_| transport::unavailable())?;
-        let manifest = authenticated
-            .copy_to_stage(&mut database, temp.as_file_mut(), || {
-                anyhow::ensure!(tokio::time::Instant::now() < deadline, "upload deadline expired");
-                anyhow::ensure!(transport::scope_is_live(&scope), "owner scope expired");
+        let mut manifest = None;
+        let staged = custody::StagedImport::create_and_write(
+            &scope.canonical_profile,
+            Uuid::new_v4(),
+            |file| {
+                let parsed = authenticated
+                    .copy_to_stage(&mut database, file, || {
+                        anyhow::ensure!(tokio::time::Instant::now() < deadline, "upload deadline expired");
+                        anyhow::ensure!(transport::scope_is_live(&scope), "owner scope expired");
+                        Ok(())
+                    })
+                    .map_err(|_| transport::invalid())?;
+                manifest = Some(parsed);
                 Ok(())
-            })
-            .map_err(|_| transport::invalid())?;
-        temp.as_file_mut().flush().map_err(|_| transport::unavailable())?;
-        temp.as_file().sync_all().map_err(|_| transport::unavailable())?;
+            },
+        )?;
+        let manifest = manifest.ok_or_else(transport::invalid)?;
         let archive_sha256 = database.verified_digest()?;
-        let staged = temp.into_temp_path();
         Ok::<_, Problem>((staged, manifest, archive_sha256, target_sha256))
     });
     let (staged, manifest, archive_sha256, target_sha256) = tokio::time::timeout_at(deadline, async {
@@ -232,6 +275,7 @@ pub(in crate::runtime_http::v1) async fn enqueue(
     let id = Uuid::parse_str(&job.id()?).map_err(|_| transport::unavailable())?;
     let accepted = job.accepted()?;
     let receipt = transport::json_response(StatusCode::ACCEPTED, accepted)?;
+    let expires_at = Instant::now() + pending_ttl();
     let overflow = {
         let mut guard = pending_map().lock().map_err(|_| transport::unavailable())?;
         if guard.len() >= MAX_PENDING {
@@ -248,7 +292,7 @@ pub(in crate::runtime_http::v1) async fn enqueue(
                     staged,
                     manifest,
                     job,
-                    created_at: Instant::now(),
+                    expires_at,
                 },
             );
             None
@@ -259,6 +303,13 @@ pub(in crate::runtime_http::v1) async fn enqueue(
         job.finish(Phase::Cancelled);
         return Err(transport::unavailable());
     }
+    tokio::spawn(async move {
+        tokio::time::sleep_until(tokio::time::Instant::from_std(expires_at)).await;
+        while Instant::now() < expires_at {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        reap_stale();
+    });
     Ok(receipt)
 }
 
@@ -287,7 +338,7 @@ pub(in crate::runtime_http::v1) async fn confirm_local_restore(
     confirmation: LocalRestoreConfirmation,
 ) -> V1Result<()> {
     reap_stale();
-    let (owner_scope, entry, created_at) = {
+    let (owner_scope, entry, expires_at) = {
         let guard = pending_map().lock().map_err(|_| transport::unavailable())?;
         let pending = guard
             .get(&confirmation.operation_id)
@@ -295,9 +346,9 @@ pub(in crate::runtime_http::v1) async fn confirm_local_restore(
         if !matches_confirmation(pending, &confirmation) {
             return Err(mismatch());
         }
-        (pending.owner.clone(), pending.job.entry(), pending.created_at)
+        (pending.owner.clone(), pending.job.entry(), pending.expires_at)
     };
-    if is_entry_stale(&owner_scope, &entry, created_at, Instant::now()) {
+    if is_entry_stale(&owner_scope, &entry, expires_at, Instant::now()) {
         discard_cancelled(confirmation.operation_id);
         return Err(mismatch());
     }
@@ -342,9 +393,12 @@ pub(in crate::runtime_http::v1) async fn confirm_local_restore(
                 {
                     hook();
                 }
+                staged
+                    .verify_private()
+                    .map_err(|_| anyhow::anyhow!("staged backup custody verification failed"))?;
                 let outcome = ctx
                     .library
-                    .restore_staged_backup(&target, staged.as_ref(), &manifest, store)?;
+                    .restore_staged_backup(&target, staged.path(), &manifest, store)?;
                 if let Some(warning) = outcome.post_commit_warning {
                     eprintln!("command=backup_import status=post_commit_warning error={warning}");
                 }

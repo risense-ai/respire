@@ -85,19 +85,20 @@ pub(super) async fn get(bound: SocketAddr, peer: SocketAddr, request: Request) -
             verify(&worker_scope, || Ok(()))
         };
         check()?;
-        let staged = PortableStage::new(worker_scope.canonical_profile.join(format!(
-            ".backup-export-{}.pending",
-            uuid::Uuid::new_v4().simple()
-        )));
+        let staged = respire_spawn::owner_credential::PrivateRestoreStage::create(
+            &worker_scope.canonical_profile,
+            &format!(".backup-export-{}", uuid::Uuid::new_v4().simple()),
+        )?;
         let header = with_library(&worker_scope, |library| {
-            library.seal_portable_backup_export(&target, &staged.0)
+            library.seal_portable_backup_export(&target, staged.path())
         })?;
         check()?;
-        let file = std::fs::File::open(&staged.0)?;
+        let file = staged.open_verified_read()?;
+        let remaining = file.metadata()?.len();
         let reader = PortableReader {
             header: io::Cursor::new(header),
             file,
-            remaining: std::fs::metadata(&staged.0)?.len(),
+            remaining,
             _staged: staged,
         };
         Ok((reader, permit))
@@ -124,22 +125,11 @@ pub(super) async fn get(bound: SocketAddr, peer: SocketAddr, request: Request) -
 }
 
 #[cfg(windows)]
-struct PortableStage(std::path::PathBuf);
-#[cfg(windows)]
-impl PortableStage {
-    fn new(path: std::path::PathBuf) -> Self { Self(path) }
-}
-#[cfg(windows)]
-impl Drop for PortableStage {
-    fn drop(&mut self) { let _ = std::fs::remove_file(&self.0); }
-}
-
-#[cfg(windows)]
 struct PortableReader {
     header: io::Cursor<Vec<u8>>,
     file: std::fs::File,
     remaining: u64,
-    _staged: PortableStage,
+    _staged: respire_spawn::owner_credential::PrivateRestoreStage,
 }
 
 #[cfg(windows)]

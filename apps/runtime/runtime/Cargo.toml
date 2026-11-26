@@ -12,9 +12,6 @@ publish = false
 name = "rsrs-runtime"
 path = "src/main.rs"
 
-[features]
-e2e-loopback-mirror = ["respire_commands/e2e-loopback-mirror"]
-
 [dependencies]
 respire_client_host = { path = "../crates/client-host", features = ["locks"] }
 respire_app = { package = "respire_app", path = "../crates/app", default-features = false }

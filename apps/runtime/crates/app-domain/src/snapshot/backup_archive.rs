@@ -290,26 +290,57 @@ pub(crate) fn seal_database_header(
     live_database: &Path,
     stage_path: &Path,
 ) -> Result<Vec<u8>> {
-    use rusqlite::{Connection, OpenFlags, OptionalExtension};
+    use rusqlite::{
+        backup::{Backup, StepResult},
+        Connection, OpenFlags, OptionalExtension,
+    };
     let canonical = live_database.canonicalize()?;
     ensure!(canonical == live_database, "backup source must be canonical");
     let source_text = canonical.to_str().context("backup source must be UTF-8")?;
     let source_library = format!("{:x}", Sha256::digest(source_text.as_bytes()));
     let account_fingerprint = format!("{:x}", Sha256::digest(account.as_bytes()));
     let id = uuid::Uuid::new_v4().simple().to_string();
-    crate::service::backup_database_policy(live_database, stage_path, true)?;
-    let (nonce, ciphertext) =
-        keys.encrypt_content(&format!("snapshot-key-check:v1:{id}:{source_library}:{account_fingerprint}"))?;
-    let copy = Connection::open_with_flags(
-        stage_path,
-        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
-    )?;
+    let stage_meta = std::fs::symlink_metadata(stage_path)?;
+    ensure!(
+        stage_meta.is_file() && !stage_meta.file_type().is_symlink() && stage_meta.len() == 0,
+        "backup export stage must be a new empty regular file"
+    );
+    let flags = OpenFlags::SQLITE_OPEN_NOFOLLOW;
+    let source = Connection::open_with_flags(live_database, OpenFlags::SQLITE_OPEN_READ_ONLY | flags)?;
+    let mut copy =
+        Connection::open_with_flags(stage_path, OpenFlags::SQLITE_OPEN_READ_WRITE | flags)?;
     let mode: String = copy.query_row("PRAGMA journal_mode=MEMORY", [], |row| row.get(0))?;
     ensure!(mode.eq_ignore_ascii_case("memory"), "unsafe backup stage journal mode");
+    {
+        let backup = Backup::new(&source, &mut copy)?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
+        loop {
+            ensure!(
+                std::time::Instant::now() < deadline,
+                "portable backup export exceeded its deadline"
+            );
+            match backup.step(256)? {
+                StepResult::Done => break,
+                StepResult::More => continue,
+                StepResult::Busy | StepResult::Locked => {
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                }
+                _ => anyhow::bail!("unexpected portable backup step"),
+            }
+        }
+    }
+    drop(source);
+    let mode: String = copy.query_row("PRAGMA journal_mode=MEMORY", [], |row| row.get(0))?;
+    ensure!(mode.eq_ignore_ascii_case("memory"), "unsafe backup stage journal mode");
+    crate::service::sanitize_detached_backup(&mut copy)?;
+    let (nonce, ciphertext) =
+        keys.encrypt_content(&format!("snapshot-key-check:v1:{id}:{source_library}:{account_fingerprint}"))?;
     copy.execute_batch("DROP TABLE IF EXISTS snapshot_key_check; CREATE TABLE snapshot_key_check(singleton INTEGER PRIMARY KEY CHECK(singleton=1),nonce TEXT NOT NULL,ciphertext TEXT NOT NULL);")?;
     copy.execute("INSERT INTO snapshot_key_check VALUES(1,?1,?2)", rusqlite::params![nonce, ciphertext])?;
     let mode: String = copy.query_row("PRAGMA journal_mode=DELETE", [], |row| row.get(0))?;
     ensure!(mode.eq_ignore_ascii_case("delete"), "backup stage is not standalone");
+    let integrity: String = copy.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
+    ensure!(integrity == "ok", "backup export stage failed SQLite quick_check");
     let selection: Option<String> = copy
         .query_row(
             "SELECT value FROM meta WHERE key=?1",

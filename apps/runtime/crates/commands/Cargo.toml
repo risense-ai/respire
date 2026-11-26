@@ -12,8 +12,6 @@ publish = false
 # Mirrors the CLI's native-fault-tests marker so version strings keep their
 # non-releasable suffix when the fixture feature is enabled upstream.
 native-fault-tests = []
-# Opt-in HTTP loopback model mirror override for local E2E runs only.
-e2e-loopback-mirror = []
 
 [dependencies]
 respire_app = { package = "respire_app", path = "../app", default-features = false }

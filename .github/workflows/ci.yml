@@ -429,6 +429,22 @@ jobs:
             )
           fi
 
+          (
+            export RSRS_CORE_TEST_MODE=1
+            if [ "$RUNNER_OS" = macOS ]; then
+              TMPDIR="$(cd -- "$RUNNER_TEMP" && pwd -P)"
+              export TMPDIR
+            fi
+            run_native_case respire_spawn owner_credential::backup_proof::tests::verifies_exact_claim_and_rejects_mismatches
+            if [ "$RUNNER_OS" = Windows ]; then
+              run_native_case respire_spawn owner_credential::windows::restore_stage::tests::private_restore_stage_enforces_owner_only_acl_under_inherited_parent
+            fi
+            run_native_case respire_storage transport::local::migration_backup::tests::restore_separates_pre_commit_failures_from_post_commit_checks
+            run_native_case respire_commands runtime_http::v1::operations::backup_import::custody::tests::sweep_orphaned_stages_removes_crashed_stages_only
+            run_native_case respire_commands runtime_http::v1::operations::backup_import::custody::tests::staged_import_enforces_owner_only_permissions
+            run_native_case respire_commands runtime_http::v1::backup_export::tests::scoped_archive_over_loopback
+          )
+
       - name: Verify the native macOS device-local catalog and SQLite migration fence
         if: runner.os == 'macOS'
         shell: bash
