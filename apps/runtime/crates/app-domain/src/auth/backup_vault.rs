@@ -23,6 +23,32 @@ impl RuntimeLibrary<'_> {
     }
 }
 
+#[cfg(target_os = "linux")]
+impl RuntimeLibrary<'_> {
+    /// Seal the historical SQLite key check only for an identified detached
+    /// backup draft rather than offering arbitrary challenge signing.
+    pub fn prove_backup_snapshot(
+        &self,
+        draft: &backup_archive::BackupExportDraft,
+    ) -> Result<backup_archive::BackupSnapshotProof> {
+        draft.prove(self.0, self.1)
+    }
+
+    /// Enforce the same Vault lineage between detached processing and wire
+    /// finalization, without opening files or lending a Vault key.
+    pub fn seal_verified_backup_export(
+        &self,
+        ready: &backup_archive::BackupExportReady,
+    ) -> Result<backup_archive::SealedBackupExportHeader> {
+        ready.verify_lineage(self.0)?;
+        let manifest = ready.manifest();
+        backup_archive::SealedBackupExportHeader::for_manifest(
+            manifest,
+            self.seal_backup_manifest_header(manifest)?,
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -77,4 +103,50 @@ mod tests {
         assert_eq!(staged, wire);
         Ok(())
     }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn detached_backup_only_seals_matching_live_vault_and_exact_stage() -> Result<()> {
+        use crate::transport::local::LocalStore;
+        use std::io::Read;
+
+        let root = tempfile::tempdir()?;
+        let profile = root.path().canonicalize()?;
+        let database = profile.join("rsrs.db");
+        let store = LocalStore::open(&database)?;
+        let db = rusqlite::Connection::open(&database)?;
+        db.execute_batch("INSERT INTO meta(key,value) VALUES ('backup-fixture','selected');")?;
+        let keys = SessionKeys::from_urk([7; 32])?;
+        let other = SessionKeys::from_urk([8; 32])?;
+        let authority = RuntimeLibrary(&keys, "alice", &profile);
+        let wrong_key = RuntimeLibrary(&other, "alice", &profile);
+        let wrong_account = RuntimeLibrary(&keys, "bob", &profile);
+        let make_ready = || -> Result<_> {
+            let copy = store.prepare_backup_export(&profile)?.copy(|| Ok(()))?;
+            let draft = backup_archive::BackupExportDraft::new(copy)?;
+            let proof = authority.prove_backup_snapshot(&draft)?;
+            draft.prepare(proof, || Ok(()))
+        };
+        let ready = make_ready()?;
+        let another = make_ready()?;
+        assert!(wrong_key.seal_verified_backup_export(&ready).is_err());
+        assert!(wrong_account.seal_verified_backup_export(&ready).is_err());
+        assert!(another.into_reader(authority.seal_verified_backup_export(&ready)?).is_err());
+
+        let header = authority.seal_verified_backup_export(&ready)?;
+        let mut wire = Vec::new();
+        ready.into_reader(header)?.write_verified(&mut wire, || Ok(()))?;
+        let output = profile.join("verified-fixture.db");
+        let mut body = wire.as_slice();
+        let receipt = authority.authenticate_backup_import_header(BackupArchiveHeader::read(&mut body)?)?;
+        let mut db_out = std::fs::File::create(&output)?;
+        receipt.copy_to_stage(&mut body, &mut db_out, || Ok(()))?;
+        let mut extra = [0; 1];
+        assert_eq!(body.read(&mut extra)?, 0);
+        let value: String = rusqlite::Connection::open(&output)?.query_row(
+            "SELECT value FROM meta WHERE key='backup-fixture'", [], |row| row.get(0),
+        )?;
+        assert_eq!(value, "selected");
+        Ok(())
+    }
+
 }

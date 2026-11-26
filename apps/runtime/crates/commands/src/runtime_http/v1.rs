@@ -11,6 +11,8 @@ use std::net::SocketAddr;
 
 mod compatibility;
 mod diary;
+#[cfg(all(test, target_os = "linux"))]
+mod backup_export;
 mod host_config;
 mod host_config_patch;
 mod models;

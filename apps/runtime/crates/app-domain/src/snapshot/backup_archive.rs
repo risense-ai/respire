@@ -232,3 +232,9 @@ pub fn open_to_stage(
 #[cfg(test)]
 #[path = "backup_archive_tests.rs"]
 mod tests;
+
+#[cfg(target_os = "linux")]
+#[path = "backup_export_stage.rs"]
+mod export;
+#[cfg(target_os = "linux")]
+pub use export::{BackupExportDraft, BackupExportReader, BackupExportReady, BackupSnapshotProof, SealedBackupExportHeader};
