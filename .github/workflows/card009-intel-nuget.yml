@@ -1,0 +1,94 @@
+name: CARD-009 Intel NuGet static preflight
+'on':
+  pull_request:
+    types: [opened]
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  inspect:
+    if: >-
+      github.repository == 'risense-ai/respire' &&
+      github.event.pull_request.draft == true &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.base.repo.full_name == github.repository &&
+      github.event.pull_request.head.ref == 'verify/card009-intel-nuget' &&
+      github.event.pull_request.base.ref == 'main' &&
+      github.event.pull_request.base.sha == 'ca7d3d309581017be32aa0a303740c2a011619c1' &&
+      github.run_attempt == '1'
+    runs-on: macos-15-intel
+    timeout-minutes: 25
+    env:
+      RUSTUP_TOOLCHAIN: 1.95.0-x86_64-apple-darwin
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+          path: inspection
+      - name: Verify reviewed tree before executing PR files
+        working-directory: inspection
+        env:
+          REVIEW_HEAD: ${{ github.event.pull_request.head.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          /usr/bin/python3 -I - <<'PY'
+          import hashlib, os, pathlib, subprocess
+          def git(*args):
+              return subprocess.check_output(["/usr/bin/git", *args])
+          def check(condition):
+              if not condition:
+                  raise SystemExit("Inspection identity mismatch")
+          base = "ca7d3d309581017be32aa0a303740c2a011619c1"
+          check(git("rev-parse","HEAD").decode().strip() == os.environ["REVIEW_HEAD"])
+          check(git("show","-s","--format=%P","HEAD").decode().strip().split() == [base])
+          scripts = {
+              "scripts/card009-qualification/intel.sh": "7dc6419f662b54db217add363447bcfb12b181737369970017201bb83b91a020",
+              "scripts/card009-qualification/intel.py": "97fed867e47330fc38b33291337c7562135aff16bf4ca153b4c71bdd06c31a6b",
+          }
+          paths = set(scripts) | {".github/workflows/card009-intel-nuget.yml"}
+          expected = {p.encode() for p in paths}
+          changes = git("diff","--no-renames","--name-only","-z",base,"HEAD").split(b"\0")
+          check(changes[-1] == b"" and set(changes[:-1]) == expected)
+          for p in paths:
+              check(not git("ls-tree",base,"--",p))
+              check(git("ls-tree","HEAD","--",p).startswith(b"100644 blob "))
+              blob = git("show","HEAD:"+p)
+              check(pathlib.Path(p).read_bytes() == blob)
+              if p in scripts:
+                  check(hashlib.sha256(blob).hexdigest() == scripts[p])
+          PY
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ca7d3d309581017be32aa0a303740c2a011619c1
+          persist-credentials: false
+          path: product
+      - name: Verify native compiler target and inspection tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_ENVIRONMENT/$RUNNER_OS/$RUNNER_ARCH" = github-hosted/macOS/X64
+          test "$(/usr/bin/uname -m)" = x86_64
+          test "$(/usr/sbin/sysctl -in sysctl.proc_translated)" != 1
+          test "$(/usr/bin/xcodebuild -version)" = "$(printf 'Xcode 16.4\nBuild version 16F6')"
+          test "$(/usr/bin/xcrun --sdk macosx --show-sdk-version)" = 15.5
+          for tool in lipo otool; do
+            binary=$(/usr/bin/xcrun --find "$tool")
+            test -x "$binary"
+            /usr/bin/shasum -a 256 "$binary"
+          done
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --target x86_64-apple-darwin
+          rustup target list --installed --toolchain "$RUSTUP_TOOLCHAIN" | grep -Fx x86_64-apple-darwin
+          rustc -vV | grep -Fx 'host: x86_64-apple-darwin'
+          rustc -vV | grep -Fx 'release: 1.95.0'
+          cargo -V | grep -E '^cargo 1\.95\.0 '
+          /usr/bin/python3 -I -c 'import sys; assert sys.version_info >= (3,9)'
+      - name: Inspect approved archive without loading it
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PATH="/usr/bin:/bin:/usr/sbin:/sbin:$HOME/.cargo/bin:/usr/local/bin"
+          /bin/bash inspection/scripts/card009-qualification/intel.sh
