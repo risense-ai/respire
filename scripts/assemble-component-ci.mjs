@@ -4,7 +4,7 @@ import {lstat, mkdir, readFile, realpath, writeFile} from "node:fs/promises";
 import {dirname, isAbsolute, join, relative, resolve, sep} from "node:path";
 import {pathToFileURL} from "node:url";
 import {assembleLocalRelease} from "./assemble-component-release.mjs";
-import {parseComponentTag} from "./component-release-plan.mjs";
+import {localFanoutPlan, parseComponentTag} from "./component-release-plan.mjs";
 
 const repository = "risense-ai/respire";
 const workflow = repository + "/.github/workflows/runtime-release-dry-run.yml@";
@@ -86,6 +86,9 @@ async function run(args, env) {
   }));
   const {receipt} = await assembleLocalRelease({tag, source, batches, outputParent: output});
   const result = {schema: 1, scope: "local-byte-parity-only", provenance, receipt};
+  if (provenance.event === "workflow_dispatch" && plan.component !== "runtime") {
+    result.fanout = localFanoutPlan(receipt);
+  }
   const evidence = join(output, "component-release-receipt.json");
   await writeFile(evidence, JSON.stringify(result, null, 2) + "\n", {flag: "wx", mode: 0o600});
   console.log(evidence);

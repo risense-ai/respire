@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
+import {createHash} from "node:crypto";
 import {execFileSync} from "node:child_process";
 import {lstat, mkdir, readFile, readdir, realpath, rm, writeFile} from "node:fs/promises";
 import {dirname, isAbsolute, join, relative, resolve, sep} from "node:path";
 import {pathToFileURL} from "node:url";
 import {assembleLocalRelease} from "./assemble-component-release.mjs";
 import {workflowIdentity} from "./assemble-component-ci.mjs";
-import {expectedReleaseAssets, parseComponentTag} from "./component-release-plan.mjs";
+import {expectedReleaseAssets, localFanoutPlan, parseComponentTag} from "./component-release-plan.mjs";
 
 const profiles = {
   "windows-x64": ["x86_64-pc-windows-msvc", "Windows", "x64"],
@@ -102,7 +103,7 @@ export async function assembleRuntimeNative({tag, provenance, evidenceRoot, payl
   const payloadFolders = lanes.map(lane=>"runtime-" + lane + "-payload" + suffix);
   await exactNames(evidence, receiptFolders);
   await exactNames(payload, payloadFolders);
-  const batches = [], claims = {};
+  const batches = [], claims = {}, nativeReceipts = {};
   for (const [index, lane] of lanes.entries()) {
     const receipts = await directory(join(evidence, receiptFolders[index]));
     const artifacts = await directory(join(payload, payloadFolders[index]));
@@ -111,7 +112,9 @@ export async function assembleRuntimeNative({tag, provenance, evidenceRoot, payl
     await exactNames(artifacts, names);
     const file = join(receipts, receiptName), st = await lstat(file);
     assert(st.isFile() && st.nlink === 1 && st.size > 0 && st.size <= 64 * 1024, "Invalid native receipt file");
-    const report = JSON.parse(await readFile(file, "utf8"));
+    const bytes = await readFile(file);
+    const report = JSON.parse(bytes.toString("utf8"));
+    nativeReceipts[lane] = createHash("sha256").update(bytes).digest("hex");
     Object.assign(claims, smokeEvidence(report, lane, tag, provenance, names));
     batches.push({tag, source: provenance.source, kind: "github", directory: artifacts});
   }
@@ -124,7 +127,8 @@ export async function assembleRuntimeNative({tag, provenance, evidenceRoot, payl
     const {receipt} = await assembleLocalRelease({tag, source: provenance.source, batches, outputParent: output});
     assert.deepEqual(Object.fromEntries(Object.entries(receipt.assets).map(([name, asset])=>[name, asset.sha256])),
       claims, "Assembled bytes differ from same-attempt native smoke receipts");
-    const result = {schema: 1, scope:"same-attempt-native-runtime-and-local-byte-parity", provenance, receipt};
+    const result = {schema: 1, scope:"same-attempt-native-runtime-and-local-byte-parity", provenance, receipt,
+      native_receipt_sha256: nativeReceipts, fanout: localFanoutPlan(receipt)};
     await writeFile(join(output, "component-release-receipt.json"), JSON.stringify(result, null, 2) + "\n", {flag:"wx",mode:0o600});
     return result;
   } catch (error) {

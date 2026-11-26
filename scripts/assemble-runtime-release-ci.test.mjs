@@ -72,10 +72,20 @@ async function fixture(t) {
 }
 
 test("synthetic complete native matrix binds each asset and writes exact mirror evidence",async t=>{
-  const {run,output}=await fixture(t);
+  const {run,output,evidence}=await fixture(t);
   const result=await run();
   assert.equal(Object.keys(result.receipt.assets).length,24);
   assert.deepEqual(result.provenance,provenance);
+  const [official, mirror] = result.fanout.github;
+  assert.deepEqual([official.repository, official.tag], ["risense-ai/respire", tag]);
+  assert.deepEqual([mirror.repository, mirror.tag], ["risense-ai/respire-runtime", "v2.0.0-dev.31"]);
+  assert.deepEqual(official.assets, mirror.assets);
+  assert.equal(official.assets.length, 24);
+  assert.deepEqual(result.fanout.npm, []);
+  for (const [lane] of profiles) {
+    const file = join(evidence, `runtime-${lane}-evidence-12345-2`, `runtime-${lane}.json`);
+    assert.equal(result.native_receipt_sha256[lane], digest(await readFile(file)));
+  }
   assert.equal(JSON.parse(await readFile(join(output,"component-release-receipt.json"),"utf8")).scope,
     "same-attempt-native-runtime-and-local-byte-parity");
 });

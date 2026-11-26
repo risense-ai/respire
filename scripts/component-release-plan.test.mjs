@@ -5,7 +5,7 @@ import {tmpdir} from "node:os";
 import path, {join} from "node:path";
 import {test} from "node:test";
 import {runInNewContext} from "node:vm";
-import {expectedReleaseAssets, parseComponentTag, verifyLocalRelease} from "./component-release-plan.mjs";
+import {expectedReleaseAssets, localFanoutPlan, parseComponentTag, verifyLocalRelease} from "./component-release-plan.mjs";
 
 const source = "a".repeat(40);
 const hash = value => createHash("sha256").update(value).digest("hex");
@@ -162,4 +162,24 @@ test("rejects an update manifest even if byte-identical when it points to the wr
   const replaced = bytes.get(name).replace("risense-ai/respire-client2", "risense-ai/respire");
   for (const dir of [input.monorepoDir, input.legacyDir]) await writeFile(join(dir, name), replaced);
   await assert.rejects(verifyLocalRelease(input), /manifest asset binding mismatch/);
+});
+
+test("verified component plans bind both tag namespaces and exact npm pack digests", async t => {
+  for (const component of ["runtime", "cli", "client2"]) {
+    const tag = component + "-v2.5.0";
+    const {input, expected} = await makeFixture(t, tag);
+    const receipt = await verifyLocalRelease(input);
+    const plan = localFanoutPlan(receipt);
+    assert.deepEqual(plan.github.map(({repository, tag}) => [repository, tag]), [
+      ["risense-ai/respire", tag], ["risense-ai/respire-" + component, "v2.5.0"],
+    ]);
+    assert.deepEqual(plan.github[0].assets, expected.github.map(name => ({name, ...receipt.assets[name]})));
+    assert.deepEqual(plan.github[1].assets, plan.github[0].assets);
+    assert.deepEqual(plan.npm, Object.entries(expected.npm).map(([pkg, name]) => ({
+      package: pkg, version: "2.5.0", tarball: {name, ...receipt.npm[name]},
+    })));
+    assert.throws(() => localFanoutPlan({...receipt, legacy: "untrusted/mirror"}));
+    assert.throws(() => localFanoutPlan({...receipt, assets: {}}));
+    assert.throws(() => localFanoutPlan({...receipt, npm: {...receipt.npm, extra: {}}}));
+  }
 });

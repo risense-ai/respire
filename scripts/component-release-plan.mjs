@@ -48,6 +48,35 @@ export function expectedReleaseAssets(tag) {
   return {github: github.sort(), npm};
 }
 
+// Called with the in-memory result of byte verification in the trusted checkout.
+export function localFanoutPlan(receipt) {
+  const plan = parseComponentTag(receipt.tag);
+  assert.equal(receipt.mode, "dry-run");
+  assert.equal(receipt.monorepo, plan.monorepo);
+  assert.equal(receipt.legacy, plan.legacy);
+  assert.equal(receipt.legacyTag, plan.legacyTag);
+  const expected = expectedReleaseAssets(plan.tag);
+  assert.deepEqual(Object.keys(receipt.assets).sort(), expected.github);
+  assert.deepEqual(Object.keys(receipt.npm).sort(), Object.values(expected.npm).sort());
+  function asset(name, inventory) {
+    const {size, sha256} = inventory[name];
+    assert(Number.isSafeInteger(size) && size > 0 && typeof sha256 === "string" &&
+      sha256.length === 64 && hex.test(sha256), "Invalid verified asset");
+    return {name, size, sha256};
+  }
+  const assets = expected.github.map(name => asset(name, receipt.assets));
+  return {
+    mode: "verification-only",
+    github: [
+      {repository: plan.monorepo, tag: plan.tag, assets},
+      {repository: plan.legacy, tag: plan.legacyTag, assets},
+    ],
+    npm: Object.entries(expected.npm).map(([packageName, filename]) => ({
+      package: packageName, version: plan.version, tarball: asset(filename, receipt.npm),
+    })),
+  };
+}
+
 async function digestFile(root, name) {
   const file = await open(join(root, name), "r");
   try {
