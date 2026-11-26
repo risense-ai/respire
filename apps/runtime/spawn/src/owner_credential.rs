@@ -129,3 +129,8 @@ mod model_job;
 pub use windows::model_job::ModelJobRoot;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use unix::model_job::ModelJobRoot;
+
+#[cfg(target_os = "linux")]
+pub use unix::backup_archive::{
+    ArchiveOperation, BackupArchiveHandoff, PendingBackupArchive, ReadyBackupArchive,
+};

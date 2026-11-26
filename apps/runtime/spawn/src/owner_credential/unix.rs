@@ -372,3 +372,7 @@ pub(super) mod migration_copy;
 
 #[path = "unix_model_job.rs"]
 pub(super) mod model_job;
+
+#[cfg(target_os = "linux")]
+#[path = "unix_backup_archive.rs"]
+pub(super) mod backup_archive;

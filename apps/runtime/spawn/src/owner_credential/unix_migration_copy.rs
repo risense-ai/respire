@@ -56,6 +56,28 @@ impl MigrationCopy {
         Ok([value.st_dev as u64, value.st_ino as u64])
     }
 
+    #[cfg(target_os = "linux")]
+    pub(super) fn archive_binding(&self) -> io::Result<([u64; 2], [u64; 2])> {
+        let parent = self.parent.metadata()?;
+        let file = check(&self.file, 0o600, false)?;
+        if !self.identity.still_names(self.parent.as_raw_fd(), &self.pending) {
+            return Err(denied());
+        }
+        Ok(([parent.dev(), parent.ino()], [file.dev(), file.ino()]))
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(super) fn fill_archive(&mut self, fill: impl FnOnce(&mut File) -> io::Result<()>) -> io::Result<()> {
+        self.archive_binding()?;
+        if self.file.metadata()?.len() != 0 {
+            return Err(denied());
+        }
+        fill(&mut self.file)?;
+        self.file.sync_all()?;
+        self.archive_binding()?;
+        Ok(())
+    }
+
     pub fn path(&self) -> &Path {
         &self.path
     }
