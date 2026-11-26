@@ -69,8 +69,8 @@
     },
     {
       "path": "apps/client2/internal/desktop/frontend/ui/i18n/translations3.js",
-      "lines": 323,
-      "sha256": "fc45515dff545bbf77c1b78c2200ad25369048430f830f074959d0f5f25f2214",
+      "lines": 339,
+      "sha256": "9b5848d92ee6a9292cb9d39f8706827073d17346b20ff8431e7f0304bbd46700",
       "reason": "Translated UI catalog"
     },
     {
