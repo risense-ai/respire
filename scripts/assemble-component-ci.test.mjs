@@ -55,7 +55,7 @@ test("the real CLI rejects a mismatched checked-out SHA and never creates output
   const root = await realpath(directory);
   const scripts = join(root, "scripts");
   await mkdir(scripts);
-  const names = ["assemble-component-ci.mjs", "assemble-component-release.mjs", "component-release-plan.mjs"];
+  const names = ["assemble-component-ci.mjs", "assemble-component-release.mjs", "component-release-plan.mjs", "finalize-component-receipt.mjs"];
   for (const name of names) await copyFile(new URL("./" + name, import.meta.url), join(scripts, name));
   const git = (...args) => execFileSync("git", args, {cwd: root, encoding: "utf8"}).trim();
   git("init", "--quiet");
@@ -84,5 +84,5 @@ test("the real CLI rejects a mismatched checked-out SHA and never creates output
   await assert.rejects(access(output), {code: "ENOENT"});
   const missing = invoke(exact, payload);
   assert.equal(missing.status, 1);
-  assert.match(missing.stderr, /Invalid build batch file count/);
+  assert.match(missing.stderr, /COMPONENT_RECEIPT_FAILED/);
 });

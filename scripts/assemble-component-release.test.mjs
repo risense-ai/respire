@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import {writeFileSync} from "node:fs";
+import {finalizeComponent} from "./finalize-component-receipt.mjs";
 import {createHash} from "node:crypto";
 import {mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile} from "node:fs/promises";
 import {tmpdir} from "node:os";
@@ -77,4 +79,39 @@ test("fails closed on out-of-scope, repeated, or internally corrupt assets", asy
   await writeFile(join(one.directory, file), "wrong bytes for real metadata");
   await assert.rejects(assembleLocalRelease(input), /CLI metadata identity\/checksum mismatch/);
   assert.deepEqual(await readdir(input.outputParent), []);
+});
+
+test("failed receipt commit preserves a competing file and removes owned staging", async t => {
+  const input = await fixture(t);
+  const output = join(input.outputParent, "fresh");
+  const final = join(output, "component-release-receipt.json");
+  await assert.rejects(finalizeComponent({...input, output, makeResult(receipt) {
+    writeFileSync(final, "existing user bytes", {flag: "wx"});
+    return receipt;
+  }}), {message: "COMPONENT_RECEIPT_FAILED"});
+  assert.deepEqual(await readdir(output), ["component-release-receipt.json"]);
+  assert.equal(await readFile(final, "utf8"), "existing user bytes");
+});
+
+test("fanout and serialization failures remove the owned output", async t => {
+  const input = await fixture(t);
+  const output = join(input.outputParent, "fresh");
+  for (const makeResult of [() => { throw Error("untrusted detail"); }, () => ({invalid: 1n})]) {
+    await assert.rejects(finalizeComponent({...input, output, makeResult}), {message: "COMPONENT_RECEIPT_FAILED"});
+    assert.deepEqual(await readdir(input.outputParent), []);
+  }
+});
+
+test("invalid component metadata is bounded and redacted", async t => {
+  const input = await fixture(t);
+  const dir = input.batches[1].directory;
+  const file = join(dir, (await readdir(dir))[0]);
+  for (const [content, message] of [
+    ["UNTRUSTED_MARKER\x1b[31m", "RELEASE_METADATA_JSON"],
+    [Buffer.alloc(2 ** 21 + 1), "RELEASE_METADATA_SIZE"],
+  ]) {
+    await writeFile(file, content);
+    await assert.rejects(assembleLocalRelease(input), {message});
+    assert.deepEqual(await readdir(input.outputParent), []);
+  }
 });

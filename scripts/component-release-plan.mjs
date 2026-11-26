@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import {isDeepStrictEqual} from "node:util";
 import {createHash} from "node:crypto";
 import {open, readdir, realpath} from "node:fs/promises";
 import {join, resolve} from "node:path";
@@ -85,7 +86,9 @@ async function digestFile(root, name) {
     let size = 0;
     const hash = createHash("sha256");
     // Keep smaller metadata bytes for parsing the exact content we hashed.
-    const chunks = stat.size <= 2 ** 21 && /(?:\.json|SHA256SUMS)$/.test(name) ? [] : null;
+    const isMetadata = /(?:\.json|SHA256SUMS)$/.test(name);
+    if (isMetadata && stat.size > 2 ** 21) throw new Error("RELEASE_METADATA_SIZE");
+    const chunks = isMetadata ? [] : null;
     for await (const bytes of file.createReadStream({autoClose: false})) {
       size += bytes.length;
       assert(size <= stat.size, "Release file grew during inspection: " + name);
@@ -93,7 +96,7 @@ async function digestFile(root, name) {
       if (chunks) chunks.push(bytes);
     }
     assert.equal(size, stat.size, "Release file shrank during inspection: " + name);
-    return {size, sha256: hash.digest("hex"), text: chunks ? Buffer.concat(chunks).toString("utf8") : undefined};
+    return {size, sha256: hash.digest("hex"), text: chunks ? new TextDecoder("utf-8", {fatal: true}).decode(Buffer.concat(chunks)) : undefined};
   } finally {
     await file.close();
   }
@@ -103,7 +106,7 @@ async function examine(directory, expected) {
   assert.equal(await realpath(directory), resolve(directory), "Release directory must not redirect elsewhere");
   const entries = await readdir(directory, {withFileTypes: true});
   assert(entries.every(entry => entry.isFile() && !entry.isSymbolicLink()), "Release directory must contain only regular files");
-  assert.deepEqual(entries.map(entry => entry.name).sort(), [...expected].sort(), "Incomplete or unexpected local release asset set");
+  assert(isDeepStrictEqual(entries.map(entry => entry.name).sort(), [...expected].sort()), "Incomplete or unexpected local release asset set");
   const assets = {};
   // Limit memory/FD pressure across the eight native targets.
   for (const name of expected) assets[name] = await digestFile(directory, name);
@@ -112,7 +115,11 @@ async function examine(directory, expected) {
 
 function metadata(assets, name) {
   assert(assets[name]?.text, "Missing or oversized release metadata: " + name);
-  return JSON.parse(assets[name].text);
+  try {
+    return JSON.parse(assets[name].text);
+  } catch {
+    throw new Error("RELEASE_METADATA_JSON");
+  }
 }
 
 function checkNative(plan, sha, assets) {
@@ -150,12 +157,12 @@ function checkDesktop(plan, assets) {
   const manifest = metadata(assets, "client-updates.json");
   const channels = plan.channel === "stable" ? ["dev", "stable"] : ["dev"];
   assert(manifest.schemaVersion === 1, "Unknown Client2 update manifest schema");
-  assert.deepEqual(Object.keys(manifest).sort(), ["schemaVersion", ...channels].sort(), "Unexpected Client2 update channels");
+  assert(isDeepStrictEqual(Object.keys(manifest).sort(), ["schemaVersion", ...channels].sort()), "Unexpected Client2 update channels");
   for (const channel of channels) {
     const release = manifest[channel];
     assert(release?.version === plan.version && Array.isArray(release.artifacts) &&
       release.artifacts.length === desktopUpdates.length, "Invalid Client2 update version or artifact count");
-    assert.deepEqual(release.artifacts.map(artifact => artifact.filename).sort(), [...desktopUpdates].sort(),
+    assert(isDeepStrictEqual(release.artifacts.map(artifact => artifact.filename).sort(), [...desktopUpdates].sort()),
       "Invalid Client2 update target set");
     for (const {filename, url, sha256, size} of release.artifacts) {
       const canonical = "https://github.com/" + plan.legacy + "/releases/download/" + plan.legacyTag + "/" + filename;
@@ -179,7 +186,7 @@ export async function verifyLocalRelease({tag, source, monorepoDir, legacyDir, n
   const expected = expectedReleaseAssets(tag);
   const official = await examine(monorepoDir, expected.github);
   const mirror = await examine(legacyDir, expected.github);
-  assert.deepEqual(summarize(official), summarize(mirror), "Local legacy mirror differs byte-for-byte");
+  assert(isDeepStrictEqual(summarize(official), summarize(mirror)), "Local legacy mirror differs byte-for-byte");
   if (plan.component === "client2") checkDesktop(plan, official);
   else checkNative(plan, source, official);
   const npm = npmDir ? summarize(await examine(npmDir, Object.values(expected.npm))) : {};

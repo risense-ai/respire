@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import {execFileSync} from "node:child_process";
-import {lstat, mkdir, readFile, realpath, writeFile} from "node:fs/promises";
+import {lstat, readFile, realpath} from "node:fs/promises";
 import {dirname, isAbsolute, join, relative, resolve, sep} from "node:path";
 import {pathToFileURL} from "node:url";
-import {assembleLocalRelease} from "./assemble-component-release.mjs";
+import {finalizeComponent} from "./finalize-component-receipt.mjs";
 import {localFanoutPlan, parseComponentTag} from "./component-release-plan.mjs";
 
 const repository = "risense-ai/respire";
@@ -80,18 +80,17 @@ async function run(args, env) {
   assert(isInside(temp, output), "Output must be under RUNNER_TEMP");
   assert(directories.every(path => !isInside(path, output) && !isInside(output, path) && path !== output),
     "Output must be separate from payload directories");
-  await mkdir(output, {mode: 0o700}); // Exclusive, not recursive.
   const batches = directories.map((directory, index) => ({
     tag, source, kind: index === 0 ? "github" : "npm", directory,
   }));
-  const {receipt} = await assembleLocalRelease({tag, source, batches, outputParent: output});
-  const result = {schema: 1, scope: "local-byte-parity-only", provenance, receipt};
-  if (provenance.event === "workflow_dispatch" && plan.component !== "runtime") {
-    result.fanout = localFanoutPlan(receipt);
-  }
-  const evidence = join(output, "component-release-receipt.json");
-  await writeFile(evidence, JSON.stringify(result, null, 2) + "\n", {flag: "wx", mode: 0o600});
-  console.log(evidence);
+  await finalizeComponent({tag, source, batches, output, makeResult(receipt) {
+    const result = {schema: 1, scope: "local-byte-parity-only", provenance, receipt};
+    if (provenance.event === "workflow_dispatch" && plan.component !== "runtime") {
+      result.fanout = localFanoutPlan(receipt);
+    }
+    return result;
+  }});
+  console.log(join(output, "component-release-receipt.json"));
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

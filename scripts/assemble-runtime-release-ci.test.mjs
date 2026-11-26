@@ -92,28 +92,45 @@ test("synthetic complete native matrix binds each asset and writes exact mirror 
 
 test("missing target, foreign attempt, fork event, duplicate case and wrong native architecture fail closed",async t=>{
   const {run,output,evidence,alter}=await fixture(t);
-  await assert.rejects(run({...provenance,event:"pull_request"}),/restricted to main dispatch/);
+  await assert.rejects(run({...provenance,event:"pull_request"}),/RUNTIME_NATIVE_RECEIPT_FAILED/);
   const lane=join(evidence,"runtime-macos-intel-evidence-12345-2");
   await rename(lane,lane+"-stale");
-  await assert.rejects(run(),/Incomplete or unexpected/);
+  await assert.rejects(run(),/RUNTIME_NATIVE_RECEIPT_FAILED/);
   await rename(lane+"-stale",lane);
   await alter("macos-intel",body=>{body.run_attempt="1";});
-  await assert.rejects(run(),/run_attempt/);
+  await assert.rejects(run(),/RUNTIME_NATIVE_RECEIPT_FAILED/);
   await alter("macos-intel",body=>{body.run_attempt="2";body.native_identity.node_arch="arm64";});
-  await assert.rejects(run(),/host identity/);
+  await assert.rejects(run(),/RUNTIME_NATIVE_RECEIPT_FAILED/);
   await alter("macos-intel",body=>{body.native_identity.node_arch="x64";body.packaged_native_smoke.case_results[0]=caseResults[1];});
-  await assert.rejects(run(),/smoke scope/);
+  await assert.rejects(run(),/RUNTIME_NATIVE_RECEIPT_FAILED/);
   await assert.rejects(access(output),{code:"ENOENT"});
 });
 
 test("old provider and provenance mismatch cannot seal assembled bytes",async t=>{
   const {run,output,alter}=await fixture(t);
   await alter("linux-gnu-arm64",body=>{body.provider_archive_sha256="1".repeat(64);});
-  await assert.rejects(run(),/GNU provider differs/);
+  await assert.rejects(run(),/RUNTIME_NATIVE_RECEIPT_FAILED/);
   await alter("linux-gnu-arm64",body=>{
     body.provider_archive_sha256="769d1d3ea8ab6cd69f737c9dd4d4462aa4ad0ccfa106eaf506efc40d7bead5db";
     body.artifact_sha256["runtime-build-aarch64-unknown-linux-gnu.json"]="0".repeat(64);
   });
-  await assert.rejects(run(),/Assembled bytes differ/);
+  await assert.rejects(run(),/RUNTIME_NATIVE_RECEIPT_FAILED/);
   await assert.rejects(access(output),{code:"ENOENT"});
+});
+
+test("malformed, oversized and control-bearing receipts produce only a fixed failure", async t => {
+  const {run, output, evidence} = await fixture(t);
+  const file = join(evidence, "runtime-macos-intel-evidence-12345-2", "runtime-macos-intel.json");
+  const valid = JSON.parse(await readFile(file, "utf8"));
+  for (const bytes of ["UNTRUSTED_MARKER\x1b[31m", JSON.stringify({...valid, tag: "UNTRUSTED_MARKER\n"}),
+    Buffer.alloc(65537, 65), Buffer.from([0xff])]) {
+    await writeFile(file, bytes);
+    await assert.rejects(run(), error => {
+      assert.equal(error.message, "RUNTIME_NATIVE_RECEIPT_FAILED");
+      assert.doesNotMatch(error.stack, /UNTRUSTED_MARKER|\x1b/);
+      assert.equal(error.cause, undefined);
+      return true;
+    });
+    await assert.rejects(access(output), {code: "ENOENT"});
+  }
 });

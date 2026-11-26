@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import {createHash} from "node:crypto";
 import {execFileSync} from "node:child_process";
-import {lstat, mkdir, readFile, readdir, realpath, rm, writeFile} from "node:fs/promises";
+import {lstat, open, readFile, readdir, realpath} from "node:fs/promises";
 import {dirname, isAbsolute, join, relative, resolve, sep} from "node:path";
 import {pathToFileURL} from "node:url";
-import {assembleLocalRelease} from "./assemble-component-release.mjs";
+import {finalizeComponent} from "./finalize-component-receipt.mjs";
 import {workflowIdentity} from "./assemble-component-ci.mjs";
 import {expectedReleaseAssets, localFanoutPlan, parseComponentTag} from "./component-release-plan.mjs";
 
@@ -88,7 +88,7 @@ function smokeEvidence(report, lane, tag, provenance, names) {
 
 // Inputs must be separate exact same-run/attempt downloads from GitHub Actions.
 // This verifies the resulting evidence and bytes, not the transport or supplier.
-export async function assembleRuntimeNative({tag, provenance, evidenceRoot, payloadRoot, output}) {
+async function verifyRuntime({tag, provenance, evidenceRoot, payloadRoot, output}) {
   assert.equal(parseComponentTag(tag).component, "runtime", "Expected a Runtime component tag");
   assert.equal(provenance.event, "workflow_dispatch", "Runtime payload assembly is restricted to main dispatch");
   for (const key of ["run_id", "run_attempt"]) assert(/^[1-9][0-9]*$(?![\s\S])/.test(provenance[key] ?? ""));
@@ -112,8 +112,20 @@ export async function assembleRuntimeNative({tag, provenance, evidenceRoot, payl
     await exactNames(artifacts, names);
     const file = join(receipts, receiptName), st = await lstat(file);
     assert(st.isFile() && st.nlink === 1 && st.size > 0 && st.size <= 64 * 1024, "Invalid native receipt file");
-    const bytes = await readFile(file);
-    const report = JSON.parse(bytes.toString("utf8"));
+    const handle = await open(file, "r");
+    const bytes = Buffer.alloc(st.size);
+    try {
+      let offset = 0;
+      while (offset < bytes.length) {
+        const {bytesRead} = await handle.read(bytes, offset, bytes.length - offset);
+        if (!bytesRead) throw new Error("NATIVE_RECEIPT_SIZE");
+        offset += bytesRead;
+      }
+      if ((await handle.read(Buffer.alloc(1))).bytesRead) throw new Error("NATIVE_RECEIPT_SIZE");
+    } finally {
+      await handle.close();
+    }
+    const report = JSON.parse(new TextDecoder("utf-8", {fatal: true}).decode(bytes));
     nativeReceipts[lane] = createHash("sha256").update(bytes).digest("hex");
     Object.assign(claims, smokeEvidence(report, lane, tag, provenance, names));
     batches.push({tag, source: provenance.source, kind: "github", directory: artifacts});
@@ -122,19 +134,19 @@ export async function assembleRuntimeNative({tag, provenance, evidenceRoot, payl
   await directory(dirname(output));
   assert([evidence,payload].every(input=>input !== output && !below(input,output) && !below(output,input)),
     "Native output overlaps source data");
-  await mkdir(output, {mode: 0o700});
-  try {
-    const {receipt} = await assembleLocalRelease({tag, source: provenance.source, batches, outputParent: output});
+  return finalizeComponent({tag, source: provenance.source, batches, output, makeResult(receipt) {
     assert.deepEqual(Object.fromEntries(Object.entries(receipt.assets).map(([name, asset])=>[name, asset.sha256])),
-      claims, "Assembled bytes differ from same-attempt native smoke receipts");
-    const result = {schema: 1, scope:"same-attempt-native-runtime-and-local-byte-parity", provenance, receipt,
+      claims);
+    return {schema: 1, scope:"same-attempt-native-runtime-and-local-byte-parity", provenance, receipt,
       native_receipt_sha256: nativeReceipts, fanout: localFanoutPlan(receipt)};
-    await writeFile(join(output, "component-release-receipt.json"), JSON.stringify(result, null, 2) + "\n", {flag:"wx",mode:0o600});
-    return result;
-  } catch (error) {
-    assert.equal(await directory(output), output, "Refusing cleanup of redirected output");
-    await rm(output,{recursive:true});
-    throw error;
+  }});
+}
+
+export async function assembleRuntimeNative(inputs) {
+  try {
+    return await verifyRuntime(inputs);
+  } catch {
+    throw new Error("RUNTIME_NATIVE_RECEIPT_FAILED");
   }
 }
 

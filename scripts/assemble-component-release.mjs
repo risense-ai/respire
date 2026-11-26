@@ -54,7 +54,7 @@ export async function assembleLocalRelease({tag, source, batches, outputParent})
     assert(entries.length > 0 && entries.length <= expectedNames.size, "Invalid build batch file count");
     for (const entry of entries) {
       assert(entry.isFile() && !entry.isSymbolicLink() && expectedNames.has(entry.name) && !collected.has(entry.name),
-        "Unexpected, repeated or nonregular build asset: " + entry.name);
+        "Unexpected, repeated or nonregular build asset");
       collected.set(entry.name, join(root, entry.name));
     }
   }
