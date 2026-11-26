@@ -189,9 +189,19 @@ pub(super) fn enqueue_write<F>(scope: RestScope, run: F) -> V1Result<()>
 where
     F: for<'a> FnOnce(&LibraryContext<'a>) -> V1Result<()> + Send + 'static,
 {
-    enqueue(scope, Access::Write, Instant::now() + REQUEST_WAIT,
-        Arc::new(AtomicBool::new(false)), run)?;
+    enqueue_write_result(scope, run)?;
     Ok(())
+}
+
+pub(super) fn enqueue_write_result<F>(
+    scope: RestScope,
+    run: F,
+) -> V1Result<oneshot::Receiver<V1Result<()>>>
+where
+    F: for<'a> FnOnce(&LibraryContext<'a>) -> V1Result<()> + Send + 'static,
+{
+    enqueue(scope, Access::Write, Instant::now() + REQUEST_WAIT,
+        Arc::new(AtomicBool::new(false)), run)
 }
 
 fn enqueue<T, F>(

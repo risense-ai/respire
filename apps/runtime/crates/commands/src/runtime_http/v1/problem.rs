@@ -37,22 +37,27 @@ impl Problem {
     }
 }
 
-impl IntoResponse for Problem {
-    fn into_response(self) -> Response {
+impl Problem {
+    pub(super) fn body(&self) -> serde_json::Value {
         // Only fixed descriptions enter this transport. Internal paths, identifiers
         // and credential-bearing nested errors are never reflected to callers.
-        let body = json!({
+        json!({
             "type": "about:blank",
             "title": self.title,
             "status": self.status.as_u16(),
             "detail": self.title,
             "code": self.code,
             "retryable": self.status == StatusCode::SERVICE_UNAVAILABLE
-        });
+        })
+    }
+}
+
+impl IntoResponse for Problem {
+    fn into_response(self) -> Response {
         let mut response = (
             self.status,
             [("content-type", "application/problem+json")],
-            Body::from(body.to_string()),
+            Body::from(self.body().to_string()),
         )
             .into_response();
         if self.bearer_challenge {

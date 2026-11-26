@@ -154,6 +154,10 @@ pub(super) fn production_router_fixture(test: &'static str) -> Result<()> {
                 crate::rpc_serve::mark_http_fixture_ready();
                 return space_members_tests::device_space_tests::check(&app, &root, true).await;
             }
+            if test == super::organize_split::tests::TEST {
+                crate::rpc_serve::mark_http_fixture_ready();
+                return super::organize_split::tests::check(&app, &token).await;
+            }
             if test == DEEPEN_TEST || test == host_config_tests::TEST {
                 crate::rpc_serve::mark_http_fixture_ready();
                 if test == host_config_tests::TEST { return host_config_tests::check(&app).await; }

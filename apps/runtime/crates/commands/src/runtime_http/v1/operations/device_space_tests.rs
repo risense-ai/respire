@@ -112,6 +112,9 @@ pub(in super::super) async fn check(app: &Router, root: &Path, local: bool) -> R
     assert_eq!(visible.len(), 2);
     assert!(visible.contains(&alpha) && visible.contains(&beta));
     timed_out_preparation_never_publishes(app, root, &visible).await?;
+    crate::runtime_http::v1::operations::organize_split::tests::check_device_scope(
+        app, beta["id"].as_str().context("beta ID")?, alpha["id"].as_str().context("alpha ID")?,
+    ).await?;
     if local {
         check_delete(app, root, &alpha, &beta, &foreign).await?;
     }

@@ -342,6 +342,21 @@ pub fn split_exec<E: crate::memory::search::Embedder>(
     entry: &MemoryEntry,
     spec: &SplitSpec,
 ) -> Result<usize> {
+    let count = split_exec_with(store, entry, spec, |entry, owner| {
+        let stored = MemoryEngine::seal(keys, embedder, entry, owner)?;
+        store.put(&stored)?;
+        Ok(())
+    })?;
+    notify_autosync();
+    Ok(count)
+}
+
+pub(crate) fn split_exec_with(
+    store: &LocalStore,
+    entry: &MemoryEntry,
+    spec: &SplitSpec,
+    mut write: impl FnMut(&MemoryEntry, &str) -> Result<()>,
+) -> Result<usize> {
     if spec.items.is_empty() {
         return Err(crate::input_error::InputError("split spec has no children".into()).into());
     }
@@ -352,12 +367,16 @@ pub fn split_exec<E: crate::memory::search::Embedder>(
     }
     crate::metadata_gate::ensure_write(store, entry)?;
     let user = entry.user.clone();
-    let all = store.all(true)?;
-    for (i, op) in spec.items.iter().enumerate() {
+    let catalog = if spec.items.iter().any(|op| !op.parent.is_empty() && op.parent != "\u{7eb2}") {
+        store.all(true)?
+    } else {
+        Vec::new()
+    };
+    for op in &spec.items {
         let parent_id = if op.parent.is_empty() || op.parent == "\u{7eb2}" {
             entry.id.clone()
         } else {
-            resolve_prefix(&all, &op.parent)?
+            resolve_prefix(&catalog, &op.parent)?
         };
         let stamp = now_stamp();
         let child = MemoryEntry {
@@ -386,18 +405,14 @@ pub fn split_exec<E: crate::memory::search::Embedder>(
             parent_id,
             importance: entry.importance.clone(),
         };
-        let stored = MemoryEngine::seal(keys, embedder, &child, &user)?;
-        store.put(&stored)?;
-        let _ = i;
+        write(&child, &user)?;
     }
     if let Some(summary) = &spec.summary {
         let mut e = entry.clone();
         e.content = summary.clone();
         e.updated_at = store.edit_stamp(&entry.id)?;
-        let stored = MemoryEngine::seal(keys, embedder, &e, &user)?;
-        store.put(&stored)?;
+        write(&e, &user)?;
     }
-    notify_autosync();
     Ok(spec.items.len())
 }
 

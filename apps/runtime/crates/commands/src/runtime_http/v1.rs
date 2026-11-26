@@ -63,6 +63,7 @@ pub(super) fn router(bound: SocketAddr) -> Router {
         .merge(recall::routes(bound))
         .merge(diary::routes(bound))
         .merge(writes::routes(bound))
+        .merge(operations::organize_split::routes(bound))
         .merge(operations::routes(bound));
     #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
     let router = router.merge(device_spaces::routes(bound));
