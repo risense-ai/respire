@@ -93,6 +93,7 @@ export async function stageRuntime({root, tag, source, target, build, buildRecei
   const manifest = await readFile(join(runtimeRoot, 'runtime', 'Cargo.toml'), 'utf8');
   const lock = await readFile(cargoLock, 'utf8');
   assert.equal(/^version = "([^"]+)"/m.exec(manifest)?.[1], plan.version, 'Runtime manifest version differs');
+  assert(!/^\s*default\s*=.*e2e-loopback-mirror/m.test(manifest), 'Release manifest must not enable e2e-loopback-mirror');
   assert.equal(/\[\[package\]\]\r?\nname = "respire_runtime"\r?\nversion = "([^"]+)"/.exec(lock)?.[1], plan.version,
     'Runtime Cargo.lock version differs');
   assert(receipt.mode === 'in_repository_source' && receipt.target === target &&
@@ -128,6 +129,7 @@ export async function stageRuntime({root, tag, source, target, build, buildRecei
     }
     await add(binary, join(build, target.endsWith('-windows-msvc') ? 'rsrs-runtime.exe' : 'rsrs-runtime'));
     const image = files[0];
+    assert(!(await readFile(image.from)).includes('+e2e-loopback-mirror'), 'Refusing to stage e2e-loopback-mirror build');
     for (const [name, pin] of runtimeFiles) await add(intel && name === "libonnxruntime.dylib" ? "libonnxruntime.1.20.1.dylib" : name, join(build, name), pin);
     await add('core-notices/LICENSE.txt', join(coreRoot, 'LICENSE'));
     for (const name of noticeNames) {

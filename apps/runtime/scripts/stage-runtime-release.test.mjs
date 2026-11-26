@@ -178,3 +178,16 @@ test('both six-argument staging commands package non-Intel inputs from a clean c
       error.status === 1 && error.stderr.includes('Intel staging requires the verified provider'));
   }
 });
+
+test('refuses staging e2e-loopback-mirror builds or manifests without leaving a batch', async t => {
+  const {args, binary} = fixture(t);
+  writeFileSync(binary, 'synthetic runtime binary +e2e-loopback-mirror\0');
+  await assert.rejects(stageRuntime(args), /Refusing to stage e2e-loopback-mirror build/);
+  assert.deepEqual(readdirSync(args.outputParent).sort(), ['apps', 'release']);
+
+  writeFileSync(binary, 'fixture binary');
+  const manifestPath = join(args.root, 'apps/runtime/runtime/Cargo.toml');
+  writeFileSync(manifestPath, `[package]\nversion = "${v}"\n\n[features]\ndefault = ["e2e-loopback-mirror"]\n`);
+  await assert.rejects(stageRuntime(args), /must not enable e2e-loopback-mirror/);
+  assert.deepEqual(readdirSync(args.outputParent).sort(), ['apps', 'release']);
+});
