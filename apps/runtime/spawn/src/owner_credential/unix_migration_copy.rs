@@ -35,7 +35,7 @@ impl MigrationCopy {
 
     /// Open exactly the retained owner-private stage inode relative to the
     /// pinned directory, not a second client- or path-selected name.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub fn open_verified_peer(
         &self,
         leaf: &str,
@@ -114,10 +114,10 @@ impl Drop for MigrationCopy {
 
 /// Read-only directory/source identity witness. Unlike opening a database
 /// file here, metadata-relative checks do not disturb SQLite's POSIX locks.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub struct MigrationSource(File);
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 impl MigrationSource {
     pub fn open(path: &Path, _pin_for_copy: bool) -> io::Result<Self> {
         open_base(path).map(Self)
