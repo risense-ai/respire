@@ -32,7 +32,7 @@ foreach ($child in 'physical', 'physical\profile', 'physical\replacement', 'sele
 	system := os.Getenv("SystemRoot")
 	cmd := exec.Command(filepath.Join(system, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
 		"-NoProfile", "-NonInteractive", "-Command", script)
-	cmd.Env = []string{"SystemRoot=" + system, "WINDIR=" + system, "RESPIRE_PROFILE_FIXTURE=" + root}
+	cmd.Env = []string{"PATHEXT=.EXE", "SystemRoot=" + system, "WINDIR=" + system, "RESPIRE_PROFILE_FIXTURE=" + root}
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("creating synthetic NTFS junction: %v: %s", err, out)
 	}
@@ -124,7 +124,7 @@ func TestRequestLedgerRefusesReplacedClientDirectory(t *testing.T) {
 	cmd := exec.Command(filepath.Join(system, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
 		"-NoProfile", "-NonInteractive", "-Command",
 		"$ErrorActionPreference='Stop'; New-Item -ItemType Junction -Path $env:RESPIRE_LINK -Target $env:RESPIRE_TARGET | Out-Null")
-	cmd.Env = []string{"SystemRoot=" + system, "WINDIR=" + system, "RESPIRE_LINK=" + m.Root, "RESPIRE_TARGET=" + target}
+	cmd.Env = []string{"PATHEXT=.EXE", "SystemRoot=" + system, "WINDIR=" + system, "RESPIRE_LINK=" + m.Root, "RESPIRE_TARGET=" + target}
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("create synthetic nested junction: %v: %s", err, out)
 	}

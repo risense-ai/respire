@@ -3,10 +3,12 @@ package host
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"unicode/utf16"
 	"unsafe"
 
@@ -40,7 +42,7 @@ func admitProfile(root, configured string) (profileAdmission, func(), error) {
 	}
 	expected := pins.root
 	clientDir := filepath.Join(expected, "client2")
-	if err := os.Mkdir(clientDir, 0700); err != nil && !errors.Is(err, os.ErrExist) {
+	if err := createProfileClientDirectory(clientDir); err != nil {
 		identity.Close()
 		pins.close()
 		return profileAdmission{}, nil, err
@@ -76,6 +78,31 @@ func admitProfile(root, configured string) (profileAdmission, func(), error) {
 		return now.close, nil
 	}
 	return profileAdmission{root: expected, reopen: reopen}, pins.close, nil
+}
+
+// An elevated token can default new objects to the Administrators group.
+// Set the user's owner and private DACL at creation, never on an existing path.
+func createProfileClientDirectory(path string) error {
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		return err
+	}
+	sid := user.User.Sid.String()
+	sd, err := windows.SecurityDescriptorFromString("O:" + sid + "D:P(A;OICI;FA;;;" + sid + ")")
+	if err != nil {
+		return err
+	}
+	name, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return err
+	}
+	sa := windows.SecurityAttributes{SecurityDescriptor: sd}
+	sa.Length = uint32(unsafe.Sizeof(sa))
+	err = windows.CreateDirectory(name, &sa)
+	if errors.Is(err, syscall.ERROR_ALREADY_EXISTS) {
+		return nil
+	}
+	return err
 }
 
 func sameProfileFile(original, current *os.File) bool {
@@ -194,7 +221,7 @@ func (p *profilePins) walk(path string, allowJunction bool) error {
 			cursor = p.root
 			found = true
 		} else if err := verifyProfileDirectory(h, i == len(parts)); err != nil {
-			return err
+			return fmt.Errorf("profile directory security at component %d of %d: %w", i, len(parts), err)
 		}
 	}
 	if allowJunction && !found {
