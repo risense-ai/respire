@@ -55,6 +55,15 @@ func TestStartupProbeRetriesOnlyOwnedChildTransportReset(t *testing.T) {
 }
 
 func TestRealRuntimeOwnedModelUninstallWindows(t *testing.T) {
+	testRealModelUninstall(t, nil)
+}
+
+func TestRealRuntimeOwnedModelUninstallThroughJunctionWindows(t *testing.T) {
+	testRealModelUninstall(t, syntheticJunctionProfile)
+}
+
+func testRealModelUninstall(t *testing.T, configure func(*testing.T, string) string) {
+	t.Helper()
 	source := os.Getenv("RESPIRE_TEST_REAL_MODEL_FIXTURE")
 	if source == "" {
 		t.Skip("set RESPIRE_TEST_REAL_MODEL_FIXTURE to an isolated directory containing the pinned bge-small assets")
@@ -63,7 +72,7 @@ func TestRealRuntimeOwnedModelUninstallWindows(t *testing.T) {
 	if !filepath.IsAbs(source) {
 		t.Fatal("the explicit model fixture directory must be absolute")
 	}
-	m, info := realRuntimeManager(t)
+	m, info := realRuntimeManagerAt(t, configure)
 	ctx := realRuntimeContext(t)
 	t.Cleanup(func() { cleanupRealRuntime(t, m, info) })
 	protect := func(path string) {

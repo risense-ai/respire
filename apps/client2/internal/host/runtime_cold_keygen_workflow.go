@@ -19,6 +19,9 @@ func (m *Manager) desktopOfflineKeygen(ctx context.Context, id string, query boo
 
 func (m *Manager) desktopOfflineKeygenWithStore(ctx context.Context, id string, query bool,
 	openStore func(context.Context) hostCredentialStore) (raw json.RawMessage, recovery string, err error) {
+	if err := m.requireTakeoverProfile(); err != nil {
+		return nil, "", err
+	}
 	op, ok := strings.CutPrefix(id, "desktop-")
 	if !ok || !hostOperationID.MatchString(op) || m.ClientVersion == "" {
 		return nil, "", errors.New("Invalid desktop cold keygen operation")

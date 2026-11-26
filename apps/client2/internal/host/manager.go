@@ -199,6 +199,7 @@ type InstalledRuntime struct {
 }
 
 type Manager struct {
+	profile         profileAdmission
 	ClientVersion   string
 	OpenBrowser     func(string) error
 	Root            string
@@ -231,38 +232,66 @@ func New() (*Manager, error) {
 	if err != nil || n < 1 || n > 65535 {
 		return nil, errors.New("RSRS_RPC_PORT must be a valid TCP port")
 	}
-	m, err := NewCLIInstaller()
+	dataRoot, err := clientDataRoot()
 	if err != nil {
 		return nil, err
 	}
-	m.DataRoot, err = startupScopePath(m.DataRoot)
+	profile, release, err := admitProfile(dataRoot, os.Getenv("RSRS_DATA_DIR"))
 	if err != nil {
 		return nil, err
 	}
-	m.Root = filepath.Join(m.DataRoot, "client2")
+	defer release()
+	// Transfer identity handles to the manager only after initialization.
+	initialized := false
+	defer func() {
+		if !initialized {
+			profile.close()
+		}
+	}()
+	if profile.reopen != nil {
+		for _, name := range []string{"preferences.json", "requests.json"} {
+			if err := checkModelUninstallPath(filepath.Join(profile.root, "client2", name)); err != nil {
+				return nil, err
+			}
+		}
+	}
+	m, err := newCLIInstaller(profile.root)
+	if err != nil {
+		return nil, err
+	}
+	m.profile = profile
 	m.Endpoint = "http://127.0.0.1:" + port
 	m.startupControl = m.acquireStartup
 	m.localClient = &http.Client{Timeout: 30 * time.Second, Transport: &http.Transport{Proxy: nil}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	if err := m.loadOperations(); err != nil {
 		return nil, err
 	}
+	initialized = true
 	return m, nil
 }
 
 // NewCLIInstaller reads the shared installer settings for an explicit CLI update.
 func NewCLIInstaller() (*Manager, error) {
-	home, err := os.UserHomeDir()
+	root, err := clientDataRoot()
 	if err != nil {
 		return nil, err
+	}
+	return newCLIInstaller(root)
+}
+
+func clientDataRoot() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
 	}
 	dataRoot := os.Getenv("RSRS_DATA_DIR")
 	if dataRoot == "" {
 		dataRoot = filepath.Join(home, ".rsrs")
 	}
-	dataRoot, err = filepath.Abs(dataRoot)
-	if err != nil {
-		return nil, err
-	}
+	return filepath.Abs(dataRoot)
+}
+
+func newCLIInstaller(dataRoot string) (*Manager, error) {
 	m := &Manager{Root: filepath.Join(dataRoot, "client2"), DataRoot: dataRoot,
 		prefs: defaultPreferences(), task: TaskState{Stage: i18n.Message56df21b4022f720d},
 		proxy: newProxyResolver()}

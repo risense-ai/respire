@@ -76,6 +76,7 @@ type runtimeStartup struct {
 	finishing bool
 	exited    chan struct{}
 	waitErr   error
+	releaseProfile func()
 }
 
 func writeStartupFrame(output io.Writer, value any) error {
@@ -256,6 +257,15 @@ func (m *Manager) startupScope() (root, profile, account string, err error) {
 }
 
 func (m *Manager) acquireStartup(ctx context.Context, info InstalledRuntime) (guard *runtimeStartup, err error) {
+	release, err := m.holdProfile()
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if release != nil {
+			release()
+		}
+	}()
 	if err := m.verifyRuntimeSelection(info); err != nil {
 		return nil, err
 	}
@@ -314,6 +324,8 @@ func (m *Manager) acquireStartup(ctx context.Context, info InstalledRuntime) (gu
 	workCtx, stopWork := context.WithDeadline(ctx, deadline)
 	guard = &runtimeStartup{ctx: childCtx, cancel: cancel, workCtx: workCtx, stopWork: stopWork,
 		cmd: cmd, input: input, output: output, exited: make(chan struct{})}
+	guard.releaseProfile = release
+	release = nil
 	child := guard
 	go func() {
 		child.waitErr = cmd.Wait()
@@ -402,6 +414,10 @@ func (g *runtimeStartup) Finish(endpoint *startupEndpoint) (released startupRele
 // Cancellation reaps only this owned helper; it never reports successful startup.
 func (g *runtimeStartup) Close() error {
 	defer g.stopWork()
+	if g.releaseProfile != nil {
+		defer g.releaseProfile()
+		g.releaseProfile = nil
+	}
 	if g.done {
 		return nil
 	}

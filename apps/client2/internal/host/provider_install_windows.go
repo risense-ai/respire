@@ -15,6 +15,9 @@ import (
 )
 
 func (m *Manager) installModelEngines(ctx context.Context) (result json.RawMessage, err error) {
+	if err := m.requireTakeoverProfile(); err != nil {
+		return nil, err
+	}
 	catalog, err := m.downloadWinMLCatalog(ctx)
 	if err != nil {
 		return nil, err

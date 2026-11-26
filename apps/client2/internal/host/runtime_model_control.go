@@ -70,6 +70,11 @@ func (m *Manager) installRuntimeOwnedModel(ctx context.Context, health HealthInf
 }
 
 func (m *Manager) runRuntimeModelControl(ctx context.Context, health HealthInfo, modelID string, transfer io.Reader) ([]byte, error) {
+	release, err := m.holdProfile()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	if !health.StartupComplete || !health.StoreReady || health.PID == 0 ||
 		health.AccountID == "" || health.InstanceID == "" || health.ProcessStartID == "" || health.Generation == 0 {
 		return nil, errOnlineModelUnavailable

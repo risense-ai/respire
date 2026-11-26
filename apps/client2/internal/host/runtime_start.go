@@ -15,6 +15,11 @@ import (
 )
 
 func (m *Manager) startDetached(ctx context.Context, info InstalledRuntime) (HealthInfo, error) {
+	release, err := m.holdProfile()
+	if err != nil {
+		return HealthInfo{}, err
+	}
+	defer release()
 	// Report invalid local selections before requesting takeover ownership.
 	if err := m.verifyRuntimeSelection(info); err != nil {
 		return HealthInfo{}, err
@@ -46,6 +51,11 @@ func (m *Manager) startDetachedLocked(ctx context.Context, info InstalledRuntime
 }
 
 func (m *Manager) startDetachedComplete(ctx context.Context, info InstalledRuntime, complete func(HealthInfo) error) (HealthInfo, error) {
+	release, err := m.holdProfile()
+	if err != nil {
+		return HealthInfo{}, err
+	}
+	defer release()
 	if err := m.verifyRuntimeSelection(info); err != nil {
 		return HealthInfo{}, err
 	}
@@ -108,6 +118,14 @@ func (m *Manager) launchRuntimeServing(ctx context.Context, cmd *exec.Cmd) (Heal
 func (m *Manager) launchRuntimeServingComplete(ctx context.Context, cmd *exec.Cmd, complete func(HealthInfo) error) (result HealthInfo, resultErr error) {
 	if err := ctx.Err(); err != nil {
 		return HealthInfo{}, err
+	}
+	release, err := m.holdProfile()
+	if err != nil {
+		return HealthInfo{}, err
+	}
+	defer release()
+	if m.profile.reopen != nil {
+		cmd.Env = append(cmd.Env, "RSRS_DATA_DIR="+m.DataRoot)
 	}
 	log, err := os.CreateTemp(m.Root, "runtime-start-*.log")
 	if err != nil {

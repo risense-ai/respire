@@ -15,6 +15,9 @@ import (
 
 // Only the supervising host can pause its own restart policy.
 func (m *Manager) stopManaged(ctx context.Context, h HealthInfo) error {
+	if err := m.requireTakeoverProfile(); err != nil {
+		return err
+	}
 	if h.InstallationRoot == "" || !filepath.IsAbs(h.InstallationRoot) {
 		return errors.New(i18n.Message49ba9c7d11f1110f)
 	}

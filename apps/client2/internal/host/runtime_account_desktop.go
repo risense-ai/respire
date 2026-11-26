@@ -14,6 +14,9 @@ import (
 )
 
 func (m *Manager) desktopRuntimeAccountLogin(ctx context.Context, args []string, secret, id, method string) (envelope json.RawMessage, err error) {
+	if err := m.requireTakeoverProfile(); err != nil {
+		return nil, err
+	}
 	browser, register := method == "auth.login.browser", method == "auth.register"
 	input, err := authParams(args, secret)
 	if err != nil {
