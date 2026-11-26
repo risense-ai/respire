@@ -10,6 +10,8 @@ mod sync;
 mod tests;
 
 pub(super) use routes::routes;
+#[cfg(target_os = "linux")]
+pub(super) use state::archive_claim::retire_pending_archives;
 pub(crate) use sync::PendingSync;
 
 #[cfg(test)]
@@ -17,3 +19,6 @@ pub(super) use state::check_receipts;
 
 #[cfg(target_os = "linux")]
 pub(super) mod backup_import;
+
+#[cfg(all(test, target_os = "linux"))]
+pub(super) use state::archive_claim::routes as archive_claim_fixture;

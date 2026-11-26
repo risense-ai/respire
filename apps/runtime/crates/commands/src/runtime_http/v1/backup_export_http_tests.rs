@@ -97,15 +97,14 @@ fn scoped_archive_over_loopback() -> Result<()> {
                       request: Request| get(bound, peer, request),
             )));
             #[cfg(target_os = "linux")]
-            let (app, tickets) = {
-                let (worker, tickets) = tokio::sync::mpsc::channel(1);
-                let app = app.merge(Router::new().route("/v1/backups/import", routing::post(
+            let app = {
+                let app = app.merge(super::super::operations::archive_claim_fixture(bound)).merge(Router::new().route("/v1/backups/import", routing::post(
                     move |ConnectInfo(crate::network::Peer(peer)): ConnectInfo<crate::network::Peer>,
                           request: Request| super::super::operations::backup_import::post(
-                              bound, peer, request, worker.clone(),
+                              bound, peer, request,
                           ),
                 )));
-                (app, tickets)
+                app
             };
             let server = tokio::spawn(async move {
                 axum::serve(
@@ -113,7 +112,7 @@ fn scoped_archive_over_loopback() -> Result<()> {
                     app.into_make_service_with_connect_info::<crate::network::Peer>(),
                 ).await
             });
-            let result = tokio::task::spawn_blocking(move || verify_http(bound, &root, urk, #[cfg(target_os = "linux")] tickets)).await;
+            let result = tokio::task::spawn_blocking(move || verify_http(bound, &root, urk)).await;
             server.abort();
             let _ = server.await;
             result?
@@ -127,9 +126,7 @@ fn scoped_archive_over_loopback() -> Result<()> {
     Ok(())
 }
 
-fn verify_http(bound: SocketAddr, root: &Path, urk: [u8; 32],
-    #[cfg(target_os = "linux")] mut tickets: tokio::sync::mpsc::Receiver<super::super::operations::backup_import::Ticket>,
-) -> Result<()> {
+fn verify_http(bound: SocketAddr, root: &Path, urk: [u8; 32]) -> Result<()> {
     let base = format!("http://{bound}");
     let agent = ureq::AgentBuilder::new().try_proxy_from_env(false).timeout(WAIT).build();
     let get = |name: &str| agent.get(&format!("{base}{name}"));
@@ -177,7 +174,7 @@ fn verify_http(bound: SocketAddr, root: &Path, urk: [u8; 32],
                 .set("Content-Type", "application/octet-stream").send_bytes(payload);
             let reject = |payload: &[u8]| -> Result<()> {
                 ensure!(matches!(upload(payload), Err(ureq::Error::Status(400, _))), "invalid upload accepted");
-                ensure!(tickets.is_empty(), "rejected upload reached confirmation worker");
+                ensure!(backup_stage_count(root)? == 0, "rejected upload reached confirmation worker");
                 Ok(())
             };
             if space == "main" {
@@ -201,7 +198,7 @@ fn verify_http(bound: SocketAddr, root: &Path, urk: [u8; 32],
                     let mut reply = Vec::new();
                     stream.take(8192).read_to_end(&mut reply)?;
                     ensure!(!reply.starts_with(b"HTTP/1.1 202"), "aborted upload accepted");
-                    ensure!(tickets.is_empty(), "aborted upload reached worker");
+                    ensure!(backup_stage_count(root)? == 0, "aborted upload reached worker");
                 }
                 let mut corrupt = wire.clone();
                 *corrupt.last_mut().context("empty archive")? ^= 1;
@@ -218,18 +215,20 @@ fn verify_http(bound: SocketAddr, root: &Path, urk: [u8; 32],
                 assert_eq!(accepted.status(), 202);
                 let receipt: Value = accepted.into_json()?;
                 ensure!(matches!(upload(&wire), Err(ureq::Error::Status(503, _))),
-                    "a full confirmation queue accepted a second ticket");
+                    "full pending custody admitted another upload");
                 assert_eq!(backup_stage_count(root)?, 1);
-                let ticket = tickets.try_recv()?;
-                let id = ticket.operation_id().map_err(|_| anyhow::anyhow!("missing registry ID"))?;
+                let id = receipt["operation_id"].as_str().context("missing operation")?;
+                let uuid = uuid::Uuid::parse_str(id)?;
                 assert_eq!(receipt, json!({"operation_id": id, "status": "pending"}));
                 let status: Value = get(&format!("/v1/operations/{id}"))
                     .set("Authorization", &format!("Bearer {TOKEN}")).call()?.into_json()?;
                 assert_eq!(status["state"], "pending");
-                assert_eq!(ticket.target, service::database_path(root)?.canonicalize()?);
-                assert_eq!(ticket.archive_sha256, <[u8; 32]>::from(Sha256::digest(&wire)));
-                let handoff = ticket.pending.handoff();
-                let ready = ticket.pending.publish(|| Ok(()))?;
+                let claimed = claim_over_loopback(&agent, &base, &service::database_path(root)?.canonicalize()?, uuid, &wire)?;
+                use respire_spawn::owner_credential::{ArchiveOperation,BackupArchiveHandoff,ReadyBackupArchive};
+                let mut intent = [0; 32];
+                hex::decode_to_slice(claimed["intent_sha256"].as_str().context("missing claimed intent")?, &mut intent)?;
+                let handoff = BackupArchiveHandoff::from_approved_intent(ArchiveOperation::from_v4_bytes(*uuid.as_bytes())?, intent);
+                let ready = ReadyBackupArchive::open(root, handoff)?;
                 ready.consume(|input| {
                     let mut staged = Vec::new();
                     input.read_to_end(&mut staged)?;
@@ -242,10 +241,19 @@ fn verify_http(bound: SocketAddr, root: &Path, urk: [u8; 32],
                 let accepted = post(&format!("/v1/backups/import?space_id={space}"))
                     .set("Content-Type", "application/octet-stream").send_bytes(&wire)?;
                 assert_eq!(accepted.status(), 202);
-                let ticket = tickets.try_recv()?;
-                assert_ne!(ticket.target, service::database_path(root)?.canonicalize()?);
-                assert_eq!(ticket.archive_sha256, <[u8; 32]>::from(Sha256::digest(&wire)));
-                drop(ticket);
+                let receipt: Value = accepted.into_json()?;
+                let id = receipt["operation_id"].as_str().context("missing child operation")?;
+                assert_eq!(backup_stage_count(root)?, 1);
+                let uuid = uuid::Uuid::parse_str(id)?;
+                let parent = service::database_path(root)?.canonicalize()?;
+                ensure!(claim_over_loopback(&agent, &base, &parent, uuid, &wire).is_err(), "child accepted parent claim");
+                let child = service::main_data_dir().join(".respire-local-spaces-v1").join(space).join("onememory.db").canonicalize()?;
+                let claimed = claim_over_loopback(&agent, &base, &child, uuid, &wire)?;
+                use respire_spawn::owner_credential::{ArchiveOperation, BackupArchiveHandoff};
+                let mut intent = [0; 32];
+                hex::decode_to_slice(claimed["intent_sha256"].as_str().context("missing child intent")?, &mut intent)?;
+                BackupArchiveHandoff::from_approved_intent(ArchiveOperation::from_v4_bytes(*uuid.as_bytes())?, intent).discard(root)?;
+                assert_eq!(backup_stage_count(root)?, 0);
             }
         }
         let output = tempfile::NamedTempFile::new_in(root)?;
@@ -284,4 +292,22 @@ impl Read for SplitArchive<'_> {
         let size = out.len().min(limit);
         self.rest.read(&mut out[..size])
     }
+}
+
+#[cfg(target_os="linux")]
+fn claim_over_loopback(agent:&ureq::Agent, base:&str, target:&Path, id:uuid::Uuid, wire:&[u8]) -> Result<Value> {
+    use respire_spawn::owner_credential::{archive_proof::{self,ArchiveClaim}, read_owner_credential};
+    let health:Value=agent.get(&format!("{base}/api/health")).call()?.into_json()?;
+    let instance=uuid::Uuid::parse_str(health["instance_id"].as_str().context("fixture instance")?)?;
+    let claim=ArchiveClaim{query_only:false,operation:*id.as_bytes(), archive:Sha256::digest(wire).into(),
+        target:Sha256::digest(target.to_str().context("canonical target")?.as_bytes()).into(),
+        instance:*instance.as_bytes(),generation:health["generation"].as_u64().context("fixture generation")?};
+    let record=read_owner_credential(&crate::rpc_worker::runtime_dir(), &instance.to_string())?;
+    let proof=archive_proof::issue(record.as_bytes(),claim,super::super::owner_control::wall_ms().context("clock")?).context("fixture proof")?;
+    let frame=json!({"schema_version":1,"operation_id":id.to_string(),"archive_sha256":hex::encode(claim.archive),"target_sha256":hex::encode(claim.target)});
+    let receipt:Value=agent.post(&format!("{base}/api/runtime/private-backup/claim"))
+        .set("x-respire-archive-proof",&proof).send_json(frame)?.into_json()?;
+    assert_eq!(receipt["state"],"claimed");
+    assert_eq!(receipt["operation_id"],id.to_string());
+    Ok(receipt)
 }

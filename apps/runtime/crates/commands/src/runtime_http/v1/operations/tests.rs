@@ -15,13 +15,16 @@ use tower::ServiceExt;
 
 #[path = "sse_cursor_tests.rs"]
 mod sse_cursor_tests;
+#[cfg(target_os="linux")]
+#[path="archive_claim_tests.rs"]
+mod archive_claim_tests;
 use sse_cursor_tests::events;
 
 #[path = "model_switch_tests.rs"]
 mod model_switch_tests;
 #[path = "route_fixture_helpers.rs"]
 mod route_fixture_helpers;
-use route_fixture_helpers::check_light_status_and_legacy_aliases;
+use route_fixture_helpers::{check_light_status_and_legacy_aliases, trigger};
 #[path = "host_config_tests.rs"]
 mod host_config_tests;
 #[path = "space_members_tests.rs"]
@@ -150,6 +153,11 @@ pub(super) fn production_router_fixture(test: &'static str) -> Result<()> {
         .build()?
         .block_on(async {
             let app = crate::runtime_http::router(BOUND);
+            #[cfg(target_os="linux")]
+            if matches!(test, archive_claim_tests::TEST | archive_claim_tests::RESTART) {
+                crate::rpc_serve::mark_http_fixture_ready();
+                return archive_claim_tests::check_case(test, &app.merge(super::archive_claim_fixture(BOUND)), &root, &token).await;
+            }
             if test == SPACE_TEST {
                 crate::rpc_serve::mark_http_fixture_ready();
                 return space_members_tests::device_space_tests::check(&app, &root, true).await;
@@ -589,12 +597,4 @@ async fn check_deepen_routes(app: &Router, token_path: &std::path::Path) -> Resu
     let status = request(app, "GET", "/v1/status/light", Some(NEXT_TOKEN)).await?;
     assert_eq!(json_response(status, StatusCode::OK).await?["indexed_count"], 19);
     Ok(())
-}
-
-async fn trigger(app: &Router, token: &str) -> Result<String> {
-    let response = request(app, "POST", "/v1/sync/trigger", Some(token)).await?;
-    let operation = json_response(response, StatusCode::ACCEPTED).await?;
-    let id = operation["operation_id"].as_str().context("operation ID")?;
-    uuid::Uuid::parse_str(id)?;
-    Ok(format!("/v1/operations/{id}"))
 }

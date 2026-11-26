@@ -1,30 +1,25 @@
-//! Unmounted streaming import. Only the private receiver owns the pending ticket.
+//! Unmounted streaming import. The request alone transfers the verified ticket.
 use super::{state, super::{reads, rest_dispatch, transport, V1Result}};
 use axum::{extract::Request, http::{header, Method, StatusCode}, response::Response};
 use respire_app::snapshot::backup_archive::BackupArchiveHeader;
 use respire_spawn::owner_credential::{ArchiveOperation, PendingBackupArchive};
 #[path = "backup_import_stream.rs"]
 mod stream;
-use std::{net::SocketAddr, path::PathBuf, time::Duration};
-use tokio::sync::{mpsc, Semaphore};
+use std::{net::SocketAddr, time::Duration};
+use tokio::sync::Semaphore;
 
 const TOTAL: Duration = Duration::from_secs(30 * 60);
 static UPLOADS: Semaphore = Semaphore::const_new(2);
 
-pub(in crate::runtime_http::v1) struct Ticket {
-    pub(in crate::runtime_http::v1) pending: PendingBackupArchive,
-    pub(in crate::runtime_http::v1) target: PathBuf,
-    pub(in crate::runtime_http::v1) archive_sha256: [u8; 32],
+struct Ticket {
+    pending: PendingBackupArchive,
+    target: respire_spawn::owner_credential::ArchiveTarget,
+    archive_sha256: [u8; 32],
     job: state::Job,
-}
-
-impl Ticket {
-    pub(in crate::runtime_http::v1) fn operation_id(&self) -> V1Result<String> { self.job.id() }
 }
 
 pub(in crate::runtime_http::v1) async fn post(
     bound: SocketAddr, peer: SocketAddr, request: Request,
-    worker: mpsc::Sender<Ticket>,
 ) -> V1Result<Response> {
     let (parts, body) = request.into_parts();
     if parts.method != Method::POST { return Err(super::super::method_not_allowed().await); }
@@ -39,7 +34,7 @@ pub(in crate::runtime_http::v1) async fn post(
     let resolve = |selected: Option<String>, scope: transport::RestScope| async move {
         rest_dispatch::submit(scope, rest_dispatch::Access::Read, move |ctx| {
             reads::with_memory_store(ctx, selected, |store, _| {
-                store.backup_target().map_err(|_| transport::unavailable())
+                store.pin_backup_target().map_err(|_| transport::unavailable())
             })
         }).await
     };
@@ -57,7 +52,7 @@ pub(in crate::runtime_http::v1) async fn post(
         let job = transport::with_scope(&scope, || state::registry().begin(scope.clone(), "backup_import"))?;
         let id = uuid::Uuid::parse_str(&job.id()?).map_err(|_| transport::unavailable())?;
         let operation = ArchiveOperation::from_v4_bytes(*id.as_bytes()).map_err(|_| transport::unavailable())?;
-        let pending = proof.stage_for_restore(&mut database, &scope.canonical_profile, &target, operation, || {
+        let pending = proof.stage_for_restore(&mut database, &scope.canonical_profile, target.path(), operation, || {
             anyhow::ensure!(tokio::time::Instant::now() < deadline, "upload deadline expired");
             anyhow::ensure!(transport::scope_is_live(&scope), "owner scope expired");
             Ok(())
@@ -74,12 +69,10 @@ pub(in crate::runtime_http::v1) async fn post(
         fed?;
         Ok::<_, super::super::Problem>(staged)
     }).await.map_err(|_| transport::invalid())??;
-    if resolve(selected, owner.clone()).await? != ticket.target {
+    if resolve(selected, owner.clone()).await?.path() != ticket.target.path() || ticket.target.verify().is_err() {
         return Err(transport::invalid());
     }
     let receipt = transport::json_response(StatusCode::ACCEPTED, accepted)?;
-    transport::with_scope(&owner, || {
-        worker.try_send(ticket).map_err(|_| transport::unavailable())?;
-        Ok(receipt)
-    })
+    ticket.job.stage_archive(ticket.target, ticket.archive_sha256, ticket.pending)?;
+    Ok(receipt)
 }

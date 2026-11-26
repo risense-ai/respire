@@ -102,6 +102,8 @@ const LOCAL_SPACE_STAGE_FILES: &[&str] = &[
 const LOCAL_SPACE_STAGING_SLOTS: u8 = 16;
 
 pub mod model_proof;
+#[cfg(target_os = "linux")]
+pub mod archive_proof;
 pub mod proof;
 
 #[cfg(windows)]
@@ -132,5 +134,10 @@ pub use unix::model_job::ModelJobRoot;
 
 #[cfg(target_os = "linux")]
 pub use unix::backup_archive::{
-    read_backup_terminal, ArchiveOperation, BackupArchiveHandoff, PendingBackupArchive, ReadyBackupArchive,
+    read_backup_terminal, ArchiveOperation, ArchivePublishError, BackupArchiveHandoff, PendingBackupArchive, ReadyBackupArchive,
 };
+
+#[cfg(target_os = "linux")]
+mod archive_target;
+#[cfg(target_os = "linux")]
+pub use archive_target::ArchiveTarget;

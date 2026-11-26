@@ -13,6 +13,10 @@ use uuid::Uuid;
 #[path = "backup_restore_receipt.rs"]
 pub(super) mod backup_restore_receipt;
 
+#[cfg(target_os = "linux")]
+#[path = "archive_claim.rs"]
+pub(in crate::runtime_http::v1) mod archive_claim;
+
 const MAX_TRACKED: usize = 128;
 const TERMINAL_RETENTION: Duration = Duration::from_secs(600);
 
@@ -70,10 +74,18 @@ impl Snapshot {
     }
 }
 
+fn archive_committed() -> Problem {
+    Problem::new(StatusCode::CONFLICT, "operation_committed", "Archive claim already consumed")
+}
+
 struct State {
     snapshot: Snapshot,
     cancel_requested: bool,
     committed: bool,
+    #[cfg(target_os = "linux")]
+    archive: Option<archive_claim::Pending>,
+    #[cfg(target_os = "linux")]
+    claimed: Option<archive_claim::Claimed>,
     finished: Option<Instant>,
 }
 
@@ -94,6 +106,8 @@ impl Entry {
     }
 
     fn finish(&self, state: &mut State, phase: Phase) {
+        #[cfg(target_os = "linux")]
+        drop(state.archive.take());
         state.snapshot.state = phase;
         if phase == Phase::Completed {
             state.snapshot.progress_percent = Some(100);
@@ -136,6 +150,9 @@ impl Entry {
 
     pub(super) fn cancel(&self) -> V1Result<Snapshot> {
         let mut state = self.lock()?;
+        if state.snapshot.kind == "backup_import" && state.committed {
+            return Err(archive_committed());
+        }
         match state.snapshot.state {
             Phase::Pending => self.finish(&mut state, Phase::Cancelled),
             Phase::Running if state.committed => {
@@ -167,7 +184,11 @@ impl Registry {
             entry
                 .lock()
                 .ok()
-                .and_then(|state| state.finished)
+                .and_then(|state| {
+                    #[cfg(target_os = "linux")]
+                    if let Some(claimed) = &state.claimed { return Some(claimed.at); }
+                    state.finished
+                })
                 .is_none_or(|finished| finished.elapsed() < TERMINAL_RETENTION)
         });
         Ok(entries)
@@ -202,6 +223,10 @@ impl Registry {
                 snapshot,
                 cancel_requested: false,
                 committed: false,
+                #[cfg(target_os = "linux")]
+                archive: None,
+                #[cfg(target_os = "linux")]
+                claimed: None,
                 finished: None,
             }),
         });
@@ -209,7 +234,7 @@ impl Registry {
             std::collections::hash_map::Entry::Vacant(slot) => slot.insert(Arc::clone(&entry)),
             std::collections::hash_map::Entry::Occupied(_) => return Err(transport::unavailable()),
         };
-        Ok(Job(entry))
+        Ok(Job { entry, fail_on_drop: true })
     }
 
     pub(super) fn lookup(&self, scope: &RestScope, id: Uuid) -> V1Result<Arc<Entry>> {
@@ -230,11 +255,11 @@ pub(super) fn not_found() -> Problem {
 }
 
 /// The queue owns one ticket. Dropping unfinished work records failure.
-pub(super) struct Job(Arc<Entry>);
+pub(super) struct Job { entry: Arc<Entry>, fail_on_drop: bool }
 
 impl Job {
     pub(super) fn id(&self) -> V1Result<String> {
-        Ok(self.0.lock()?.snapshot.operation_id.clone())
+        Ok(self.entry.lock()?.snapshot.operation_id.clone())
     }
 
     pub(super) fn model_commit(
@@ -250,7 +275,7 @@ impl Job {
         final_commit: bool,
         action: impl FnOnce() -> anyhow::Result<()>,
     ) -> anyhow::Result<()> {
-        let mut state = self.0.lock().map_err(|_| anyhow::anyhow!("operation state unavailable"))?;
+        let mut state = self.entry.lock().map_err(|_| anyhow::anyhow!("operation state unavailable"))?;
         anyhow::ensure!(
             state.snapshot.state == Phase::Running && !state.cancel_requested && !state.committed,
             crate::model_progress::OperationStopped::Cancelled
@@ -261,34 +286,34 @@ impl Job {
     }
 
     pub(super) fn accepted(&self) -> V1Result<Value> {
-        Ok(json!({"operation_id": self.0.snapshot()?.operation_id, "status": "pending"}))
+        Ok(json!({"operation_id": self.entry.snapshot()?.operation_id, "status": "pending"}))
     }
 
     pub(super) fn scope(&self) -> &RestScope {
-        &self.0.scope
+        &self.entry.scope
     }
 
     pub(super) fn start(&self) -> V1Result<bool> {
-        let mut state = self.0.lock()?;
+        let mut state = self.entry.lock()?;
         if state.snapshot.state != Phase::Pending {
             return Ok(false);
         }
         state.snapshot.state = Phase::Running;
-        self.0.publish(&mut state);
+        self.entry.publish(&mut state);
         Ok(true)
     }
 
     pub(super) fn entry(&self) -> Arc<Entry> {
-        Arc::clone(&self.0)
+        Arc::clone(&self.entry)
     }
 
     pub(super) fn progress(&self, percent: u8) -> V1Result<()> {
-        self.0.progress(percent)
+        self.entry.progress(percent)
     }
     pub(super) fn finish(&self, phase: Phase) {
-        if let Ok(mut state) = self.0.lock() {
+        if let Ok(mut state) = self.entry.lock() {
             if !state.snapshot.terminal() {
-                self.0.finish(&mut state, phase);
+                self.entry.finish(&mut state, phase);
             }
         }
     }
@@ -296,23 +321,23 @@ impl Job {
 
 impl Job {
     pub(super) fn fail_problem(&self, problem: &Problem) {
-        if let Ok(mut state) = self.0.lock() {
+        if let Ok(mut state) = self.entry.lock() {
             if !state.snapshot.terminal() {
                 state.snapshot.error = Some(problem.body());
-                self.0.finish(&mut state, Phase::Failed);
+                self.entry.finish(&mut state, Phase::Failed);
             }
         }
     }
 
     pub(super) fn fail(&self, code: &'static str) {
-        if let Ok(mut state) = self.0.lock() {
+        if let Ok(mut state) = self.entry.lock() {
             if !state.snapshot.terminal() {
                 state.snapshot.error = Some(json!({
                     "type": "about:blank", "status": 500, "code": code,
                     "title": "Model download failed", "detail": "Approved model sources exhausted",
                     "retryable": false,
                 }));
-                self.0.finish(&mut state, Phase::Failed);
+                self.entry.finish(&mut state, Phase::Failed);
             }
         }
     }
@@ -320,7 +345,7 @@ impl Job {
 
 impl Drop for Job {
     fn drop(&mut self) {
-        self.finish(Phase::Failed);
+        if self.fail_on_drop { self.finish(Phase::Failed); }
     }
 }
 

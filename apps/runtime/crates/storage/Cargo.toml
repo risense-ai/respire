@@ -30,3 +30,6 @@ tempfile = "3.15"
 
 [lints.rust]
 unsafe_code = "forbid"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+respire_spawn = { path = "../../spawn", features = ["rusqlite"] }

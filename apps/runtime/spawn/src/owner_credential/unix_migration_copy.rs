@@ -85,7 +85,11 @@ impl MigrationCopy {
         &self.path
     }
 
-    pub fn publish(mut self, final_name: &str) -> io::Result<()> {
+    pub fn publish(self, final_name: &str) -> io::Result<()> {
+        self.publish_observed(final_name, || ())
+    }
+
+    pub(super) fn publish_observed(mut self, final_name: &str, renamed: impl FnOnce()) -> io::Result<()> {
         super::super::validate_migration_leaf(final_name)?;
         let final_name = CString::new(final_name).map_err(|_| denied())?;
         let parent = self.parent.as_raw_fd();
@@ -98,6 +102,7 @@ impl MigrationCopy {
         self.file.sync_all()?;
         super::model_stage::no_replace(parent, &self.pending, &final_name)?;
         self.published = true;
+        renamed();
         self.parent.sync_all()
     }
 }

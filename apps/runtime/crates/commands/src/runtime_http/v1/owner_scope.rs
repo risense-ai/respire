@@ -104,6 +104,11 @@ pub(super) struct OwnerLeaseRegistry {
 }
 
 impl OwnerLeaseRegistry {
+    #[cfg(target_os = "linux")]
+    pub(super) fn observe_archive_clock(&mut self, now_ms: u64) -> bool {
+        self.replay.observe(now_ms)
+    }
+
     /// Only the verified serving-side native owner connection may construct this.
     pub(super) fn for_verified_connection(
         binding: OwnerBinding,

@@ -168,6 +168,11 @@ impl PendingBackupArchive {
         })
     }
 
+    /// Compare the authenticated receiver's ticket to this exact staged file.
+    pub fn matches_ticket(&self, root: &Path, operation: ArchiveOperation, digest: [u8; 32]) -> bool {
+        self.root == root && self.intent.operation == operation && self.intent.sha256 == digest
+    }
+
     pub fn handoff(&self) -> BackupArchiveHandoff {
         BackupArchiveHandoff::from_approved_intent(self.intent.operation, Sha256::digest(self.intent.encode()).into())
     }
@@ -187,16 +192,39 @@ impl PendingBackupArchive {
     /// Fsync intent first, then publish the final wire without clobbering.
     /// Do not drain unless reopen succeeds; an error may leave an intent
     /// only (or a final name after a late fsync failure). Never replay.
-    pub fn publish(self, mut check_live: impl FnMut() -> io::Result<()>) -> io::Result<ReadyBackupArchive> {
+    pub fn publish(self, check_live: impl FnMut() -> io::Result<()>) -> io::Result<ReadyBackupArchive> {
+        self.publish_observed(check_live, || ())
+    }
+
+    pub fn publish_claim(self, check_live: impl FnMut() -> io::Result<()>) -> Result<ReadyBackupArchive, ArchivePublishError> {
+        let root = self.root.clone();
+        let handoff = self.handoff();
+        let mut renamed = false;
+        self.publish_observed(check_live, || renamed = true).map_err(|error| {
+            if renamed { return ArchivePublishError::AfterRename(error); }
+            // Only the exact marker of this consumed ticket can be removed.
+            let _ = handoff.discard_unpublished_intent(&root);
+            ArchivePublishError::BeforeRename(error)
+        })
+    }
+
+    /// The observer runs immediately after the successful no-replace wire rename.
+    fn publish_observed(self, mut check_live: impl FnMut() -> io::Result<()>, renamed: impl FnOnce()) -> io::Result<ReadyBackupArchive> {
         check_live()?;
         let handoff = self.handoff();
         self.persist_intent()?;
         check_live()?;
-        self.wire.publish(&handoff.operation.leaf("archive"))?;
+        self.wire.publish_observed(&handoff.operation.leaf("archive"), renamed)?;
         let ready = ReadyBackupArchive::open(&self.root, handoff)?;
         check_live()?;
         Ok(ready)
     }
+}
+
+#[derive(Debug)]
+pub enum ArchivePublishError {
+    BeforeRename(io::Error),
+    AfterRename(io::Error),
 }
 
 pub struct ReadyBackupArchive {
@@ -234,6 +262,13 @@ impl ReadyBackupArchive {
 }
 
 impl BackupArchiveHandoff {
+    fn discard_unpublished_intent(self, root: &Path) -> io::Result<()> {
+        let parent = open_base(root)?;
+        let (_, record) = read_intent(&parent, self)?;
+        remove_owned(&parent, &self.operation.leaf("intent"), record, Some(INTENT_BYTES as u64))?;
+        parent.sync_all()
+    }
+
     /// Only the current coordinator may discard its exact admitted custody.
     /// An unrelated or ambiguous replacement is retained, never unlinked.
     pub fn discard(self, root: &Path) -> io::Result<()> {
