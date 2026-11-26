@@ -7,6 +7,9 @@ use anyhow::Result;
 /// Only typed library operations can use the verified vault.
 pub struct RuntimeLibrary<'a>(pub(super) &'a SessionKeys, &'a str, &'a std::path::Path);
 
+#[path = "backup_vault.rs"]
+mod backup_vault;
+
 #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 #[path = "device_spaces.rs"]
 mod device_spaces;
