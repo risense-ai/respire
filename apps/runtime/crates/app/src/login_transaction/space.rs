@@ -87,18 +87,8 @@ fn members(bytes: Option<&[u8]>) -> Result<Vec<Member>> {
     Ok(rows)
 }
 
-/// Project locally committed session grants; remote revocation is observed by existing control.
-/// The caller must hold the selected profile ownership lock.
-pub fn list_space_members(profile: &Path) -> Result<Value> {
-    let bytes = read_optional(&profile.join(MEMBERS))?;
-    let rows = members(bytes.as_deref())?.into_iter().map(|row| json!({
-        "member_id": row.session_id,
-        "display_name": row.device_name,
-        "role": if row.readonly { "viewer" } else { "editor" },
-        "status": "active",
-    })).collect::<Vec<_>>();
-    Ok(json!({"members": rows}))
-}
+mod invite_projection;
+pub use invite_projection::{committed_space_invite_member, list_space_members, SpaceInviteRequest, SpaceMemberView};
 
 fn field<'a>(value: &'a Value, key: &str) -> Result<&'a str> {
     value[key].as_str().filter(|value| !value.trim().is_empty()).context("space credential field missing")
@@ -218,7 +208,7 @@ fn admit(ownership: &AuthOwnership, id: &str, key: &str, params: &HostSpaceParam
             Some(target)
         }
         HostSpaceOperation::Invite { note, .. } => {
-            let device = format!("member-{}",note.as_deref().unwrap_or("invited").trim());
+            let device = invite_projection::member_label(note.as_deref());
             ensure!(device.len() <= 128 && serde_json::to_vec_pretty(&rows)?.len() + device.len() + 256 <= 64 * 1024,
                 "space member record or device-name limit exceeded");
             None
@@ -316,7 +306,7 @@ fn invite(journal: &mut Journal, index: usize, params: &HostSpaceParams) -> Resu
             .context("space profile name is not UTF-8")?.to_owned()
     };
     let secret = source_super(&session,params)?;
-    let device = format!("member-{}",note.as_deref().unwrap_or("invited").trim());
+    let device = invite_projection::member_label(note.as_deref());
     op_mut(journal,index)?.issued_at = Some(chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Secs,true));
     journal.operations[index].phase = AuthPhase::RemotePending;
     save_journal(journal)?;
@@ -365,7 +355,7 @@ fn stage_invite_code(journal: &mut Journal, index: usize, code: &str, params: &H
     ensure!(uuid::Uuid::parse_str(&sid)?.to_string() == sid && operation.session_id.as_deref() == Some(sid.as_str()),
         "invalid invite checkpoint session");
     let mut rows = members(operation.members_original.as_deref())?;
-    rows.push(Member { session_id:sid.clone(),device_name:format!("member-{}",note.as_deref().unwrap_or("invited").trim()),
+    rows.push(Member { session_id:sid.clone(),device_name:invite_projection::member_label(note.as_deref()),
         readonly:*readonly,issued_at:operation.issued_at.clone().context("invite admission time missing")? });
     let operation = op_mut(journal,index)?;
     operation.session_id = Some(sid);
