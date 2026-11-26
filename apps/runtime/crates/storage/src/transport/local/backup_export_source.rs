@@ -58,14 +58,6 @@ impl SourceIdentity {
 }
 
 impl LocalStore {
-    /// Resolve the database actually open on the selected owner dispatcher.
-    pub fn backup_target(&self) -> Result<PathBuf> {
-        let path = Path::new(self.connection.path().context("backup requires an on-disk store")?);
-        let canonical = path.canonicalize()?;
-        ensure!(canonical == path, "backup target is not canonical");
-        Ok(canonical)
-    }
-
     /// Short admission only. Select the store from the verified owner scope
     /// before calling; `stage_parent` is the verified owner account root,
     /// not the selected child, and never comes from an HTTP path.

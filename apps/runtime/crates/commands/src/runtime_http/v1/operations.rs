@@ -15,5 +15,4 @@ pub(crate) use sync::PendingSync;
 #[cfg(test)]
 pub(super) use state::check_receipts;
 
-#[cfg(target_os = "linux")]
 pub(super) mod backup_import;

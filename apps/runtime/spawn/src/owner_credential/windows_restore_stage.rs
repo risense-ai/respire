@@ -84,6 +84,10 @@ impl PrivateRestoreStage {
         &self.path
     }
 
+    pub fn open_verified_read(&self) -> io::Result<File> {
+        Ok(File::from(self.verify_stage(GENERIC_READ)?))
+    }
+
     fn verify_stage(&self, access: u32) -> io::Result<OwnedHandle> {
         self.user
             .verify_new_managed_directory(self.directory.handle())?;
@@ -165,5 +169,48 @@ impl PrivateRestoreStage {
 impl Drop for PrivateRestoreStage {
     fn drop(&mut self) {
         let _ = self.cleanup();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    struct TempDir(PathBuf);
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn private_restore_stage_enforces_owner_only_acl_under_inherited_parent() -> io::Result<()> {
+        let mut random = [0u8; 8];
+        getrandom::fill(&mut random).map_err(|_| io::Error::other("fixture randomness failed"))?;
+        let root = std::env::temp_dir().join(format!(
+            "respire-restore-stage-test-{:016x}",
+            u64::from_ne_bytes(random)
+        ));
+        std::fs::create_dir(&root)?;
+        let _cleanup = TempDir(root.clone());
+        let name = ".backup-archive-0123456789abcdef0123456789abcdef";
+        let stage = PrivateRestoreStage::create(&root, name)?;
+        let stage_path = stage.path().to_owned();
+        let stage_dir = root.join(name);
+        {
+            let mut writer = stage.writer()?;
+            writer.write_all(b"private-stage-bytes")?;
+            writer.sync_all()?;
+        }
+        let mut reader = stage.open_verified_read()?;
+        let mut read_back = String::new();
+        std::io::Read::read_to_string(&mut reader, &mut read_back)?;
+        assert_eq!(read_back, "private-stage-bytes");
+        drop(reader);
+        drop(stage);
+        assert!(!stage_path.exists());
+        assert!(!stage_dir.exists());
+        Ok(())
     }
 }

@@ -87,7 +87,7 @@ checks cannot be replaced by the synthetic assembly regression.
 ## Unified hosted dry run
 
 The repository keeps three workflows. The existing
-`runtime-release-dry-run.yml` hosts the Runtime, CLI and Client2 matrices under
+`release.yml` hosts the Runtime, CLI and Client2 matrices under
 one read-only workflow. A maintainer can opt in a same-repository PR to
 `main` with `native-release-dry-run`. The jobs check out the exact PR integration
 SHA without persisting checkout credentials. Fork PRs do not run the native

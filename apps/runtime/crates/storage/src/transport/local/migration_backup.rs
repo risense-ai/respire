@@ -4,33 +4,106 @@ use rusqlite::{
     Connection,
 };
 
+/// Outcome of committing a verified backup archive onto a live store.
+pub struct RestoreOutcome {
+    pub post_commit_warning: Option<String>,
+}
+
+fn copy_pages_atomic(source: &Connection, destination: &mut Connection) -> Result<()> {
+    let backup = Backup::new(source, destination)?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
+    loop {
+        ensure!(
+            std::time::Instant::now() < deadline,
+            "migration backup exceeded its deadline"
+        );
+        match backup.step(256)? {
+            StepResult::Done => return Ok(()),
+            StepResult::More => continue,
+            StepResult::Busy | StepResult::Locked => {
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            _ => anyhow::bail!("unexpected migration backup step"),
+        }
+    }
+}
+
 /// An online backup made while a different source connection holds
 /// BEGIN IMMEDIATE. Pending SQLite WAL data is included; do not file-copy.
 pub(super) fn copy_and_check(source: &Connection, destination: &mut Connection) -> Result<()> {
-    {
-        let backup = Backup::new(source, destination)?;
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
-        loop {
-            ensure!(
-                std::time::Instant::now() < deadline,
-                "migration backup exceeded its deadline"
-            );
-            match backup.step(256)? {
-                StepResult::Done => break,
-                StepResult::More => continue,
-                StepResult::Busy | StepResult::Locked => {
-                    std::thread::sleep(std::time::Duration::from_millis(25));
-                }
-                _ => anyhow::bail!("unexpected migration backup step"),
-            }
-        }
-    }
+    copy_pages_atomic(source, destination)?;
     let integrity: String = destination.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
     ensure!(
         integrity == "ok",
         "migration backup failed SQLite quick_check"
     );
     Ok(())
+}
+
+impl super::LocalStore {
+    /// Resolve the canonical SQLite database path open on the selected owner dispatcher.
+    pub fn backup_target(&self) -> Result<std::path::PathBuf> {
+        use anyhow::Context;
+        let path = std::path::Path::new(self.connection.path().context("backup requires an on-disk store")?);
+        let canonical = path.canonicalize()?;
+        #[cfg(windows)]
+        let same = canonical == path
+            || canonical.to_str().and_then(|value| value.strip_prefix(r"\\?\")) == path.to_str();
+        #[cfg(not(windows))]
+        let same = canonical == path;
+        ensure!(same, "backup target is not canonical");
+        Ok(canonical)
+    }
+
+    /// Atomically replace this store's pages from a verified, private offline
+    /// backup stage. Pre-commit failures return Err with live pages intact;
+    /// post-commit hygiene failures surface a warning without failing the restore.
+    pub fn restore_from_verified_stage(&self, staged: &std::path::Path) -> Result<RestoreOutcome> {
+        self.restore_from_verified_stage_with(staged, || Ok(()))
+    }
+
+    fn restore_from_verified_stage_with(
+        &self,
+        staged: &std::path::Path,
+        post_check: impl FnOnce() -> Result<()>,
+    ) -> Result<RestoreOutcome> {
+        use rusqlite::OpenFlags;
+        // Phase 1 (pre-commit): fail before Backup reaches StepResult::Done so SQLite rolls back.
+        let live = self.backup_target()?;
+        let mode: String = self
+            .connection
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
+        self.connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+        let flags = OpenFlags::SQLITE_OPEN_NOFOLLOW;
+        let source = Connection::open_with_flags(staged, OpenFlags::SQLITE_OPEN_READ_ONLY | flags)?;
+        let source_check: String = source.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
+        ensure!(source_check == "ok", "staged backup failed SQLite quick_check");
+        let mut destination =
+            Connection::open_with_flags(&live, OpenFlags::SQLITE_OPEN_READ_WRITE | flags)?;
+        destination.busy_timeout(std::time::Duration::from_secs(5))?;
+        copy_pages_atomic(&source, &mut destination)?;
+
+        // Phase 2 (post-commit): database pages are already committed on disk; never fail the op.
+        let post_commit = (|| -> Result<()> {
+            if mode.eq_ignore_ascii_case("wal") {
+                let after: String =
+                    destination.query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))?;
+                ensure!(after.eq_ignore_ascii_case("wal"), "restored store failed to re-enable WAL");
+            }
+            destination.close().map_err(|(_, error)| error)?;
+            drop(source);
+            self.connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+            let check: String = self
+                .connection
+                .query_row("PRAGMA quick_check", [], |row| row.get(0))?;
+            ensure!(check == "ok", "restored live library failed SQLite quick_check");
+            post_check()?;
+            Ok(())
+        })();
+        Ok(RestoreOutcome {
+            post_commit_warning: post_commit.err().map(|error| format!("{error:#}")),
+        })
+    }
 }
 
 #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
@@ -382,6 +455,41 @@ mod tests {
             current.query_row::<String, _, _>("SELECT state FROM sync_outbox", [], |r| r.get(0))?,
             "pending"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn restore_separates_pre_commit_failures_from_post_commit_checks() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        #[cfg(windows)]
+        let root = respire_spawn::owner_credential::LocalSpaceNamespace::make_fixture_installation(
+            &dir.path().canonicalize()?,
+        )?;
+        #[cfg(not(windows))]
+        let root = dir.path().canonicalize()?;
+        let live_path = root.join("live.db");
+        let staged_path = root.join("staged.db");
+        {
+            let conn = Connection::open(&live_path)?;
+            conn.execute_batch("CREATE TABLE items(val TEXT); INSERT INTO items VALUES('before');")?;
+        }
+        {
+            let staged = Connection::open(&staged_path)?;
+            staged.execute_batch("CREATE TABLE items(val TEXT); INSERT INTO items VALUES('after');")?;
+        }
+        let store = super::super::LocalStore::open(&live_path)?;
+        let bad_stage = root.join("corrupt.db");
+        std::fs::write(&bad_stage, b"not-a-sqlite-db")?;
+        assert!(store.restore_from_verified_stage(&bad_stage).is_err());
+        let intact: String = Connection::open(&live_path)?.query_row("SELECT val FROM items", [], |r| r.get(0))?;
+        assert_eq!(intact, "before");
+
+        let outcome = store.restore_from_verified_stage_with(&staged_path, || {
+            anyhow::bail!("simulated post-commit hygiene warning")
+        })?;
+        assert!(outcome.post_commit_warning.is_some());
+        let restored: String = Connection::open(&live_path)?.query_row("SELECT val FROM items", [], |r| r.get(0))?;
+        assert_eq!(restored, "after");
         Ok(())
     }
 }

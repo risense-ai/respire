@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import {spawnSync} from 'node:child_process';
+import {fileURLToPath} from 'node:url';
 import {mkdtempSync, rmSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
@@ -55,4 +57,22 @@ test('native Apple Silicon requires a local loader and either static or adjacent
 test('external loader path overrides cannot supply a packaged test dependency', () => {
   assert.deepEqual(withoutLoaderOverrides({PATH: 'ok', LD_PRELOAD: 'bad', Dyld_LIBRARY_PATH: 'bad',
     GLIBC_TUNABLES: 'bad', ORT_DYLIB_PATH: 'bad'}), {PATH: 'ok'});
+});
+
+test('native producer accepts only the renamed workflow identity', () => {
+  const script = fileURLToPath(new URL('./dry-run-native-release.mjs', import.meta.url));
+  for (const ref of ['refs/heads/main', 'refs/pull/33/merge']) {
+    for (const [filename, expected] of [
+      ['release.yml', 'Requires an ephemeral hosted runner'],
+      ['runtime-release-dry-run.yml', 'Unexpected workflow identity'],
+    ]) {
+      const result = spawnSync(process.execPath, [script], {encoding: 'utf8', env: {...process.env,
+        GITHUB_ACTIONS: 'true', GITHUB_WORKFLOW_SHA: 'a'.repeat(40), GITHUB_RUN_ID: '1',
+        GITHUB_RUN_ATTEMPT: '1', RUNNER_ENVIRONMENT: 'self-hosted',
+        GITHUB_WORKFLOW_REF: 'risense-ai/respire/.github/workflows/' + filename + '@' + ref,
+      }});
+      assert.equal(result.status, 1);
+      assert(result.stderr.includes('AssertionError [ERR_ASSERTION]: ' + expected), result.stderr);
+    }
+  }
 });
