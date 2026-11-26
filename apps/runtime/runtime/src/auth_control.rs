@@ -3,7 +3,7 @@ use anyhow::{ensure, Context, Result};
 use respire_app::login_transaction::{self, AuthOwnership};
 use respire_protocol::host_control::*;
 use respire_protocol::RpcRequest;
-use sha2::{Digest, Sha256};
+mod target_identity;
 
 pub(crate) enum AccountRequest {
     Register(HostAuthRegisterParams),
@@ -116,33 +116,7 @@ pub(crate) fn verify_target_runtime(receipt: &HostAuthAccountResult) -> Result<(
 }
 
 pub(crate) fn verify_ready_target_runtime(target: &std::path::Path, account: &str) -> Result<()> {
-    verified_target_health(target, account).map(|_| ())
-}
-
-fn verified_target_health(target: &std::path::Path, account: &str) -> Result<respire_commands::net_rpc::Health> {
-    crate::startup_identity::verify_account_completion_authority()?;
-    let health = respire_commands::net_rpc::health()?;
-    respire_commands::net_rpc::request_scope(&health)?;
-    ensure!(health.store_ready && health.account_id == account
-        && std::fs::canonicalize(&health.data_dir)? == target.canonicalize()?
-        && health.runtime_version == env!("CARGO_PKG_VERSION"), "target Runtime is not ready for this account receipt");
-    let process = respire_commands::net_rpc::runtime_process_identity(health.pid)?;
-    ensure!(respire_commands::net_rpc::instance_is_running(&health)?,
-        "target Runtime birth identity mismatch");
-    let image = std::env::current_exe()?.canonicalize()?;
-    ensure!(std::fs::canonicalize(&process.executable)? == image
-        && std::fs::canonicalize(&health.image_path)? == image,
-        "target Runtime process identity mismatch");
-    let mut file = std::fs::File::open(&image)?;
-    let mut hasher = Sha256::new();
-    std::io::copy(&mut file, &mut hasher)?;
-    ensure!(format!("{:x}", hasher.finalize()) == health.image_sha256, "target Runtime image digest mismatch");
-    ensure!(respire_commands::net_rpc::runtime_process_identity(health.pid)? == process,
-        "target Runtime changed during verification");
-    ensure!(respire_commands::net_rpc::instance_is_running(&health)?,
-        "target Runtime birth identity changed during verification");
-    crate::startup_identity::verify_account_completion_authority()?;
-    Ok(health)
+    target_identity::verified_target_health(target, account).map(|_| ())
 }
 
 pub(crate) fn recovery_request(request: &RpcRequest) -> Result<respire_protocol::host_control::HostLoginRecoveryParams> {
