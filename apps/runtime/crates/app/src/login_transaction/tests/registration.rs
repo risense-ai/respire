@@ -34,6 +34,15 @@
 
     #[test]
     fn registration_commits_and_rolls_back_without_runtime_credential_custody() -> Result<()> {
+        registration_fixture(false)
+    }
+
+    #[test]
+    fn committed_registration_journal_accepts_the_old_reader() -> Result<()> {
+        registration_fixture(true)
+    }
+
+    fn registration_fixture(complete: bool) -> Result<()> {
         let isolated = crate::test_lock::Isolate::new()?;
         let _keyring = crate::migration::memory_keyring_for_test();
         let root = isolated.path().canonicalize()?;
@@ -93,6 +102,55 @@
             active.backends.is_empty() && active.pass_backends.is_empty()));
         let durable = String::from_utf8(std::fs::read(recovery_path())?)?;
         assert!(!durable.contains(&secret) && !durable.contains("synthetic-host-password"));
+        if complete {
+            drop(ownership);
+            // Start at the already-published checkpoint to isolate local completion.
+            let mut journal = load_journal()?;
+            journal.operations[0].account.as_mut().context("registration missing")?.published_vault = true;
+            save_journal(&mut journal)?;
+            let wrong = uuid::Uuid::new_v4().to_string();
+            let before = std::fs::read(recovery_path())?;
+            assert!(super::control_account_complete(&root, &root, &identity, &wrong, &id,
+                None, None, |_| panic!("foreign operation reached live verification")).is_err());
+            assert_eq!(std::fs::read(recovery_path())?, before);
+            let mut calls = 0;
+            let result = super::control_account_complete(&root, &root, &identity, &id, &id,
+                None, None, |receipt| {
+                    assert_eq!(receipt.operation_id, id);
+                    calls += 1;
+                    Ok(())
+                })?;
+            assert_eq!(calls, 2);
+            assert_eq!(result.outcome, HostAuthAccountOutcome::Committed);
+            let bytes = std::fs::read(recovery_path())?;
+            let parsed: Journal = serde_json::from_slice(&bytes)?;
+            assert!(parsed.operations[0].phase == AuthPhase::Committed);
+            // Read the file through the pre-observation account schema independently.
+            #[derive(Deserialize)]
+            struct PriorJournal { operations: Vec<PriorRecord> }
+            #[derive(Deserialize)]
+            struct PriorRecord { account: PriorAccount }
+            #[allow(dead_code)]
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct PriorAccount {
+                register: bool,
+                addr: String,
+                user: String,
+                source_identity: HostAuthIdentity,
+                target: Option<PathBuf>,
+                authorization: Option<Value>,
+                vault: Option<Value>,
+                #[serde(default)]
+                published_vault: bool,
+                #[serde(default)]
+                vault_pending: bool,
+                login: Option<login::LoginProgress>,
+            }
+            let prior: PriorJournal = serde_json::from_slice(&bytes)?;
+            assert!(prior.operations[0].account.register);
+            return Ok(());
+        }
         assert_eq!(control_account_rollback(ownership, &identity, &id, &id)?.outcome, HostAuthAccountOutcome::RolledBack);
         assert!(!root.join("session.json").exists());
         assert!(server.recv_timeout(std::time::Duration::from_millis(50))?.is_none(),
