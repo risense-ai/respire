@@ -5,9 +5,9 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"unicode/utf16"
-	"slices"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -70,7 +70,7 @@ func plainProfilePath(path string) bool {
 }
 
 type profilePins struct {
-	root string
+	root  string
 	files []*os.File
 }
 
@@ -119,10 +119,10 @@ func (p *profilePins) walk(path string, allowJunction bool) error {
 		if err := windows.GetFileInformationByHandle(h, &info); err != nil {
 			return err
 		}
-		if info.FileAttributes & windows.FILE_ATTRIBUTE_DIRECTORY == 0 {
+		if info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 {
 			return errProfileScope
 		}
-		if info.FileAttributes & windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+		if info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
 			if !allowJunction || found || i <= 1 || i == len(parts) {
 				return errProfileScope
 			}
@@ -238,7 +238,7 @@ func verifyProfileDirectory(h windows.Handle, private bool) error {
 			return err
 		}
 		const inheritOnlyACE = 0x08
-		if ace.Header.AceType == windows.ACCESS_DENIED_ACE_TYPE || !private && ace.Header.AceFlags & inheritOnlyACE != 0 {
+		if ace.Header.AceType == windows.ACCESS_DENIED_ACE_TYPE || !private && ace.Header.AceFlags&inheritOnlyACE != 0 {
 			continue
 		}
 		if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE {
@@ -247,7 +247,7 @@ func verifyProfileDirectory(h windows.Handle, private bool) error {
 		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
 		// FILE_APPEND_DATA permits adding an unrelated subdirectory.
 		const safePrefixRights = windows.FILE_GENERIC_READ | windows.FILE_GENERIC_EXECUTE | windows.GENERIC_READ | windows.GENERIC_EXECUTE | windows.FILE_APPEND_DATA
-		if !trusted(sid) && (private || sid.String() != trustedInstaller && ace.Mask &^ uint32(safePrefixRights) != 0) {
+		if !trusted(sid) && (private || sid.String() != trustedInstaller && ace.Mask&^windows.ACCESS_MASK(safePrefixRights) != 0) {
 			return errProfileScope
 		}
 	}

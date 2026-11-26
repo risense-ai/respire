@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"syscall"
 	"testing"
 )
 
@@ -16,7 +17,7 @@ func TestNewChecksProfileBeforeCreatingClientDirectory(t *testing.T) {
 	}
 	alias := filepath.Join(root, "alias")
 	if err := os.Symlink(target, alias); err != nil {
-		if runtime.GOOS == "windows" && errors.Is(err, os.ErrPermission) {
+		if runtime.GOOS == "windows" && (errors.Is(err, os.ErrPermission) || errors.Is(err, syscall.Errno(1314))) {
 			t.Skip("directory symlinks require Windows symlink privileges")
 		}
 		t.Fatal(err)

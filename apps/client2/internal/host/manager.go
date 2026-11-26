@@ -199,7 +199,7 @@ type InstalledRuntime struct {
 }
 
 type Manager struct {
-	profile profileAdmission
+	profile         profileAdmission
 	ClientVersion   string
 	OpenBrowser     func(string) error
 	Root            string
@@ -242,8 +242,10 @@ func New() (*Manager, error) {
 	}
 	defer release()
 	if profile.reopen != nil {
-		if err := checkModelUninstallPath(filepath.Join(profile.root, "client2", "preferences.json")); err != nil {
-			return nil, err
+		for _, name := range []string{"preferences.json", "requests.json"} {
+			if err := checkModelUninstallPath(filepath.Join(profile.root, "client2", name)); err != nil {
+				return nil, err
+			}
 		}
 	}
 	m, err := newCLIInstaller(profile.root)

@@ -23,11 +23,16 @@ $acl.SetAccessRuleProtection($true,$false)
 $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($user,'FullControl','ContainerInherit,ObjectInherit','None','Allow'))
 Set-Acl -LiteralPath $root -AclObject $acl
 [IO.Directory]::CreateDirectory((Join-Path $root 'physical\profile')) | Out-Null
-New-Item -ItemType Junction -Path (Join-Path $root 'selected') -Target (Join-Path $root 'physical') | Out-Null`
+[IO.Directory]::CreateDirectory((Join-Path $root 'physical\replacement')) | Out-Null
+New-Item -ItemType Junction -Path (Join-Path $root 'selected') -Target (Join-Path $root 'physical') | Out-Null
+foreach ($child in 'physical', 'physical\profile', 'physical\replacement', 'selected') {
+    & (Join-Path $env:SystemRoot 'System32\icacls.exe') (Join-Path $root $child) /setowner ('*' + $user.Value) /L | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'Could not set the synthetic directory owner' }
+}`
 	system := os.Getenv("SystemRoot")
 	cmd := exec.Command(filepath.Join(system, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
 		"-NoProfile", "-NonInteractive", "-Command", script)
-	cmd.Env = []string{"SystemRoot="+system, "WINDIR="+system, "RESPIRE_PROFILE_FIXTURE="+root}
+	cmd.Env = []string{"SystemRoot=" + system, "WINDIR=" + system, "RESPIRE_PROFILE_FIXTURE=" + root}
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("creating synthetic NTFS junction: %v: %s", err, out)
 	}
@@ -64,9 +69,14 @@ func TestNewBindsConfiguredJunctionToPhysicalProfile(t *testing.T) {
 	if err := os.Rename(want, moved); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Mkdir(want, 0700); err != nil {
+	if err := os.Rename(filepath.Join(root, "physical", "replacement"), want); err != nil {
 		t.Fatal(err)
 	}
+	replacement, err := pinConfiguredProfile(selected)
+	if err != nil {
+		t.Fatalf("replacement should pass standalone owner checks: %v", err)
+	}
+	replacement.close()
 	if _, err := m.removeRuntimeOwnedModel(t.Context(), HealthInfo{}, "m3"); !errors.Is(err, errProfileScope) {
 		t.Fatalf("replacement reached model admission: %v", err)
 	}
