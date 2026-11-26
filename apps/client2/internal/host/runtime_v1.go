@@ -93,22 +93,12 @@ func (m *Manager) checkLiveM3Assets(ctx context.Context, health HealthInfo, targ
 	if !slices.Contains(discovered.Capabilities, "model.active_assets") {
 		return nil
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, m.Endpoint+"/api/health", nil)
+	pinned := Manager{Endpoint: m.Endpoint, localClient: httpClient}
+	peer, _, err := pinned.Health(ctx)
 	if err != nil {
 		return err
 	}
-	req.Header.Set("X-Respire-Health", "runtime-v1")
-	res, err := httpClient.Do(req)
-	if err != nil {
-		return err
-	}
-	body, err := readRuntimeJSON(res)
-	res.Body.Close()
-	if err != nil {
-		return err
-	}
-	var peer HealthInfo
-	if json.Unmarshal(body, &peer) != nil || peer.InstanceID != health.InstanceID || peer.PID != health.PID || peer.ProcessStartID != health.ProcessStartID || peer.Generation != health.Generation || peer.AccountID != health.AccountID || peer.DataDir != health.DataDir {
+	if peer.InstanceID != health.InstanceID || peer.PID != health.PID || peer.ProcessStartID != health.ProcessStartID || peer.Generation != health.Generation || peer.AccountID != health.AccountID || peer.DataDir != health.DataDir {
 		return errors.New("Runtime scope changed before asset inspection")
 	}
 	token, err := m.localRuntimeToken(false)

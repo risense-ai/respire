@@ -343,7 +343,8 @@ export function openDownloadModal({
     };
     stream.onerror = fallback;
   }
-  function applyTask(task) {
+  function receive(task) {
+    if (!element.open || task?.id !== taskID) return;
     stageNode.textContent = task.stage || "";
     bytesNode.textContent = task.total
       ? `${bytes(task.done)} / ${bytes(task.total)}`
@@ -352,10 +353,6 @@ export function openDownloadModal({
       bar.value = task.done;
       bar.max = task.total;
     }
-  }
-  function receive(task) {
-    if (!element.open || task?.id !== taskID) return;
-    applyTask(task);
     if (task.busy) return;
     stopUpdates();
     if (task.stage === i18nMessages.meb0c326b60ae897a) {
@@ -373,11 +370,8 @@ export function openDownloadModal({
       stageNode.textContent = i18nMessages.ma37778f17c5f3ee5;
       resolveDone(false);
     } else {
-      setMode("failed");
       stageNode.textContent = i18nMessages.m8a03e35ad323e387;
-      errorNode.textContent = task.error || i18nMessages.m45f5dfb2c9262c74;
-      errorNode.hidden = false;
-      resolveDone(false);
+      failWatch(task.error || i18nMessages.m45f5dfb2c9262c74);
     }
   }
   function failWatch(message) {

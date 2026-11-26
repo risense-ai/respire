@@ -246,15 +246,15 @@ func TestPendingResetMaterialCannotBeEvicted(t *testing.T) {
 	}
 }
 
-func TestStartTaskCancellablePublishesBusyBeforeReturning(t *testing.T) {
+func TestStartDownloadPublishesBusyBeforeReturning(t *testing.T) {
 	m := &Manager{task: TaskState{Stage: i18n.Message56df21b4022f720d}}
 	release := make(chan struct{})
 	started := make(chan struct{})
-	if !m.StartTaskCancellable(i18n.Message9ce39f8d7b878f47, func(ctx context.Context) error {
+	if m.StartDownload(i18n.Message9ce39f8d7b878f47, func(ctx context.Context) error {
 		close(started)
 		<-release
 		return nil
-	}) {
+	}) == "" {
 		t.Fatal("first start must succeed")
 	}
 	// The busy state must be visible synchronously after Start returns: this
@@ -263,7 +263,7 @@ func TestStartTaskCancellablePublishesBusyBeforeReturning(t *testing.T) {
 	if snap := m.TaskSnapshot(); !snap.Busy || snap.Stage != i18n.Message9ce39f8d7b878f47 {
 		t.Fatalf("snapshot after start = %+v, want busy with stage set", snap)
 	}
-	if m.StartTaskCancellable(i18n.Message8fbbd60fa033605c, func(ctx context.Context) error { return nil }) {
+	if m.StartDownload(i18n.Message8fbbd60fa033605c, func(ctx context.Context) error { return nil }) != "" {
 		t.Fatal("second start while busy must be rejected")
 	}
 	// A rejected start must not clobber the running task's progress state.
@@ -279,11 +279,11 @@ func TestStartTaskCancellablePublishesBusyBeforeReturning(t *testing.T) {
 	}
 }
 
-func TestStartTaskCancellableReportsFailure(t *testing.T) {
+func TestStartDownloadReportsFailure(t *testing.T) {
 	m := &Manager{task: TaskState{Stage: i18n.Message56df21b4022f720d}}
-	if !m.StartTaskCancellable(i18n.Message6263b2fe9382f0e8, func(ctx context.Context) error {
+	if m.StartDownload(i18n.Message6263b2fe9382f0e8, func(ctx context.Context) error {
 		return errors.New(i18n.Messageb37df930536b4cfb)
-	}) {
+	}) == "" {
 		t.Fatal("start must succeed")
 	}
 	waitTaskIdle(t, m)

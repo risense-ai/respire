@@ -22,7 +22,7 @@ func TestLiveAssetsUsesLocalBearerOnlyAfterDiscovery(t *testing.T) {
 			}
 			_, _ = w.Write([]byte(`{"status":"ready","instance_id":"synthetic-instance","pid":42,"capabilities":["model.active_assets"]}`))
 		case "/api/health":
-			_, _ = w.Write([]byte(`{"instance_id":"synthetic-instance","pid":42}`))
+			_, _ = w.Write([]byte(`{"server":"respire","v":1,"instance_id":"synthetic-instance","pid":42}`))
 		case "/v1/models/active-assets":
 			reads++
 			if r.Header.Get("Authorization") != "Bearer "+token {
@@ -64,10 +64,10 @@ func TestAssetBearerRefusesReplacementRedirectAndMissingToken(t *testing.T) {
 					_, _ = w.Write([]byte(`{"status":"ready","instance_id":"i","pid":42,"capabilities":["model.active_assets"]}`))
 				case "/api/health":
 					if mode == "scope" {
-						_, _ = w.Write([]byte(`{"instance_id":"i","pid":42,"generation":2}`))
+						_, _ = w.Write([]byte(`{"server":"respire","v":1,"instance_id":"i","pid":42,"generation":2}`))
 						return
 					}
-					_, _ = w.Write([]byte(`{"instance_id":"i","pid":42}`))
+					_, _ = w.Write([]byte(`{"server":"respire","v":1,"instance_id":"i","pid":42}`))
 				case "/v1/models/active-assets":
 					http.Redirect(w, r, "/replacement", http.StatusTemporaryRedirect)
 				default:

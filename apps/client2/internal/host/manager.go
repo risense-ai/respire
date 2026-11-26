@@ -418,12 +418,10 @@ func (m *Manager) RunTask(stage string, action func() error) error {
 	}
 	previous := m.task
 	m.task = TaskState{Busy: true, Stage: stage}
-	m.notifyTaskChanged()
 	m.mu.Unlock()
 	err := action()
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	defer m.notifyTaskChanged()
 	if errors.Is(err, errRuntimeUpdateDeferred) {
 		m.task = previous
 		return nil
@@ -438,16 +436,7 @@ func (m *Manager) RunTask(stage string, action func() error) error {
 	return err
 }
 
-// StartTaskCancellable runs action with a cancellable context in the
-// background so a download can be paused (canceled while keeping partial
-// chunks) or aborted. The busy state is published synchronously before it
-// returns: the HTTP handler can answer immediately and clients polling the
-// task snapshot never observe a stale pre-start terminal state. It reports
-// false when another task is already running, without touching that task.
-func (m *Manager) StartTaskCancellable(stage string, action func(ctx context.Context) error) bool {
-	return m.StartDownload(stage, action) != ""
-}
-
+// StartDownload publishes the busy snapshot before returning its receipt.
 func (m *Manager) StartDownload(stage string, action func(context.Context) error) string {
 	m.mu.Lock()
 	if m.task.Busy {
@@ -459,7 +448,6 @@ func (m *Manager) StartDownload(stage string, action func(context.Context) error
 	m.taskPause = false
 	id := rand.Text()
 	m.task = TaskState{ID: id, Busy: true, Stage: stage}
-	m.notifyTaskChanged()
 	m.mu.Unlock()
 	go func() {
 		err := action(ctx)
@@ -473,13 +461,10 @@ func (m *Manager) StartDownload(stage string, action func(context.Context) error
 		switch {
 		case err == nil:
 			m.task.Stage = i18n.Message5a73ae60f30b9728
-			m.task.Error = ""
 		case paused:
 			m.task.Stage = i18n.Message563ea3a387e4cd9b
-			m.task.Error = ""
 		case errors.Is(err, context.Canceled):
 			m.task.Stage = i18n.Message91962c6770277412
-			m.task.Error = ""
 		default:
 			m.task.Stage = i18n.Messagebf50abaf51e2a82f
 			m.task.Error = err.Error()
@@ -490,18 +475,6 @@ func (m *Manager) StartDownload(stage string, action func(context.Context) error
 		}
 	}()
 	return id
-}
-
-// CancelTask aborts the running task; pause keeps partial chunks so the
-// next run resumes from where it stopped.
-func (m *Manager) CancelTask(pause bool) {
-	m.mu.Lock()
-	m.taskPause = pause
-	cancel := m.taskCancel
-	m.mu.Unlock()
-	if cancel != nil {
-		cancel()
-	}
 }
 
 func (m *Manager) TaskSnapshot() TaskState { m.mu.Lock(); defer m.mu.Unlock(); return m.task }
