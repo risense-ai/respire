@@ -72,6 +72,9 @@ fn scoped_archive_over_loopback() -> Result<()> {
     let dispatch = thread::spawn(move || -> Result<()> {
         let lock = respire_app::lock::LibraryLock::acquire(&profile, WAIT)?;
         respire_app::transport::local::LocalStore::open(&profile.join("onememory.db"))?;
+        rusqlite::Connection::open(profile.join("onememory.db"))?.execute_batch(
+            "CREATE TABLE fixture_payload(data BLOB); INSERT INTO fixture_payload VALUES(zeroblob(2300000));",
+        )?;
         let (store, _) = service::open_runtime_store(&lock)?;
         let mut dispatcher = crate::runtime_http::start_owner_dispatch().context("fixture dispatcher unavailable")?;
         ready.send(())?;
@@ -96,11 +99,10 @@ fn scoped_archive_over_loopback() -> Result<()> {
             #[cfg(target_os = "linux")]
             let (app, tickets) = {
                 let (worker, tickets) = tokio::sync::mpsc::channel(1);
-                let target = service::database_path(&root)?.canonicalize()?;
                 let app = app.merge(Router::new().route("/v1/backups/import", routing::post(
                     move |ConnectInfo(crate::network::Peer(peer)): ConnectInfo<crate::network::Peer>,
                           request: Request| super::super::operations::backup_import::post(
-                              bound, peer, request, target.clone(), worker.clone(),
+                              bound, peer, request, worker.clone(),
                           ),
                 )));
                 (app, tickets)
@@ -167,8 +169,8 @@ fn verify_http(bound: SocketAddr, root: &Path, urk: [u8; 32],
         assert_eq!(response.header("content-type"), Some("application/octet-stream"));
         assert_eq!(response.header("cache-control"), Some("no-store"));
         let mut wire = Vec::new();
-        response.into_reader().take(2 * 1024 * 1024 + 1).read_to_end(&mut wire)?;
-        ensure!(wire.len() <= 2 * 1024 * 1024, "fixture archive exceeded its byte budget");
+        response.into_reader().take(8 * 1024 * 1024 + 1).read_to_end(&mut wire)?;
+        ensure!(wire.len() <= 8 * 1024 * 1024, "fixture archive exceeded its byte budget");
         #[cfg(target_os = "linux")]
         {
             let upload = |payload: &[u8]| post("/v1/backups/import?space_id=main")
@@ -186,7 +188,8 @@ fn verify_http(bound: SocketAddr, root: &Path, urk: [u8; 32],
                 let seal = bad_seal.windows(field.len()).position(|bytes| bytes == field)
                     .context("fixture seal missing")? + field.len();
                 bad_seal[seal] = if bad_seal[seal] == b'A' { b'B' } else { b'A' };
-                reject(&bad_seal)?;
+                let header_size = u32::from_be_bytes(wire[8..12].try_into()?) as usize;
+                reject(&bad_seal[..12 + header_size])?;
                 {
                     use std::{io::Write, net::{Shutdown, TcpStream}};
                     let mut stream = TcpStream::connect(bound)?;
@@ -203,10 +206,20 @@ fn verify_http(bound: SocketAddr, root: &Path, urk: [u8; 32],
                 let mut corrupt = wire.clone();
                 *corrupt.last_mut().context("empty archive")? ^= 1;
                 reject(&corrupt)?;
-                reject(&vec![0; 2 * 1024 * 1024 + 1])?;
-                let accepted = upload(&wire)?;
+                let mut trailing = wire.clone();
+                trailing.push(0);
+                reject(&trailing)?;
+                ensure!(wire.len() > 2 * 1024 * 1024, "fixture must cross the old buffer limit");
+                // An unsized reader makes ureq send HTTP chunked framing. Split
+                // even the magic across reads, then use odd-sized payload blocks.
+                let accepted = post("/v1/backups/import?space_id=main")
+                    .set("Content-Type", "application/octet-stream")
+                    .send(SplitArchive { rest: &wire, first: true })?;
                 assert_eq!(accepted.status(), 202);
                 let receipt: Value = accepted.into_json()?;
+                ensure!(matches!(upload(&wire), Err(ureq::Error::Status(503, _))),
+                    "a full confirmation queue accepted a second ticket");
+                assert_eq!(backup_stage_count(root)?, 1);
                 let ticket = tickets.try_recv()?;
                 let id = ticket.operation_id().map_err(|_| anyhow::anyhow!("missing registry ID"))?;
                 assert_eq!(receipt, json!({"operation_id": id, "status": "pending"}));
@@ -226,6 +239,13 @@ fn verify_http(bound: SocketAddr, root: &Path, urk: [u8; 32],
                 handoff.discard(root)?;
             } else {
                 reject(&wire)?;
+                let accepted = post(&format!("/v1/backups/import?space_id={space}"))
+                    .set("Content-Type", "application/octet-stream").send_bytes(&wire)?;
+                assert_eq!(accepted.status(), 202);
+                let ticket = tickets.try_recv()?;
+                assert_ne!(ticket.target, service::database_path(root)?.canonicalize()?);
+                assert_eq!(ticket.archive_sha256, <[u8; 32]>::from(Sha256::digest(&wire)));
+                drop(ticket);
             }
         }
         let output = tempfile::NamedTempFile::new_in(root)?;
@@ -242,9 +262,26 @@ fn verify_http(bound: SocketAddr, root: &Path, urk: [u8; 32],
 fn backup_stage_count(root: &Path) -> Result<usize> {
     let mut count = 0;
     for entry in fs::read_dir(root)? {
-        if entry?.file_name().to_string_lossy().starts_with(".backup-export-") {
+        let name = entry?.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with(".backup-export-") || name.starts_with(".backup-archive-") {
             count += 1;
         }
     }
     Ok(count)
+}
+
+#[cfg(target_os = "linux")]
+struct SplitArchive<'a> {
+    rest: &'a [u8],
+    first: bool,
+}
+
+#[cfg(target_os = "linux")]
+impl Read for SplitArchive<'_> {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        let limit = if std::mem::take(&mut self.first) { 3 } else { 8191 };
+        let size = out.len().min(limit);
+        self.rest.read(&mut out[..size])
+    }
 }
