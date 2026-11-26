@@ -23,6 +23,7 @@ mod owner_operations;
 mod owner_request;
 mod owner_routes;
 mod owner_scope;
+mod private_backup_route;
 mod private_model_install;
 mod private_model_route;
 mod problem;
@@ -62,6 +63,7 @@ pub(super) fn router(bound: SocketAddr) -> Router {
                 owner_control::host_logout(request, peer, bound)))
         .merge(private_model_route::routes(bound))
         .merge(private_model_install::routes(bound))
+        .merge(private_backup_route::routes(bound))
         .merge(reads::routes(bound))
         .merge(host_config::routes(bound))
         .merge(recall::routes(bound))

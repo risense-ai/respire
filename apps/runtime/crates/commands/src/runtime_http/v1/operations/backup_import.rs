@@ -1,9 +1,9 @@
-//! Streaming backup import into bounded pending custody. Writes wait for separate local confirmation.
+//! Streaming backup import into bounded leaf-locked pending custody.
+//! Database writes wait for separate native owner confirmation via /api/runtime/private-backup/confirm.
 use super::{
-    state::{self, Phase},
-    super::{reads, rest_dispatch, transport, V1Result},
+    state::{self, Entry, Phase},
+    super::{owner_scope::OwnerBinding, reads, rest_dispatch, transport, Problem, V1Result},
 };
-use anyhow::{ensure, Context, Result};
 use axum::{
     extract::Request,
     http::{header, Method, StatusCode},
@@ -18,7 +18,7 @@ use std::{
     io::Write,
     net::SocketAddr,
     path::PathBuf,
-    sync::{Mutex, OnceLock},
+    sync::{Arc, Mutex, OnceLock},
     time::{Duration, Instant},
 };
 use tokio::sync::Semaphore;
@@ -34,6 +34,7 @@ struct PendingImport {
     owner: transport::RestScope,
     selected: Option<String>,
     target: PathBuf,
+    target_sha256: [u8; 32],
     archive_sha256: [u8; 32],
     staged: tempfile::TempPath,
     manifest: Manifest,
@@ -41,42 +42,65 @@ struct PendingImport {
     created_at: Instant,
 }
 
-#[allow(dead_code)]
-pub struct LocalRestoreConfirmation {
-    pub operation_id: Uuid,
-    pub archive_sha256: [u8; 32],
-    pub target: PathBuf,
+pub(in crate::runtime_http::v1) struct LocalRestoreConfirmation {
+    pub(in crate::runtime_http::v1) operation_id: Uuid,
+    pub(in crate::runtime_http::v1) archive_sha256: [u8; 32],
+    pub(in crate::runtime_http::v1) target_sha256: [u8; 32],
+    pub(in crate::runtime_http::v1) confirmed_owner: OwnerBinding,
 }
 
 fn pending_map() -> &'static Mutex<BTreeMap<Uuid, PendingImport>> {
     PENDING_IMPORTS.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
-fn is_stale(entry: &PendingImport, now: Instant) -> bool {
-    now.saturating_duration_since(entry.created_at) >= PENDING_TTL
-        || entry.job.entry().cancelled().unwrap_or(true)
-        || !transport::scope_is_live(&entry.owner)
+fn is_entry_stale(
+    owner: &transport::RestScope,
+    entry: &Entry,
+    created_at: Instant,
+    now: Instant,
+) -> bool {
+    now.saturating_duration_since(created_at) >= PENDING_TTL
+        || entry.cancelled().unwrap_or(true)
+        || !transport::scope_is_live(owner)
 }
 
-pub(super) fn reap_stale() {
+/// Strictly leaf-locked: inspects candidates under PENDING_IMPORTS, drops lock before checking
+/// session/operation state, then removes expired entries before dropping temp files or finishing jobs.
+pub(in crate::runtime_http::v1) fn reap_stale() {
+    let snapshot: Vec<(Uuid, transport::RestScope, Arc<Entry>, Instant)> = {
+        let Ok(guard) = pending_map().lock() else {
+            return;
+        };
+        guard
+            .iter()
+            .map(|(id, entry)| (*id, entry.owner.clone(), entry.job.entry(), entry.created_at))
+            .collect()
+    };
+    if snapshot.is_empty() {
+        return;
+    }
     let now = Instant::now();
-    let expired: Vec<PendingImport> = {
+    let stale_ids: Vec<Uuid> = snapshot
+        .into_iter()
+        .filter(|(_, owner, entry, created_at)| is_entry_stale(owner, entry, *created_at, now))
+        .map(|(id, _, _, _)| id)
+        .collect();
+    if stale_ids.is_empty() {
+        return;
+    }
+    let removed: Vec<PendingImport> = {
         let Ok(mut guard) = pending_map().lock() else {
             return;
         };
-        let ids: Vec<Uuid> = guard
-            .iter()
-            .filter(|(_, entry)| is_stale(entry, now))
-            .map(|(id, _)| *id)
-            .collect();
-        ids.into_iter().filter_map(|id| guard.remove(&id)).collect()
+        stale_ids.into_iter().filter_map(|id| guard.remove(&id)).collect()
     };
-    for PendingImport { staged, job, .. } in expired {
+    for PendingImport { staged, job, .. } in removed {
         drop(staged);
         job.finish(Phase::Cancelled);
     }
 }
 
+/// Must only be called with no SessionScope or Entry locks held.
 pub(super) fn discard_cancelled(id: Uuid) {
     let removed = pending_map()
         .lock()
@@ -125,7 +149,8 @@ pub(in crate::runtime_http::v1) async fn enqueue(
     let target_for_stage = target.clone();
     let stage = tokio::task::spawn_blocking(move || {
         let target_text = target_for_stage.to_str().ok_or_else(transport::invalid)?;
-        let expected_source = format!("{:x}", Sha256::digest(target_text.as_bytes()));
+        let target_sha256: [u8; 32] = Sha256::digest(target_text.as_bytes()).into();
+        let expected_source = hex::encode(target_sha256);
         let header = BackupArchiveHeader::read(&mut database).map_err(|_| transport::invalid())?;
         let authenticated = crate::rpc_serve::with_verified_owner_library_scope(
             |account, profile, instance, generation, epoch, library| {
@@ -158,13 +183,13 @@ pub(in crate::runtime_http::v1) async fn enqueue(
         temp.as_file().sync_all().map_err(|_| transport::unavailable())?;
         let archive_sha256 = database.verified_digest()?;
         let staged = temp.into_temp_path();
-        Ok::<_, super::super::Problem>((staged, manifest, archive_sha256))
+        Ok::<_, Problem>((staged, manifest, archive_sha256, target_sha256))
     });
-    let (staged, manifest, archive_sha256) = tokio::time::timeout_at(deadline, async {
+    let (staged, manifest, archive_sha256, target_sha256) = tokio::time::timeout_at(deadline, async {
         let fed = stream::feed(body, sender).await;
         let staged = stage.await.map_err(|_| transport::unavailable())??;
         fed?;
-        Ok::<_, super::super::Problem>(staged)
+        Ok::<_, Problem>(staged)
     })
     .await
     .map_err(|_| transport::invalid())??;
@@ -173,8 +198,12 @@ pub(in crate::runtime_http::v1) async fn enqueue(
         return Err(transport::invalid());
     }
     reap_stale();
-    let mut guard = pending_map().lock().map_err(|_| transport::unavailable())?;
-    if guard.len() >= MAX_PENDING {
+    if pending_map()
+        .lock()
+        .map_err(|_| transport::unavailable())?
+        .len()
+        >= MAX_PENDING
+    {
         return Err(transport::unavailable());
     }
     let job = transport::with_scope(&owner, || {
@@ -183,55 +212,83 @@ pub(in crate::runtime_http::v1) async fn enqueue(
     let id = Uuid::parse_str(&job.id()?).map_err(|_| transport::unavailable())?;
     let accepted = job.accepted()?;
     let receipt = transport::json_response(StatusCode::ACCEPTED, accepted)?;
-    guard.insert(
-        id,
-        PendingImport {
-            owner,
-            selected,
-            target,
-            archive_sha256,
-            staged,
-            manifest,
-            job,
-            created_at: Instant::now(),
-        },
-    );
+    let overflow = {
+        let mut guard = pending_map().lock().map_err(|_| transport::unavailable())?;
+        if guard.len() >= MAX_PENDING {
+            Some((staged, job))
+        } else {
+            guard.insert(
+                id,
+                PendingImport {
+                    owner,
+                    selected,
+                    target,
+                    target_sha256,
+                    archive_sha256,
+                    staged,
+                    manifest,
+                    job,
+                    created_at: Instant::now(),
+                },
+            );
+            None
+        }
+    };
+    if let Some((staged, job)) = overflow {
+        drop(staged);
+        job.finish(Phase::Cancelled);
+        return Err(transport::unavailable());
+    }
     Ok(receipt)
 }
 
-#[allow(dead_code)]
-pub(crate) async fn confirm_local_restore(confirmation: LocalRestoreConfirmation) -> Result<()> {
+fn mismatch() -> Problem {
+    Problem::new(
+        StatusCode::CONFLICT,
+        "backup_confirmation_mismatch",
+        "Backup restore confirmation does not match staged archive",
+    )
+}
+
+fn matches_confirmation(pending: &PendingImport, confirmation: &LocalRestoreConfirmation) -> bool {
+    let owner = &confirmation.confirmed_owner;
+    pending.archive_sha256 == confirmation.archive_sha256
+        && pending.target_sha256 == confirmation.target_sha256
+        && pending.owner.matches(
+            &owner.account,
+            &owner.canonical_profile,
+            owner.instance,
+            owner.generation,
+            owner.vault_epoch,
+        )
+}
+
+pub(in crate::runtime_http::v1) async fn confirm_local_restore(
+    confirmation: LocalRestoreConfirmation,
+) -> V1Result<()> {
     reap_stale();
-    let requested_target = confirmation.target.canonicalize()?;
-    let removed_stale: Option<PendingImport>;
-    let admitted = {
-        let mut guard = pending_map()
-            .lock()
-            .map_err(|_| anyhow::anyhow!("pending backup registry unavailable"))?;
+    let (owner_scope, entry, created_at) = {
+        let guard = pending_map().lock().map_err(|_| transport::unavailable())?;
         let pending = guard
             .get(&confirmation.operation_id)
-            .context("pending backup import not found")?;
-        ensure!(
-            pending.archive_sha256 == confirmation.archive_sha256,
-            "confirmed backup archive digest differs"
-        );
-        ensure!(
-            requested_target == pending.target,
-            "confirmed backup restore target differs"
-        );
-        if is_stale(pending, Instant::now()) {
-            removed_stale = guard.remove(&confirmation.operation_id);
-            None
-        } else {
-            removed_stale = None;
-            guard.remove(&confirmation.operation_id)
+            .ok_or_else(state::not_found)?;
+        if !matches_confirmation(pending, &confirmation) {
+            return Err(mismatch());
+        }
+        (pending.owner.clone(), pending.job.entry(), pending.created_at)
+    };
+    if is_entry_stale(&owner_scope, &entry, created_at, Instant::now()) {
+        discard_cancelled(confirmation.operation_id);
+        return Err(mismatch());
+    }
+    let removed = {
+        let mut guard = pending_map().lock().map_err(|_| transport::unavailable())?;
+        match guard.get(&confirmation.operation_id) {
+            None => return Err(state::not_found()),
+            Some(pending) if !matches_confirmation(pending, &confirmation) => return Err(mismatch()),
+            Some(_) => guard.remove(&confirmation.operation_id),
         }
     };
-    if let Some(PendingImport { staged, job, .. }) = removed_stale {
-        drop(staged);
-        job.finish(Phase::Cancelled);
-        anyhow::bail!("pending backup import is no longer active");
-    }
     let PendingImport {
         owner,
         selected,
@@ -240,12 +297,12 @@ pub(crate) async fn confirm_local_restore(confirmation: LocalRestoreConfirmation
         manifest,
         job,
         ..
-    } = admitted.context("pending backup import not found")?;
+    } = removed.ok_or_else(state::not_found)?;
     let cancelled = job.entry().cancelled().unwrap_or(true);
     if cancelled || !job.start().unwrap_or(false) {
         drop(staged);
         job.finish(Phase::Cancelled);
-        anyhow::bail!("pending backup import was cancelled before execution");
+        return Err(mismatch());
     }
     let _ = job.progress(50);
     let staged_path = staged.to_path_buf();
@@ -266,7 +323,7 @@ pub(crate) async fn confirm_local_restore(confirmation: LocalRestoreConfirmation
         }
         Err(problem) => {
             job.fail_problem(&problem);
-            anyhow::bail!("backup restore failed after local confirmation");
+            Err(problem)
         }
     }
 }

@@ -21,13 +21,17 @@ fn scoped_archive_over_loopback() -> Result<()> {
         #[cfg(windows)]
         let data_dir = {
             let root = respire_spawn::owner_credential::LocalSpaceNamespace::make_fixture_installation(&base_dir)?;
+            respire_spawn::owner_credential::LocalSpaceNamespace::make_fixture_runtime_parent(&root)?;
             match root.to_str().and_then(|p| p.strip_prefix(r"\\?\")) {
                 Some(local) => std::path::PathBuf::from(local),
                 None => root,
             }
         };
         #[cfg(not(windows))]
-        let data_dir = base_dir;
+        let data_dir = {
+            fs::create_dir_all(base_dir.join("runtime"))?;
+            base_dir
+        };
         let mut child = Command::new(std::env::current_exe()?)
             .args(["--exact", TEST, "--nocapture"])
             .env(CHILD, "1")
@@ -64,11 +68,12 @@ fn scoped_archive_over_loopback() -> Result<()> {
         "user": "backup-fixture", "vault_version": 4, "kdf_salt": salt,
         "urk_nonce": nonce, "wrapped_urk": wrapped,
     }))?;
+    let instance_id = uuid::Uuid::new_v4();
     auth::supply_runtime_session(respire_protocol::credentials::RuntimeUnlock {
         schema_version: respire_protocol::credentials::CREDENTIAL_SCHEMA_V,
         profile: root.clone(),
         session_sha256: format!("{:x}", Sha256::digest(fs::read(session)?)),
-        instance_id: "fixture".into(),
+        instance_id: instance_id.to_string(),
         generation: 1,
         super_password: Some(password),
         login_password: None,
@@ -108,8 +113,7 @@ fn scoped_archive_over_loopback() -> Result<()> {
                     app.into_make_service_with_connect_info::<crate::network::Peer>(),
                 ).await
             });
-            let handle = tokio::runtime::Handle::current();
-            let result = tokio::task::spawn_blocking(move || verify_http(bound, &root, urk, handle)).await;
+            let result = tokio::task::spawn_blocking(move || verify_http(bound, &root, urk)).await;
             server.abort();
             let _ = server.await;
             result?
@@ -123,7 +127,7 @@ fn scoped_archive_over_loopback() -> Result<()> {
     Ok(())
 }
 
-fn verify_http(bound: SocketAddr, root: &Path, urk: [u8; 32], handle: tokio::runtime::Handle) -> Result<()> {
+fn verify_http(bound: SocketAddr, root: &Path, urk: [u8; 32]) -> Result<()> {
     let base = format!("http://{bound}");
     let agent = ureq::AgentBuilder::new().try_proxy_from_env(false).timeout(WAIT).build();
     let get = |name: &str| agent.get(&format!("{base}{name}"));
@@ -254,15 +258,55 @@ fn verify_http(bound: SocketAddr, root: &Path, urk: [u8; 32], handle: tokio::run
     assert_eq!(list_ids("main")?, BTreeSet::from([parent.clone(), parent_extra.clone()]));
     assert_eq!(list_ids(space)?, BTreeSet::from([child.clone(), child_extra.clone()]));
 
-    use super::super::operations::backup_import::{confirm_local_restore, LocalRestoreConfirmation};
+    let owner_deadline = Instant::now() + WAIT;
+    while !super::super::owner_control::capable() {
+        ensure!(Instant::now() < owner_deadline, "native owner credential not ready");
+        thread::sleep(Duration::from_millis(10));
+    }
+    let health: Value = get("/v1/health").call()?.into_json()?;
+    assert_eq!(health["status"], "ready");
+    let health_instance = health["instance_id"].as_str().context("serving instance ID")?;
+    let (live_instance, live_generation) = crate::rpc_serve::with_verified_owner_scope(
+        |_, _, instance, generation, _| (instance, generation),
+    )
+    .context("live owner scope missing")?;
+    assert_eq!(live_instance.to_string(), health_instance);
+    let record = respire_spawn::owner_credential::read_owner_credential(
+        &crate::rpc_worker::runtime_dir(),
+        &live_instance.to_string(),
+    )?;
     let main_db = service::database_path(root)?.canonicalize()?;
-    let child_db = root
-        .join(".respire-local-spaces-v1")
-        .join(space)
-        .join("onememory.db")
-        .canonicalize()?;
+    let child_db = root.join(".respire-local-spaces-v1").join(space).join("onememory.db").canonicalize()?;
+    let target_hash = |path: &Path| -> Result<[u8; 32]> {
+        Ok(Sha256::digest(path.to_str().context("canonical path UTF-8")?.as_bytes()).into())
+    };
+    let child_target: [u8; 32] = target_hash(&child_db)?;
+    let main_target: [u8; 32] = target_hash(&main_db)?;
     let child_digest: [u8; 32] = Sha256::digest(&child_wire).into();
     let main_digest: [u8; 32] = Sha256::digest(&main_wire).into();
+    let sign_confirm = |op: uuid::Uuid, archive: [u8; 32], target: [u8; 32]| -> Result<String> {
+        let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as u64;
+        let claim = respire_spawn::owner_credential::backup_proof::BackupRestoreClaim {
+            operation_id: *op.as_bytes(),
+            archive_sha256: archive,
+            target_sha256: target,
+            instance: *live_instance.as_bytes(),
+            generation: live_generation,
+        };
+        let proof = respire_spawn::owner_credential::backup_proof::issue(record.as_bytes(), claim, now_ms)
+            .context("backup confirmation proof issue failed")?;
+        Ok(proof.as_str().to_owned())
+    };
+    let call_confirm = |op: uuid::Uuid, archive: [u8; 32], target: [u8; 32], proof: &str| {
+        agent.post(&format!("{base}/api/runtime/private-backup/confirm"))
+            .set("x-respire-backup-proof", proof)
+            .send_json(json!({
+                "schema_version": 1,
+                "operation_id": op.to_string(),
+                "archive_sha256": hex::encode(archive),
+                "target_sha256": hex::encode(target),
+            }))
+    };
 
     let accepted_child = post(&format!("/v1/backups/import?space_id={space}"))
         .set("Content-Type", "application/octet-stream")
@@ -274,26 +318,39 @@ fn verify_http(bound: SocketAddr, root: &Path, urk: [u8; 32], handle: tokio::run
     let child_uuid = uuid::Uuid::parse_str(child_op)?;
     assert_eq!(backup_stage_count(root)?, 1);
 
-    // 202 acceptance stages only; database writes must wait for explicit local confirmation.
+    // 202 stages only; confirm HTTP bearer, foreign origins, and mismatched local claims are refused.
     thread::sleep(Duration::from_millis(100));
     let pending_status: Value = get(&format!("/v1/operations/{child_op}"))
         .set("Authorization", &format!("Bearer {TOKEN}")).call()?.into_json()?;
     assert_eq!(pending_status["state"], "pending");
     assert_eq!(list_ids(space)?, BTreeSet::from([child.clone(), child_extra.clone()]));
-
+    let child_proof_for_rejects = sign_confirm(child_uuid, child_digest, child_target)?;
+    for (req, expected_status) in [
+        (agent.post(&format!("{base}/api/runtime/private-backup/confirm")).set("Authorization", &format!("Bearer {TOKEN}")), 401),
+        (agent.post(&format!("{base}/api/runtime/private-backup/confirm")).set("x-respire-model-proof", &format!("rhm1_{}", "a".repeat(144))), 401),
+        (agent.post(&format!("{base}/api/runtime/private-backup/confirm")).set("Origin", "http://untrusted.invalid").set("x-respire-backup-proof", &child_proof_for_rejects), 403),
+        (agent.post(&format!("{base}/api/runtime/private-backup/confirm")).set("Cookie", "ambient=1").set("x-respire-backup-proof", &child_proof_for_rejects), 403),
+    ] {
+        ensure!(matches!(req.send_json(json!({
+            "schema_version": 1, "operation_id": child_op,
+            "archive_sha256": hex::encode(child_digest), "target_sha256": hex::encode(child_target),
+        })), Err(ureq::Error::Status(observed, _)) if observed == expected_status));
+    }
     let mut wrong_digest = child_digest;
     wrong_digest[0] ^= 1;
-    for bad in [
-        LocalRestoreConfirmation { operation_id: uuid::Uuid::new_v4(), archive_sha256: child_digest, target: child_db.clone() },
-        LocalRestoreConfirmation { operation_id: child_uuid, archive_sha256: wrong_digest, target: child_db.clone() },
-        LocalRestoreConfirmation { operation_id: child_uuid, archive_sha256: child_digest, target: main_db.clone() },
+    let unknown_uuid = uuid::Uuid::new_v4();
+    for (bad_op, bad_archive, bad_target, expected) in [
+        (unknown_uuid, child_digest, child_target, 404),
+        (child_uuid, wrong_digest, child_target, 409),
+        (child_uuid, child_digest, main_target, 409),
     ] {
-        assert!(handle.block_on(confirm_local_restore(bad)).is_err());
+        let proof = sign_confirm(bad_op, bad_archive, bad_target)?;
+        ensure!(matches!(call_confirm(bad_op, bad_archive, bad_target, &proof), Err(ureq::Error::Status(observed, _)) if observed == expected));
     }
     assert_eq!(list_ids(space)?, BTreeSet::from([child.clone(), child_extra]));
     assert_eq!(backup_stage_count(root)?, 1);
 
-    // Bounded pending queue holds up to 2 pending imports and releases on operation cancel.
+    // Bounded queue (max 2) + concurrent cancel/status/reap race must never deadlock or leak stages.
     let cancel_accepted = post("/v1/backups/import?space_id=main")
         .set("Content-Type", "application/octet-stream")
         .send_bytes(&main_wire)?;
@@ -306,26 +363,42 @@ fn verify_http(bound: SocketAddr, root: &Path, urk: [u8; 32], handle: tokio::run
         matches!(upload_main(&main_wire[..12 + header_size]), Err(ureq::Error::Status(503, _))),
         "pending custody limit should reject a third upload with 503"
     );
-    let cancelled = agent.delete(&format!("{base}/v1/operations/{cancel_op}"))
-        .set("Authorization", &format!("Bearer {TOKEN}")).call()?;
-    assert_eq!(cancelled.status(), 202);
-    let cancel_json: Value = cancelled.into_json()?;
-    assert_eq!(cancel_json["state"], "cancelled");
+    let mut racers = Vec::new();
+    for step in 0..6 {
+        let cancel_url = format!("{base}/v1/operations/{cancel_op}");
+        racers.push(thread::spawn(move || -> Result<()> {
+            let local = ureq::AgentBuilder::new().try_proxy_from_env(false).timeout(WAIT).build();
+            if step % 3 == 0 {
+                let reply = local.delete(&cancel_url).set("Authorization", &format!("Bearer {TOKEN}")).call()?;
+                ensure!(reply.status() == 202, "unexpected cancel status");
+            } else if step % 3 == 1 {
+                let _ = local.get(&cancel_url).set("Authorization", &format!("Bearer {TOKEN}")).call()?;
+            } else {
+                super::super::operations::backup_import::reap_stale();
+            }
+            Ok(())
+        }));
+    }
+    for racer in racers {
+        racer.join().map_err(|_| anyhow::anyhow!("concurrent cancel racer panicked"))??;
+    }
+    let cancelled_state: Value = get(&format!("/v1/operations/{cancel_op}"))
+        .set("Authorization", &format!("Bearer {TOKEN}")).call()?.into_json()?;
+    assert_eq!(cancelled_state["state"], "cancelled");
     assert_eq!(backup_stage_count(root)?, 1);
-    assert!(handle.block_on(confirm_local_restore(LocalRestoreConfirmation {
-        operation_id: cancel_uuid, archive_sha256: main_digest, target: main_db.clone(),
-    })).is_err());
+    let cancel_proof = sign_confirm(cancel_uuid, main_digest, main_target)?;
+    ensure!(matches!(call_confirm(cancel_uuid, main_digest, main_target, &cancel_proof), Err(ureq::Error::Status(404, _))));
 
-    handle.block_on(confirm_local_restore(LocalRestoreConfirmation {
-        operation_id: child_uuid, archive_sha256: child_digest, target: child_db.clone(),
-    }))?;
+    let child_confirm_proof = sign_confirm(child_uuid, child_digest, child_target)?;
+    let confirmed_child = call_confirm(child_uuid, child_digest, child_target, &child_confirm_proof)?;
+    assert_eq!(confirmed_child.status(), 200);
+    let confirmed_child_body: Value = confirmed_child.into_json()?;
+    assert_eq!(confirmed_child_body, json!({"operation_id": child_op, "status": "completed"}));
     wait_completed(child_op)?;
     assert_eq!(list_ids(space)?, BTreeSet::from([child.clone()]));
     assert_eq!(list_ids("main")?, BTreeSet::from([parent.clone(), parent_extra.clone()]));
     assert_eq!(backup_stage_count(root)?, 0);
-    assert!(handle.block_on(confirm_local_restore(LocalRestoreConfirmation {
-        operation_id: child_uuid, archive_sha256: child_digest, target: child_db,
-    })).is_err());
+    ensure!(matches!(call_confirm(child_uuid, child_digest, child_target, &child_confirm_proof), Err(ureq::Error::Status(401, _))));
 
     let accepted_main = post("/v1/backups/import?space_id=main")
         .set("Content-Type", "application/octet-stream")
@@ -336,9 +409,9 @@ fn verify_http(bound: SocketAddr, root: &Path, urk: [u8; 32], handle: tokio::run
     let main_op = receipt_main["operation_id"].as_str().context("main restore operation_id missing")?;
     let main_uuid = uuid::Uuid::parse_str(main_op)?;
     assert_eq!(list_ids("main")?, BTreeSet::from([parent.clone(), parent_extra]));
-    handle.block_on(confirm_local_restore(LocalRestoreConfirmation {
-        operation_id: main_uuid, archive_sha256: main_digest, target: main_db,
-    }))?;
+    let main_confirm_proof = sign_confirm(main_uuid, main_digest, main_target)?;
+    let confirmed_main = call_confirm(main_uuid, main_digest, main_target, &main_confirm_proof)?;
+    assert_eq!(confirmed_main.status(), 200);
     wait_completed(main_op)?;
     assert_eq!(list_ids("main")?, BTreeSet::from([parent]));
     assert_eq!(list_ids(space)?, BTreeSet::from([child]));

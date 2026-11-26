@@ -153,21 +153,24 @@ async fn handle(
     }
 
     let deadline = Instant::now() + Duration::from_secs(2);
+    let cancelled = matches!(route, Route::Cancel);
     let snapshot = owner_control::bounded_blocking(move || {
         super::backup_import::reap_stale();
-        transport::with_scope(&scope, || {
+        let snapshot = transport::with_scope(&scope, || {
             let entry = state::registry().lookup(&scope, id)?;
-            if matches!(route, Route::Cancel) {
+            if cancelled {
                 if Instant::now() >= deadline {
                     return Err(transport::unavailable());
                 }
-                let snapshot = entry.cancel()?;
-                super::backup_import::discard_cancelled(id);
-                Ok(snapshot)
+                entry.cancel()
             } else {
                 entry.snapshot()
             }
-        })
+        })?;
+        if cancelled {
+            super::backup_import::discard_cancelled(id);
+        }
+        Ok(snapshot)
     })
     .await?;
     let code = if matches!(route, Route::Cancel) {

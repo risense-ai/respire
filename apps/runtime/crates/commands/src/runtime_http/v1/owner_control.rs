@@ -426,3 +426,32 @@ pub(super) async fn host_logout(request: axum::extract::Request, peer: std::net:
     use axum::response::IntoResponse;
     Ok(([(header::CONTENT_TYPE, "application/json"), (header::CACHE_CONTROL, "no-store")], r#"{"status":"completed"}"#).into_response())
 }
+
+/// Require a one-shot native owner proof bound to the operation UUID, archive digest, and target library.
+pub(super) async fn authorize_backup_restore(
+    operation_id: uuid::Uuid,
+    archive_sha256: [u8; 32],
+    target_sha256: [u8; 32],
+    proof: String,
+) -> V1Result<OwnerBinding> {
+    bounded_blocking(move || {
+        with_active(|owner, live| {
+            if !owner.matches(live) {
+                return Err(unauthorized());
+            }
+            let now = wall_ms().ok_or_else(unavailable)?;
+            owner
+                .consume_backup_restore(
+                    live,
+                    *operation_id.as_bytes(),
+                    archive_sha256,
+                    target_sha256,
+                    &proof,
+                    now,
+                )
+                .map_err(|_| unauthorized())?;
+            Ok(live.clone())
+        })
+    })
+    .await
+}
