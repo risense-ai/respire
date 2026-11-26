@@ -1,0 +1,248 @@
+name: Disposable Windows backup export qualification
+on:
+  pull_request:
+    branches: [main]
+    types: [opened]
+permissions:
+  contents: read
+concurrency:
+  group: card010-native-windows-disposable
+  cancel-in-progress: false
+jobs:
+  qualify:
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.repository == 'risense-ai/respire' &&
+      github.event.action == 'opened' &&
+      github.event.pull_request.draft == true &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.base.repo.full_name == github.repository &&
+      github.event.pull_request.head.ref == 'verify/card010-windows-backup-export-retry' &&
+      github.event.pull_request.base.ref == 'main' &&
+      github.event.pull_request.base.sha == '385c6e2ffbf083c9e90a92e936a93de3487a56af' &&
+      github.run_attempt == 1
+    runs-on: windows-2025
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      EVENT_HEAD: ${{ github.event.pull_request.head.sha }}
+      CANDIDATE: d338de7c1e6281e867c15d9a2fbca1a279fe5afe
+      EVENT_BASE: ${{ github.event.pull_request.base.sha }}
+      CODE_PARENT: 43ffcdab84b58de961f0c072730e578710c190f9
+      POLICY: 1c060bcd958b5801f3c41a8542f98647d2a4b23e
+      RSRS_CORE_TEST_MODE: '1'
+      HF_HUB_OFFLINE: '1'
+      TRANSFORMERS_OFFLINE: '1'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+          path: inspection
+      - name: Verify the disposable commit without executing its checkout
+        working-directory: inspection
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:EVENT_BASE -cne '385c6e2ffbf083c9e90a92e936a93de3487a56af') { throw 'Unexpected event base' }
+          if ($env:EVENT_HEAD -cnotmatch '^[0-9a-f]{40}$') { throw 'Invalid event head' }
+          $head = git rev-parse --verify HEAD
+          if ($LASTEXITCODE -or $head -cne $env:EVENT_HEAD) { throw 'Unexpected event checkout' }
+          $parent = git show -s --format=%P HEAD
+          if ($LASTEXITCODE -or $parent -cne $env:CANDIDATE) { throw 'Expected one code-only parent' }
+          $path = '.github/workflows/verify-windows-backup-export.yml'
+          $change = @(git diff-tree --no-commit-id -r --no-renames --name-status $env:CANDIDATE $head)
+          if ($LASTEXITCODE -or $change.Count -ne 1 -or $change[0] -cne "A`t$path") { throw 'Unexpected disposable diff' }
+          $entry = git ls-tree $head -- $path
+          if ($LASTEXITCODE -or !($entry -cmatch ('^100644 blob ([0-9a-f]{40})\t' + [regex]::Escape($path) + '$'))) { throw 'Expected one ordinary workflow blob' }
+          "INSPECTED head=$head parent=$parent workflow_blob=$($Matches[1])"
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: d338de7c1e6281e867c15d9a2fbca1a279fe5afe
+          fetch-depth: 2
+          persist-credentials: false
+          path: product
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: risense-ai/respire-resources
+          ref: 1c060bcd958b5801f3c41a8542f98647d2a4b23e
+          persist-credentials: false
+          path: policy
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22.14.0
+      - name: Verify inputs and build the locked library tests
+        working-directory: product
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:RUNNER_OS -cne 'Windows' -or $env:RUNNER_ARCH -cne 'X64' -or
+              $env:RUNNER_ENVIRONMENT -cne 'github-hosted') { throw 'Requires hosted Windows x64' }
+          if ((git rev-parse HEAD) -cne $env:CANDIDATE -or
+              (git show -s --format=%P HEAD) -cne $env:CODE_PARENT -or
+              (git -C ../policy rev-parse HEAD) -cne $env:POLICY) { throw 'Unexpected source' }
+          $tool = '1.95.0-x86_64-pc-windows-msvc'
+          rustup toolchain install $tool --profile minimal
+          if ($LASTEXITCODE) { throw 'Rust install failed' }
+          $version = @(rustc "+$tool" -vV)
+          if ($LASTEXITCODE -or 'host: x86_64-pc-windows-msvc' -cnotin $version -or
+              'release: 1.95.0' -cnotin $version) { throw 'Unexpected Rust toolchain' }
+          $target = Join-Path $env:RUNNER_TEMP 'card010-target'
+          if (Test-Path -LiteralPath $target) { throw 'Expected fresh target' }
+          $manifest = (Resolve-Path -LiteralPath apps/runtime/crates/commands/Cargo.toml).Path
+          $records = cargo "+$tool" test --manifest-path apps/runtime/Cargo.toml --locked --no-run --lib -p respire_commands --target x86_64-pc-windows-msvc --target-dir $target --message-format=json-render-diagnostics
+          if ($LASTEXITCODE) { throw 'Build failed' }
+          $matchesFound = @($records | ForEach-Object { $_ | ConvertFrom-Json -ErrorAction Stop } |
+            Where-Object { $_.reason -ceq 'compiler-artifact' -and $_.manifest_path -and [IO.Path]::GetFullPath($_.manifest_path) -ieq $manifest -and
+              $_.target.name -ceq 'respire_commands' -and @($_.target.kind).Count -eq 1 -and 'lib' -cin $_.target.kind -and
+              $_.profile.test -is [bool] -and $_.profile.test -and $_.executable })
+          if ($matchesFound.Count -ne 1) { throw 'Expected exactly one commands library test image' }
+          $exe = (Get-Item -LiteralPath $matchesFound[0].executable).FullName
+          $deps = Join-Path $target 'x86_64-pc-windows-msvc/debug/deps'
+          if ((Split-Path $exe) -ine [IO.Path]::GetFullPath($deps) -or
+              [IO.Path]::GetFileName($exe) -cnotmatch '^respire_commands-[a-f0-9]+\.exe$') { throw 'Unexpected image path' }
+          $sha = (Get-FileHash -Algorithm SHA256 -LiteralPath $exe).Hash
+          "TEST_EXE=$exe" >> $env:GITHUB_ENV
+          "TEST_SHA=$sha" >> $env:GITHUB_ENV
+          "BUILT $env:CANDIDATE $sha $exe"
+      - name: Verify effective firewall policy, execute exact tests and remove rules
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $first = Get-Command -Name node.exe -CommandType Application -ErrorAction Stop | Select-Object -First 1
+          if (!$first -or ![IO.Path]::IsPathFullyQualified($first.Path)) { throw 'Missing absolute Node application' }
+          $resolved = @(Get-Item -LiteralPath $first.Path -ErrorAction Stop)
+          if ($resolved.Count -ne 1 -or $resolved[0] -isnot [IO.FileInfo] -or
+              $resolved[0].Name -ine 'node.exe') { throw 'Expected one Node executable' }
+          $node = $resolved[0].FullName
+          $nodeVersion = @(& $node --version)
+          if ($LASTEXITCODE -ne 0 -or $nodeVersion.Count -ne 1 -or $nodeVersion[0] -cne 'v22.14.0') {
+            throw 'Unexpected Node version'
+          }
+          $policy = (Resolve-Path -LiteralPath policy/test-cases/plugin-rpc/disposable).Path
+          if ((git -C policy rev-parse HEAD) -cne $env:POLICY -or
+              @(git -C policy status --porcelain --untracked-files=all).Count -ne 0) { throw 'Policy source changed' }
+          if ($LASTEXITCODE) { throw 'Policy verification failed' }
+          # Keep suspended launch, native image checks, deadline and job cleanup.
+          # Replace the original unbounded log sink with an inheritable pipe.
+          $job = Get-Content -Raw -LiteralPath (Join-Path $policy 'card018-owned-job.cs')
+          function Replace-Once($old,$new) {
+            if ([regex]::Matches($script:job,[regex]::Escape($old)).Count -ne 1) { throw 'Unexpected job helper source' }
+            $script:job = $script:job.Replace($old,$new)
+          }
+          Replace-Once 'bool assigned=false;' @'
+          bool assigned=false;
+          System.IO.Pipes.AnonymousPipeServerStream pipe = null;
+          System.Threading.Tasks.Task pump = null;
+          '@
+          Replace-Once 'output=CreateFileW(log, 0x40000000, 1, ref sa, 1, 0x80, IntPtr.Zero);' @'
+          pipe = new System.IO.Pipes.AnonymousPipeServerStream(System.IO.Pipes.PipeDirection.In,
+              HandleInheritability.Inheritable, 4096);
+          output = pipe.ClientSafePipeHandle.DangerousGetHandle();
+          pump = System.Threading.Tasks.Task.Run(() => {
+              using (var sink = new FileStream(log, FileMode.CreateNew, FileAccess.Write, FileShare.Read)) {
+                  var buf = new byte[4096]; int n;
+                  while ((n = pipe.Read(buf,0,buf.Length)) > 0) {
+                      if (sink.Length + n > 65536) throw new IOException("Test output exceeded 64 KiB");
+                      sink.Write(buf,0,n);
+                  }
+              }
+          });
+          '@
+          Replace-Once 'Require(AssignProcessToJobObject(job,p.Process)' 'pipe.DisposeLocalCopyOfClientHandle(); Require(AssignProcessToJobObject(job,p.Process)'
+          Replace-Once 'uint w=WaitForSingleObject(p.Process, 50);' 'if (pump.IsFaulted) pump.GetAwaiter().GetResult(); uint w=WaitForSingleObject(p.Process, 50);'
+          Replace-Once 'return unchecked((int)code);' 'if (!pump.Wait(5000)) throw new IOException("Log drain timed out"); return unchecked((int)code);'
+          Replace-Once 'if(output!=IntPtr.Zero && output.ToInt64()!=-1) CloseHandle(output);' 'if(pipe!=null) pipe.Dispose();'
+          Replace-Once 'limits.Basic.Flags=KillOnClose;' 'limits.Basic.Flags=KillOnClose | 8; limits.Basic.ProcessLimit=2;'
+          Add-Type -TypeDefinition $job
+          $image = $env:TEST_EXE
+          $sha = $env:TEST_SHA
+          if ($sha -cnotmatch '^[0-9A-F]{64}$') { throw 'Missing build digest' }
+          $sandbox = Join-Path $env:RUNNER_TEMP ('card010-' + [guid]::NewGuid().ToString('N'))
+          $null = New-Item -Type Directory -Path $sandbox
+          if ((Get-Volume -FilePath $sandbox).FileSystem -ine 'NTFS') { throw 'Requires NTFS' }
+          $group = 'card010-' + [guid]::NewGuid().ToString('N')
+          $v4 = "$group-v4"; $v6 = "$group-v6"
+          function Verify-Policy {
+            if ((Get-Service MpsSvc).Status -ne 'Running') { throw 'Firewall service unavailable' }
+            $profiles = @(Get-NetFirewallProfile -PolicyStore ActiveStore)
+            if ((($profiles.Name | Sort-Object) -join ',') -ne 'Domain,Private,Public') { throw 'Missing profiles' }
+            foreach ($profile in $profiles) {
+              if ([string]$profile.Enabled -ne 'True' -or [string]$profile.AllowLocalFirewallRules -eq 'False') { throw 'Ineffective profile' }
+            }
+            $remote = @{}
+            foreach ($family in @('ipv4','ipv6')) {
+              $name = if ($family -eq 'ipv4') { $v4 } else { $v6 }
+              $rules = @(Get-NetFirewallRule -PolicyStore ActiveStore -Name $name)
+              if ($rules.Count -ne 1) { throw 'Missing or ambiguous effective rule' }
+              $r = $rules[0]
+              $a = @(Get-NetFirewallAddressFilter -AssociatedNetFirewallRule $r)
+              $p = @(Get-NetFirewallPortFilter -AssociatedNetFirewallRule $r)
+              $app = @(Get-NetFirewallApplicationFilter -AssociatedNetFirewallRule $r)
+              if ($a.Count -ne 1 -or $p.Count -ne 1 -or $app.Count -ne 1 -or
+                  $r.Group -cne $group -or [string]$r.Enabled -ne 'True' -or
+                  [string]$r.Direction -ne 'Outbound' -or [string]$r.Action -ne 'Block' -or
+                  [string]$r.Profile -ne 'Any' -or $app[0].Program -ine $image -or
+                  [string]$a[0].LocalAddress -ne 'Any' -or [string]$p[0].Protocol -ne 'Any' -or
+                  [string]$p[0].LocalPort -ne 'Any' -or [string]$p[0].RemotePort -ne 'Any') { throw 'Effective filter mismatch' }
+              $remote[$family] = @($a[0].RemoteAddress)
+            }
+            $remote | ConvertTo-Json -Compress | & $node (Join-Path $policy 'verify-netsecurity-addresses.mjs')
+            if ($LASTEXITCODE) { throw 'Address coverage mismatch' }
+          }
+          function OwnedRules([string]$store) {
+            Get-NetFirewallRule -PolicyStore $store -ErrorAction Stop | Where-Object { $_.Name -in @($v4,$v6) }
+          }
+          foreach ($store in 'ActiveStore','PersistentStore') {
+            if (@(OwnedRules $store).Count) { throw 'Rule name collision' }
+          }
+          # Deny replacement or writes to the executable while the firewall binds its path.
+          $pin = [IO.File]::Open($image,'Open','Read','Read')
+          try {
+            $common = @{ Group=$group; PolicyStore='PersistentStore'; Direction='Outbound';
+              Action='Block'; Enabled='True'; Profile='Any'; Protocol='Any'; Program=$image }
+            & (Join-Path $policy 'install-address-blocks.ps1') $node $common $v4 $v6
+            $suite = 'runtime_http::v1::operations::tests::route_fixture_helpers::backup_export::windows_tests'
+            foreach ($case in 'pinned_export_stage_denies_rename_and_verifies_exact_reader','scoped_archive_over_loopback') {
+              Verify-Policy
+              if ((Get-FileHash -LiteralPath $image -Algorithm SHA256).Hash -cne $sha) { throw 'Test image changed' }
+              $name = "${suite}::$case"
+              $log = Join-Path $sandbox "$case.log"
+              $saved = @{}
+              foreach ($e in Get-ChildItem Env:) { $saved[$e.Name] = $e.Value }
+              try {
+                foreach ($k in $saved.Keys) {
+                  if ($k -notin @('SystemRoot','windir','SystemDrive','ComSpec','OS','PROCESSOR_ARCHITECTURE')) {
+                    [Environment]::SetEnvironmentVariable($k,$null,'Process')
+                  }
+                }
+                foreach ($k in 'TMP','TEMP','HOME','USERPROFILE','LOCALAPPDATA','APPDATA') {
+                  [Environment]::SetEnvironmentVariable($k,$sandbox,'Process')
+                }
+                $env:RSRS_CORE_TEST_MODE='1'; $env:HF_HUB_OFFLINE='1'; $env:TRANSFORMERS_OFFLINE='1'
+                $env:PATH = (Split-Path $image) + ';' + (Split-Path (Split-Path $image)) + ';' + (Join-Path $env:SystemRoot System32)
+                $code = [Card018OwnedJob]::Run($image,[string[]]@('--exact',$name,'--format','pretty','--color','never','--test-threads','1'),$sandbox,$log,[string[]]@($image),120000)
+              } finally {
+                foreach ($k in $saved.Keys) { [Environment]::SetEnvironmentVariable($k,$saved[$k],'Process') }
+                foreach ($e in @(Get-ChildItem Env:)) {
+                  if (!$saved.ContainsKey($e.Name)) { [Environment]::SetEnvironmentVariable($e.Name,$null,'Process') }
+                }
+              }
+              Verify-Policy
+              if ($code -ne 0 -or (Get-Item -LiteralPath $log).Length -gt 65536) { throw "Failed test: $case" }
+              $lines = @(Get-Content -LiteralPath $log)
+              $summary = @($lines | Where-Object { $_ -cmatch '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; \d+ filtered out;' })
+              if (@($lines | Where-Object { $_ -ceq 'running 1 test' }).Count -ne 1 -or $summary.Count -ne 1 -or @($lines | Where-Object { $_ -ceq "test $name ... ok" }).Count -ne 1) { throw "Missing exact receipt: $case" }
+              "PASS $name $sha $($summary[0])"
+            }
+          } finally {
+            $pin.Dispose()
+            foreach ($r in @(OwnedRules 'PersistentStore')) {
+              if ($r.Group -cne $group) { throw 'Refusing cleanup of unrelated rule' }
+              Remove-NetFirewallRule -InputObject $r -ErrorAction Stop
+            }
+            foreach ($store in 'PersistentStore','ActiveStore') {
+              if (@(OwnedRules $store).Count) { throw "Residual rule in $store" }
+            }
+            "PASS exact cleanup $v4 $v6"
+          }
