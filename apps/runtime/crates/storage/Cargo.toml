@@ -25,6 +25,7 @@ uuid = { version = "1.0", features = ["v4"] }
 same-file = "1.0.6"
 
 [dev-dependencies]
+base64.workspace = true
 respire_spawn = { path = "../../spawn", features = ["test-private-space-root"] }
 tempfile = "3.15"
 

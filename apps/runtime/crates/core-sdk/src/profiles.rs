@@ -160,7 +160,7 @@ pub fn generation_key_for_profile(selection: &Selection) -> Result<String> {
 
 pub fn verify_resource(resource: &Resource) -> Result<()> { crate::model_selection::verify(&resource.path,resource.size,&resource.sha256) }
 pub fn load(selection: &Selection) -> Result<Value> {
-    selection.verify()?;
+    selection.validate()?;
     exclusive(|| scoped(selection.clone(), || {
         crate::onnx::reset_sessions()?;
         crate::bge::BgeEmbedder::load_model(&selection.model)?.probe("Respire model load verification \u{672c}\u{5730}\u{63a8}\u{7406}\u{9a8c}\u{8bc1}")

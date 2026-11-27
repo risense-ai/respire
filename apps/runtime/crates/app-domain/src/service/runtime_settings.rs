@@ -38,12 +38,12 @@ pub fn subtree_members(
 /// status does not need vectors, so this path skips one model load.
 pub fn status_light() -> Result<StatusInfo> {
     let (root, store) = open_store_with_profile()?;
-    let (local_total, local_alive) = store.catalog_counts()?;
+    let (local_total, local_alive, max_updated_at) = store.status_summary()?;
     Ok(StatusInfo {
         local_total,
         local_alive,
         remote_configured: remote_configured(),
-        max_updated_at: store.max_updated_at().ok().flatten(),
+        max_updated_at,
         data_dir: root.to_string_lossy().into_owned(),
     })
 }

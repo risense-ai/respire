@@ -208,7 +208,8 @@
         let expected_pending = serde_json::to_string(&pending)?;
         let expected_revision = s.meta_get("memory_revision_v1")?;
         s.connection.execute_batch(
-            "ALTER TABLE sync_remote_heads RENAME TO previous_heads;
+            "PRAGMA user_version=0;
+            ALTER TABLE sync_remote_heads RENAME TO previous_heads;
             CREATE TABLE sync_remote_heads(id TEXT PRIMARY KEY,rev INTEGER NOT NULL);
             INSERT INTO sync_remote_heads SELECT id,rev FROM previous_heads;
             DROP TABLE previous_heads;

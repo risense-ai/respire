@@ -3,6 +3,10 @@ use anyhow::{ensure, Context};
 use rusqlite::TransactionBehavior;
 use std::{collections::BTreeSet, path::Path, sync::OnceLock};
 
+#[cfg(test)]
+#[path = "startup_schema_tests.rs"]
+mod startup_schema_tests;
+
 const COLUMN_REPAIR_TABLES: &[&str] = &["memories", "query_log", "sync_remote_heads"];
 
 struct Shape {
@@ -108,7 +112,7 @@ pub(super) fn open(path: &Path) -> Result<Connection> {
         .prepare("SELECT 1 FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*'")?
         .exists([])?;
     schema::validate_existing_memory_schema(&tx)?;
-    if !existing || requires_repair(&tx)? {
+    if old < schema_version::CURRENT || !existing || requires_repair(&tx)? {
         if existing {
             // The first guarded repair can migrate v0 only. Do not invent a
             // second transition on a damaged already-versioned database.
@@ -138,9 +142,7 @@ pub(super) fn open(path: &Path) -> Result<Connection> {
             outcome == "ok",
             "migrated local memory database failed SQLite quick_check"
         );
-        if existing {
-            tx.pragma_update(None, "user_version", schema_version::CURRENT)?;
-        }
+        tx.pragma_update(None, "user_version", schema_version::CURRENT)?;
     } else {
         // The existing sync maintenance is not a schema transition.
         LocalStore::backfill_sync_heads(&tx)?;

@@ -137,6 +137,14 @@ impl LocalStore {
         MemoryColumns::<String>::read(row).map(Into::into)
     }
 
+    /// Lightweight status does not materialize or decode memory payloads.
+    pub fn status_summary(&self) -> Result<(usize, usize, Option<String>)> {
+        Ok(self.connection.query_row(
+            "SELECT COUNT(*), COUNT(CASE WHEN deleted=0 THEN 1 END), MAX(updated_at) FROM memories",
+            [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?)
+    }
+
     /// Validate what a full catalog read would accept, without collecting
     /// ciphertext, materialized memories, or opaque retrieval bytes.
     pub fn catalog_counts(&self) -> Result<(usize, usize)> {

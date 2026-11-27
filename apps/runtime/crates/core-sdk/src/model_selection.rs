@@ -120,12 +120,17 @@ fn read_opened(mut file: std::fs::File, path: &Path, size: u64, hash: &str) -> R
     let len = usize::try_from(size).context("model resource exceeds addressable memory")?;
     let mut bytes = Vec::new();
     bytes.try_reserve_exact(len).context("reserve model resource buffer")?;
-    (&mut file).take(size).read_to_end(&mut bytes)?;
-    anyhow::ensure!(
-        bytes.len() == len && file.read(&mut [0])? == 0,
-        "model resource changed while loading"
-    );
-    check_digest(path, Sha256::digest(&bytes), hash)?;
+    let mut digest = Sha256::new();
+    let mut buffer = vec![0u8; 1 << 20];
+    loop {
+        let count = file.read(&mut buffer)?;
+        if count == 0 { break; }
+        anyhow::ensure!(bytes.len() + count <= len, "model resource changed while loading");
+        digest.update(&buffer[..count]);
+        bytes.extend_from_slice(&buffer[..count]);
+    }
+    anyhow::ensure!(bytes.len() == len, "model resource changed while loading");
+    check_digest(path, digest.finalize(), hash)?;
     Ok(bytes)
 }
 
@@ -157,17 +162,10 @@ pub(crate) fn validate(engine: Engine, variant: ModelVariant) -> Result<()> {
         17_082_821,
         "6710678b12670bc442b99edc952c4d996ae309a7020c1fa0096dd245c2faf790",
     )?;
-    verify(
-        &directory.join(onnx::variant_file_name(variant.name)),
-        variant.size,
-        variant.sha256,
-    )?;
     if bge::cpu_owned_mode(engine)? {
-        verify(
-            &bge::cpu_ort_path(&directory)?,
-            bge::CPU_ORT_SIZE,
-            bge::CPU_ORT_SHA256,
-        )?;
+        verify(&bge::cpu_ort_path(&directory)?, bge::CPU_ORT_SIZE, bge::CPU_ORT_SHA256)?;
+    } else {
+        verify(&directory.join(onnx::variant_file_name(variant.name)), variant.size, variant.sha256)?;
     }
     Ok(())
 }

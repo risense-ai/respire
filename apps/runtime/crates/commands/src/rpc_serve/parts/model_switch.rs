@@ -83,81 +83,90 @@ pub(crate) fn run_model_switch(
         model_progress::update(name, model, done, total)?;
         progress(name, done, total)
     };
-    let previous = store.active_selection()?;
-    let source_revision = store
-        .meta_get("memory_revision_v1")?
-        .context("source revision unavailable")?;
-    phase("prepare")?;
-    checkpoint()?;
-    report("switch-verify", &target.model, 0, None)?;
-    crate::model_assets::verify_selection_assets(target)?;
-    checkpoint()?;
-    target.generation = profiles::generation_key_for_profile(target)?;
-    store.meta_set(
-        "embedding_pending_selection_v1",
-        &serde_json::to_string(target)?,
-    )?;
-    profiles::exclusive(|| {
+    let result = (|| {
+        let previous = store.active_selection()?;
+        let source_revision = store
+            .meta_get("memory_revision_v1")?
+            .context("source revision unavailable")?;
+        phase("prepare")?;
         checkpoint()?;
-        let attempt = profiles::scoped(target.clone(), || {
-            phase("load")?;
-            report("switch-load", &target.model, 0, None)?;
-            profiles::load(target)?;
+        report("switch-verify", &target.model, 0, None)?;
+        target.validate()?;
+        checkpoint()?;
+        target.generation = profiles::generation_key_for_profile(target)?;
+        store.meta_set(
+            "embedding_pending_selection_v1",
+            &serde_json::to_string(target)?,
+        )?;
+        profiles::exclusive(|| {
             checkpoint()?;
-            let embedder = BgeEmbedder::load_model(&target.model)?;
-            phase("main-index")?;
-            vault.build_main(store, &embedder, target, |done, total| {
-                check()?;
-                report(
-                    "switch-index",
-                    &target.model,
-                    done as u64,
-                    Some(total as u64),
-                )
-            })?;
-            phase("diary-index")?;
-            vault.build_diary(
-                store,
-                &embedder,
-                checkpoint,
-                |action| commit(false, action),
-                |done| report("switch-diary", &target.model, done as u64, None),
-            )?;
-            checkpoint()?;
-            anyhow::ensure!(
-                !store.index_pending(&target.model)? && !respire_app::diary::needs_rebuild(store)?,
-                "candidate index/source validation failed"
-            );
-            respire_app::resident::clear()?;
-            *crate::engine::EMBEDDER_SLOT
-                .lock()
-                .map_err(|_| anyhow::anyhow!("embedder cache poisoned"))? = None;
-            commit(true, &mut || {
-                store.activate_selection(target, &source_revision)?;
-                profiles::set_active(Some(target.clone()));
+            let attempt = profiles::scoped(target.clone(), || {
+                phase("load")?;
+                report("switch-load", &target.model, 0, None)?;
+                profiles::load(target)?;
+                checkpoint()?;
+                let embedder = BgeEmbedder::load_model(&target.model)?;
+                phase("main-index")?;
+                vault.build_main(store, &embedder, target, |done, total| {
+                    check()?;
+                    report(
+                        "switch-index",
+                        &target.model,
+                        done as u64,
+                        Some(total as u64),
+                    )
+                })?;
+                phase("diary-index")?;
+                vault.build_diary(
+                    store,
+                    &embedder,
+                    checkpoint,
+                    |action| commit(false, action),
+                    |done| report("switch-diary", &target.model, done as u64, None),
+                )?;
+                checkpoint()?;
+                anyhow::ensure!(
+                    !store.index_pending(&target.model)?
+                        && !respire_app::diary::needs_rebuild(store)?,
+                    "candidate index/source validation failed"
+                );
+                respire_app::resident::clear()?;
+                *crate::engine::EMBEDDER_SLOT
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("embedder cache poisoned"))? = None;
+                commit(true, &mut || {
+                    store.activate_selection(target, &source_revision)?;
+                    profiles::set_active(Some(target.clone()));
+                    Ok(())
+                })?;
                 Ok(())
-            })?;
-            Ok(())
-        });
-        if let Err(error) = attempt {
-            let restored = match previous {
-                Some(ref selection) => profiles::load(selection).map(|_| ()),
-                None => {
-                    profiles::set_active(None);
-                    respire_app::memory::onnx::reset_sessions().and_then(|_| {
-                        BgeEmbedder::load_model("m3")?
-                            .probe("Respire rollback verification")
-                            .map(|_| ())
-                    })
-                }
-            };
-            return match restored {
+            });
+            if let Err(error) = attempt {
+                let restored = match previous {
+                    Some(ref selection) => profiles::load(selection).map(|_| ()),
+                    None => {
+                        profiles::set_active(None);
+                        respire_app::memory::onnx::reset_sessions().and_then(|_| {
+                            BgeEmbedder::load_model("m3")?
+                                .probe("Respire rollback verification")
+                                .map(|_| ())
+                        })
+                    }
+                };
+                return match restored {
                 Ok(()) => Err(anyhow::anyhow!("model switch failed: {error:#}; previous selection restored and trial inference passed")),
                 Err(recovery) => Err(anyhow::anyhow!("recovery_failed: model switch failed: {error:#}; previous model reload failed: {recovery:#}; semantic availability is unverified")),
             };
-        }
-        Ok(json!({"selection":target,"active_changed":true,"semantic":"ready"}))
-    })
+            }
+            Ok(json!({"selection":target,"active_changed":true,"semantic":"ready"}))
+        })
+    })();
+    if let Err(error) = &result {
+        store
+            .clear_pending_selection(Some(task_id))
+            .with_context(|| format!("model switch failed: {error:#}; pending cleanup failed"))?;
+    }
+    result
 }
 
 pub(crate) fn record_switch_result(task_id: &str, result: &Result<Value>) -> Value {
@@ -170,7 +179,7 @@ pub(crate) fn record_switch_result(task_id: &str, result: &Result<Value>) -> Val
             let semantic = if error.contains("recovery_failed") {
                 "unverified"
             } else if error.contains("previous selection restored and trial inference passed") {
-                "previous_ready"
+                "unchanged"
             } else if profile_state()["semantic"] == "unverified" {
                 "unverified"
             } else {

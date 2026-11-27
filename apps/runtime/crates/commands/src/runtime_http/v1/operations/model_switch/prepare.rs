@@ -155,7 +155,7 @@ pub(super) fn work(input: Input) -> Result<Prepared> {
             .map_err(|_| anyhow::anyhow!("operation state unavailable"))
     };
     progress(5)?;
-    crate::model_assets::verify_selection_assets(&target)?;
+    target.validate()?;
     check()?;
     let root = stage.root()?.root()?.to_owned();
     let index = stage.root()?.index_root()?;

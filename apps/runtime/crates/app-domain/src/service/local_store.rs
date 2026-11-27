@@ -31,6 +31,7 @@ pub fn open_runtime_store(ownership:&crate::lock::LibraryLock)->Result<(LocalSto
     let expected=crate::snapshot::runtime_bootstrap_target(&root)?;
     respire_core_sdk::set_index_root(&root)?;
     let store=LocalStore::open(&database_path(&root)?)?;
+    store.clear_pending_selection(None)?;
     if let Some(id)=expected.as_ref() {
         store.verify_sqlite_integrity()?;
         anyhow::ensure!(store.snapshot_quarantine_id()?.as_ref()==Some(id),"opened library does not match the restored snapshot transaction");
@@ -49,7 +50,9 @@ pub fn initialize_runtime_store() -> Result<LocalStore> {
     crate::snapshot::ensure_no_incomplete_restore(&root)?;
     check_runtime_profile(&root)?;
     respire_core_sdk::set_index_root(&root)?;
-    LocalStore::open(&database_path(&root)?)
+    let store = LocalStore::open(&database_path(&root)?)?;
+    store.clear_pending_selection(None)?;
+    Ok(store)
 }
 
 /// New libraries use rsrs.db; opening an existing library never renames it.
