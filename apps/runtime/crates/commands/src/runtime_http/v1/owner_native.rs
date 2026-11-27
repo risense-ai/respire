@@ -109,6 +109,34 @@ impl NativeOwner {
         )
     }
 
+    pub(super) fn consume_backup_restore(
+        &mut self,
+        live: &OwnerBinding,
+        operation_id: [u8; 16],
+        archive_sha256: [u8; 32],
+        target_sha256: [u8; 32],
+        proof: &str,
+        wall_ms: u64,
+    ) -> Result<(), Denied> {
+        self.registry.consume_private_backup(
+            Some(live),
+            self.record.as_bytes(),
+            operation_id,
+            archive_sha256,
+            target_sha256,
+            proof,
+            wall_ms,
+        )
+    }
+
+    pub(super) fn authorize_logout(&mut self, live: &OwnerBinding, id: uuid::Uuid,
+        revision: &[u8; 32], header: &str, now: u64) -> Result<(), Denied> {
+        let proof = respire_spawn::owner_credential::proof::verify_soft_logout(
+            self.record.as_bytes(), id.as_bytes(), live.instance.as_bytes(), live.generation,
+            revision, header, now).ok_or(Denied::UnusableCredential)?;
+        self.registry.consume_logout(live, proof, now)
+    }
+
     pub(super) fn exchange(
         &mut self,
         live: &OwnerBinding,

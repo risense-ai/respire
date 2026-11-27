@@ -23,6 +23,8 @@ pub use feedback::FeedbackCounts;
 mod schema_version;
 #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 mod migration_backup;
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+pub use migration_backup::RestoreOutcome;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod backup_export_source;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -300,7 +302,7 @@ impl LocalStore {
                 memory.local_meta.verification.as_ref().map(serde_json::to_string).transpose()?,
             ],
         )?;
-        self.store_artifact(memory, &self.retrieval_model()?)?;
+        self.store_artifact(memory)?;
         Ok(true)
     }
 

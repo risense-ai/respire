@@ -127,6 +127,10 @@ pub fn control_space(ownership: &AuthOwnership, id: &str, key: &str, params: &Ho
         receipt.outcome = HostSpaceOutcome::Unknown;
         receipt.session_id = None;
     }
+    if matches!(params.operation, HostSpaceOperation::Invite { .. }) && receipt.outcome == HostSpaceOutcome::Committed {
+        // The durable terminal record also reconciles GET after interrupted cleanup.
+        let _ = invite_projection::pending::finish(ownership, id, key, params);
+    }
     Ok(receipt)
 }
 

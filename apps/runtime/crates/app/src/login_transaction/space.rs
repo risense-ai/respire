@@ -88,7 +88,7 @@ fn members(bytes: Option<&[u8]>) -> Result<Vec<Member>> {
 }
 
 mod invite_projection;
-pub use invite_projection::{committed_space_invite_member, list_space_members, SpaceInviteRequest, SpaceMemberView};
+pub use invite_projection::{owned_members, pending_invite, committed_space_invite_member, list_space_members, SpaceInviteRequest, SpaceMemberView};
 
 fn field<'a>(value: &'a Value, key: &str) -> Result<&'a str> {
     value[key].as_str().filter(|value| !value.trim().is_empty()).context("space credential field missing")
@@ -248,6 +248,7 @@ fn admit(ownership: &AuthOwnership, id: &str, key: &str, params: &HostSpaceParam
         space_operation: Some(SpaceOperation { intent: params.operation.clone(), source_identity: params.source_identity.clone(),
             members_original, members_candidate: None, kick, session_id: None, code_backend: None,
             code_sha256: None, issued_at: None, target, credential_ready: false }) });
+    invite_projection::pending::bind_native(&journal.operations[index], &journal)?;
     save_journal(&mut journal)?;
     Ok((journal,index))
 }

@@ -1,8 +1,8 @@
-//! inject — adapter that distributes the memory-injection source (CLI install and the client inject page share this)
+//! Read-only prompt source and target inspection for legacy Runtime calls.
 //!
 //! Embeds docs/respire.md (compile-time include, the only source) into each AI tool's system prompt / memory file.
 //! Two modes: cover (the target file IS the source) and block (markers wrap the insert, user content stays).
-//! Idempotent: skip when content matches; uninstall supported (strip block, or delete a cover file that is exactly the source).
+//! The CLI owns target installation and removal.
 //!
 //! | target | path | mode |
 //! |------|------|----|
@@ -343,85 +343,6 @@ fn extract_block(text: &str) -> Option<String> {
     Some(text[start..end].trim().replace("\r\n", "\n"))
 }
 
-/// Inject one target. Returns whether a write actually happened.
-pub fn inject_one(id: &str) -> Result<bool> {
-    match id {
-        "dsh" => write_cover(expand("~/.dsh/AGENTS.md")),
-        "opencode" => inject_opencode(),
-        "codex" => write_block(expand("~/.codex/AGENTS.md")),
-        "claude" => write_block(expand("~/.claude/CLAUDE.md")),
-        "codebuddy" => write_block(expand("~/.codebuddy/AGENTS.md")),
-        "workbuddy" => inject_workbuddy(),
-        "pi" => write_block(expand("~/.pi/AGENTS.md")),
-        "zigcode" => write_block(expand("~/.zcode/AGENTS.md")),
-        "deepseek" => write_block(expand("~/.deepseek/AGENTS.md")),
-        "qwen" => write_block(expand("~/.qwen/AGENTS.md")),
-        "doubao" => write_block(expand("~/.doubao/AGENTS.md")),
-        "grok" => write_block(expand("~/.grok/AGENTS.md")),
-        "kylinbot" => write_block(expand("~/.kylinbot/workspace/AGENTS.md")),
-        "generic" => write_block(expand("~/AGENTS.md")),
-        other => anyhow::bail!("unknown inject target: {other}"),
-    }
-}
-
-/// Uninstall one target. Returns whether a write actually happened.
-pub fn remove_one(id: &str) -> Result<bool> {
-    match id {
-        "dsh" => remove_cover(expand("~/.dsh/AGENTS.md")),
-        "opencode" => remove_opencode(),
-        "codex" => remove_block(expand("~/.codex/AGENTS.md")),
-        "claude" => remove_block(expand("~/.claude/CLAUDE.md")),
-        "codebuddy" => remove_block(expand("~/.codebuddy/AGENTS.md")),
-        "workbuddy" => remove_block(expand("~/.workbuddy/MEMORY.md")),
-        "pi" => remove_block(expand("~/.pi/AGENTS.md")),
-        "zigcode" => remove_block(expand("~/.zcode/AGENTS.md")),
-        "deepseek" => remove_block(expand("~/.deepseek/AGENTS.md")),
-        "qwen" => remove_block(expand("~/.qwen/AGENTS.md")),
-        "doubao" => remove_block(expand("~/.doubao/AGENTS.md")),
-        "grok" => remove_block(expand("~/.grok/AGENTS.md")),
-        "kylinbot" => remove_block(expand("~/.kylinbot/workspace/AGENTS.md")),
-        "generic" => remove_block(expand("~/AGENTS.md")),
-        other => anyhow::bail!("unknown inject target: {other}"),
-    }
-}
-
-// ── cover mode (dsh): target file = inject source ──
-
-fn write_cover(path: std::path::PathBuf) -> Result<bool> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    // Drop a symlink first — fs::write would follow it and overwrite the repo source
-    if let Ok(meta) = std::fs::symlink_metadata(&path) {
-        if meta.file_type().is_symlink() {
-            std::fs::remove_file(&path)?;
-        }
-    }
-    let changed = match std::fs::read_to_string(&path) {
-        Ok(old) if old == instructions_md() => false,
-        _ => {
-            std::fs::write(&path, instructions_md())?;
-            true
-        }
-    };
-    Ok(changed)
-}
-
-fn remove_cover(path: std::path::PathBuf) -> Result<bool> {
-    match std::fs::read_to_string(&path) {
-        // Identical to the inject source → treat as a pure inject file and delete it
-        Ok(text) if text == instructions_md() || text == INSTRUCTIONS_MD => {
-            std::fs::remove_file(&path)?;
-            Ok(true)
-        }
-        // User-owned content → strip the block only
-        Ok(_) => remove_block(path),
-        Err(_) => Ok(false),
-    }
-}
-
-// ── reference mode (opencode): entity file + opencode.json instructions ──
-
 fn opencode_state() -> Result<&'static str> {
     let dir = home()?.join(".config/opencode");
     let mut referenced = false;
@@ -450,44 +371,6 @@ fn opencode_state() -> Result<&'static str> {
     Ok(check_state(entity_path()?, "reference"))
 }
 
-fn inject_opencode() -> Result<bool> {
-    let entity = entity_path()?;
-    let mut changed = write_cover(entity)?;
-    // Both opencode.json and opencode.jsonc are loaded (jsonc later can override instructions) — write both if present
-    let dir = home()?.join(".config/opencode");
-    for name in ["opencode.json", "opencode.jsonc"] {
-        let path = dir.join(name);
-        if name.ends_with(".jsonc") && !path.exists() {
-            continue;
-        }
-        changed |= patch_instructions(&path, true)?;
-    }
-    // oh-my-openagent prompt_append (touch only if the field exists; idempotent)
-    let oma = dir.join("oh-my-openagent.json");
-    if oma.exists() {
-        changed |= patch_prompt_append(&oma, true)?;
-    }
-    Ok(changed)
-}
-
-fn remove_opencode() -> Result<bool> {
-    // The entity file is shared by OpenCode and WorkBuddy; uninstall only drops this target's reference.
-    let mut changed = false;
-    let dir = home()?.join(".config/opencode");
-    for name in ["opencode.json", "opencode.jsonc"] {
-        let path = dir.join(name);
-        if path.exists() {
-            changed |= patch_instructions(&path, false)?;
-        }
-    }
-    let oma = dir.join("oh-my-openagent.json");
-    if oma.exists() {
-        changed |= patch_prompt_append(&oma, false)?;
-    }
-    Ok(changed)
-}
-
-include!("inject/patching.rs");
 #[cfg(test)]
 mod fixture_paths;
 #[cfg(test)]

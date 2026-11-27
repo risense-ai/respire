@@ -17,6 +17,12 @@ pub use probe::{
     watch_probe_parent, ProbeChild,
 };
 
+#[cfg(unix)]
+pub fn effective_uid() -> u32 {
+    // SAFETY: POSIX `geteuid` has no preconditions and cannot fail.
+    unsafe { libc::geteuid() }
+}
+
 #[cfg(windows)]
 mod supervisor_job;
 #[cfg(windows)]

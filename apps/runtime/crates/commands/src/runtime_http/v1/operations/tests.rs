@@ -13,6 +13,7 @@ use sha2::{Digest, Sha256};
 use std::{fs, net::SocketAddr, process::Command, thread, time::Duration};
 use tower::ServiceExt;
 
+mod main_create_tests;
 #[path = "sse_cursor_tests.rs"]
 mod sse_cursor_tests;
 use sse_cursor_tests::events;
@@ -88,15 +89,7 @@ pub(super) fn production_router_fixture(test: &'static str) -> Result<()> {
     fs::create_dir_all(token.parent().context("fixture token parent")?)?;
     fs::write(&token, TOKEN)?;
     let (password, urk, salt, wrapped, nonce) = auth::new_vault_v4()?;
-    // A malformed URL exercises the real sync failure before the HTTP client can connect.
-    let mut session_data = json!({
-        "user": "sse-fixture", "vault_version": 4, "kdf_salt": salt,
-        "urk_nonce": nonce, "wrapped_urk": wrapped,
-    });
-    if test != SPACE_TEST {
-        session_data["addr"] = json!("http://[");
-        session_data["token"] = json!("fixture-sync-token");
-    }
+    let session_data = space_members_tests::fixture_session(test, salt, nonce, wrapped);
     let session = auth::write_session_json(&session_data)?;
     let unlock = || -> Result<()> {
         auth::supply_runtime_session(respire_protocol::credentials::RuntimeUnlock {
@@ -150,8 +143,15 @@ pub(super) fn production_router_fixture(test: &'static str) -> Result<()> {
         .build()?
         .block_on(async {
             let app = crate::runtime_http::router(BOUND);
+            if matches!(test, space_members_tests::INVITE_TEST | main_create_tests::CREATE_TEST) {
+                crate::rpc_serve::mark_http_fixture_ready();
+                return match test { main_create_tests::CREATE_TEST => main_create_tests::check_main_create_abandonment(&app).await, _ => space_members_tests::loopback().await };
+            }
             if test == SPACE_TEST {
                 crate::rpc_serve::mark_http_fixture_ready();
+                let pending = send(&app, "POST", "/v1/spaces/main/members", Some(TOKEN),
+                    Some(json!({"identifier":"tablet","role":"viewer"}))).await?;
+                assert_eq!(pending.status(), StatusCode::CONFLICT);
                 return space_members_tests::device_space_tests::check(&app, &root, true).await;
             }
             if test == super::organize_split::tests::TEST {

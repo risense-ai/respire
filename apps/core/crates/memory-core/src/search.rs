@@ -180,18 +180,25 @@ pub fn center_normalize(v: &[f32], mu: &[f32]) -> Option<Vec<f32>> {
     let source_norm = v.iter().map(|value| value * value).sum::<f32>().sqrt();
     if !source_norm.is_finite() || source_norm < 1e-8 { return None; }
     let scale = if (source_norm - 1.0).abs() < 1e-6 { 1.0 } else { source_norm };
-    let c: Vec<f32> = v.iter().zip(mu.iter()).map(|(x, m)| x / scale - m).collect();
+    let mut c: Vec<f32> = v.iter().zip(mu.iter()).map(|(x, m)| x / scale - m).collect();
     let norm: f32 = c.iter().map(|x| x * x).sum::<f32>().sqrt();
     if !norm.is_finite() || norm < 1e-8 {
         return None;
     }
-    Some(c.iter().map(|x| x / norm).collect())
+    for x in &mut c { *x /= norm; }
+    Some(c)
 }
 
 /// Centered-domain cosine: cosine after both vectors are centered on the same μ.
 pub fn centered_cosine(a: &[f32], b: &[f32], mu: &[f32]) -> f32 {
-    match (center_normalize(a, mu), center_normalize(b, mu)) {
-        (Some(ca), Some(cb)) => cosine_similarity(&ca, &cb),
+    centered_cosine_from(a, mu)(b)
+}
+
+/// Reuse the centered left vector when comparing one candidate with many others.
+pub fn centered_cosine_from<'a>(a: &'a [f32], mu: &'a [f32]) -> impl Fn(&[f32]) -> f32 + 'a {
+    let left = center_normalize(a, mu);
+    move |b| match (left.as_deref(), center_normalize(b, mu)) {
+        (Some(ca), Some(cb)) => cosine_similarity(ca, &cb),
         (None, None) => cosine_similarity(a, b),
         _ => 0.0,
     }

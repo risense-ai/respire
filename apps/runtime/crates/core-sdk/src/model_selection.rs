@@ -87,18 +87,50 @@ pub(crate) fn scoped<T>(
     let _restore = Restore(SELECTION.with(|slot| slot.replace(Some((engine, variant)))));
     action()
 }
-pub(crate) fn verify(path: &Path, size: u64, hash: &str) -> Result<()> {
-    let mut file = std::fs::File::open(path).with_context(|| {
+fn open_pinned(path: &Path, size: u64) -> Result<std::fs::File> {
+    let file = std::fs::File::open(path).with_context(|| {
         format!(
             "missing weights/dependency: {}; download first",
             path.display()
         )
     })?;
+    let metadata = file.metadata()?;
     anyhow::ensure!(
-        file.metadata()?.is_file() && file.metadata()?.len() == size,
+        metadata.is_file() && metadata.len() == size,
         "invalid size: {}; download the pinned model again",
         path.display()
     );
+    Ok(file)
+}
+
+fn check_digest(path: &Path, digest: impl std::fmt::LowerHex, hash: &str) -> Result<()> {
+    anyhow::ensure!(
+        format!("{digest:x}").eq_ignore_ascii_case(hash),
+        "SHA-256/model identity mismatch: {}",
+        path.display()
+    );
+    Ok(())
+}
+
+pub(crate) fn read_verified(path: &Path, size: u64, hash: &str) -> Result<Vec<u8>> {
+    read_opened(open_pinned(path, size)?, path, size, hash)
+}
+
+fn read_opened(mut file: std::fs::File, path: &Path, size: u64, hash: &str) -> Result<Vec<u8>> {
+    let len = usize::try_from(size).context("model resource exceeds addressable memory")?;
+    let mut bytes = Vec::new();
+    bytes.try_reserve_exact(len).context("reserve model resource buffer")?;
+    (&mut file).take(size).read_to_end(&mut bytes)?;
+    anyhow::ensure!(
+        bytes.len() == len && file.read(&mut [0])? == 0,
+        "model resource changed while loading"
+    );
+    check_digest(path, Sha256::digest(&bytes), hash)?;
+    Ok(bytes)
+}
+
+pub(crate) fn verify(path: &Path, size: u64, hash: &str) -> Result<()> {
+    let mut file = open_pinned(path, size)?;
     let mut digest = Sha256::new();
     let mut buffer = vec![0u8; 1 << 20];
     loop {
@@ -108,12 +140,7 @@ pub(crate) fn verify(path: &Path, size: u64, hash: &str) -> Result<()> {
         }
         digest.update(&buffer[..count]);
     }
-    anyhow::ensure!(
-        format!("{:x}", digest.finalize()).eq_ignore_ascii_case(hash),
-        "SHA-256/model identity mismatch: {}",
-        path.display()
-    );
-    Ok(())
+    check_digest(path, digest.finalize(), hash)
 }
 pub(crate) fn validate(engine: Engine, variant: ModelVariant) -> Result<()> {
     anyhow::ensure!(
@@ -315,6 +342,40 @@ mod tests {
         persist(&path, b"old")?;
         persist(&path, b"new")?;
         assert_eq!(std::fs::read(path)?, b"new");
+        Ok(())
+    }
+    #[test]
+    fn verified_load_requires_exact_pinned_content() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("weights");
+        let hash = format!("{:X}", Sha256::digest(b"abc"));
+        std::fs::write(&path, b"abc")?;
+        assert_eq!(read_verified(&path, 3, &hash)?, b"abc");
+        std::fs::write(&path, b"bad")?;
+        assert!(read_verified(&path, 3, &hash).unwrap_err().to_string().contains("SHA-256"));
+        for changed in [b"ab".as_slice(), b"abcd".as_slice()] {
+            std::fs::write(&path, b"abc")?;
+            let file = open_pinned(&path, 3)?;
+            std::fs::write(&path, changed)?;
+            assert!(read_opened(file, &path, 3, &hash).unwrap_err().to_string()
+                .contains("changed while loading"));
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn verified_load_uses_the_opened_file_after_path_replacement() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("tokenizer");
+        let replacement = dir.path().join("replacement");
+        std::fs::write(&path, b"abc")?;
+        let file = open_pinned(&path, 3)?;
+        std::fs::write(&replacement, b"bad")?;
+        std::fs::rename(replacement, &path)?;
+        let hash = format!("{:x}", Sha256::digest(b"abc"));
+        assert_eq!(read_opened(file, &path, 3, &hash)?, b"abc");
+        assert!(read_verified(&path, 3, &hash).is_err());
         Ok(())
     }
     #[test]

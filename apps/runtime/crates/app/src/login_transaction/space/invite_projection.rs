@@ -1,6 +1,9 @@
 //! The public shape is metadata only. Private custody and dispatch stay native.
 use super::*;
 
+pub(super) mod pending;
+pub use pending::{owned_members, pending_invite};
+
 const PREFIX_LABEL: &str = "member-";
 const MAX_DEVICE_BYTES: usize = 128;
 
@@ -17,9 +20,9 @@ impl InviteRole {
     }
 }
 
-/// Unmounted REST input. The identifier is a device label, not an address,
+/// The identifier is a device label, not an address,
 /// account name, invite code or credential.
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SpaceInviteRequest {
     identifier: String,

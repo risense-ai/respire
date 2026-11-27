@@ -15,9 +15,15 @@ use respire_app::{memory::Kind, service, MemoryEntry};
 use serde::Deserialize;
 use std::net::SocketAddr;
 
+#[cfg(test)]
+#[path = "writes/create_test_admission.rs"]
+pub(super) mod create_test_admission;
+
 pub(super) fn routes(bound: SocketAddr) -> Router {
+    let router = bind(Router::new(), RouteSpec::new(Verb::Post, "/v1/host/transactions/login", "executeLoginTransaction"), login);
+    let router = bind(router, RouteSpec::new(Verb::Post, "/v1/spaces/{spaceId}/members", "inviteSpaceMember"), invite);
     let router = bind(
-        Router::new(),
+        router,
         RouteSpec::new(Verb::Post, "/v1/memories", "createMemory"),
         create,
     );
@@ -118,7 +124,7 @@ async fn create(
     if matches!(kind, Kind::Hypothesis | Kind::Reflection | Kind::SelfNote) {
         return Err(transport::invalid());
     }
-    let entry = rest_dispatch::submit_memory_write(scope, move |ctx, admission| {
+    let entry = rest_dispatch::submit_memory_create(scope, move |ctx, admission| {
         super::reads::with_memory_store(ctx, input.space_id, |store, device_local| {
             if let Some(parent) = input.parent_id.as_deref() {
                 if store
@@ -137,19 +143,20 @@ async fn create(
             entry.parent_id = input.parent_id.unwrap_or_default();
             entry.kind = kind;
             entry.tags = input.tags;
-            if device_local {
-                ctx.library.create_device_space_memory(store, &entry, || {
-                    admit_device_write(ctx, admission)
-                }).map_err(|error| {
-                    if ctx.scope.bearer_is_current() {
-                        write_failure(error)
-                    } else {
-                        transport::unauthorized()
-                    }
-                })?;
-            } else {
-                ctx.library.create_memory(store, &entry).map_err(write_failure)?;
-                notify();
+            ctx.library.create_memory_with_admission(store, &entry, || {
+                #[cfg(test)]
+                create_test_admission::wait();
+                ctx.may_commit() && admission.admit()
+            }).map_err(|error| {
+                if ctx.scope.bearer_is_current() {
+                    write_failure(error)
+                } else {
+                    transport::unauthorized()
+                }
+            })?;
+            if !device_local {
+                crate::rpc_worker::kick_index_after_create();
+                service::notify_autosync();
             }
             Ok(entry)
         })
@@ -277,5 +284,52 @@ pub(super) fn new_entry(user: String, title: String, content: String) -> MemoryE
         see_also: Vec::new(),
         metadata: Default::default(),
         unknown_fields: Default::default(),
+    }
+}
+
+async fn invite(
+    State(bound): State<SocketAddr>,
+    ConnectInfo(crate::network::Peer(peer)): ConnectInfo<crate::network::Peer>,
+    request: Request<Body>,
+) -> V1Result<Response> {
+    let (parts, body) = request.into_parts();
+    let scope = transport::authorize(&parts, peer, bound).await?;
+    if parts.uri.query().is_some() { return Err(transport::invalid()); }
+    let path = parts.uri.path().strip_prefix("/v1/spaces/")
+        .and_then(|p| p.strip_suffix("/members")).ok_or_else(transport::invalid)?;
+    let id = transport::decode(path, false)?;
+    let input: respire_app::login_transaction::SpaceInviteRequest = transport::json(body, 2048).await?;
+    input.clone().into_host_operation().map_err(|_| transport::invalid())?;
+    let member = rest_dispatch::submit_publication(scope, move |ctx, admission| {
+        if super::reads::is_device_local_space(Some(&id)) {
+            return Err(Problem::new(StatusCode::CONFLICT, "space_offline", "An online space is required"));
+        }
+        super::reads::check_space(ctx, Some(id))?;
+        respire_app::login_transaction::pending_invite(&ctx.scope.canonical_profile, ctx.ownership,
+            &ctx.scope.account, input, || ctx.may_commit() && admission.admit())
+            .map_err(|err| if err.downcast_ref::<std::io::Error>().is_some_and(|e| e.kind() == std::io::ErrorKind::PermissionDenied) {
+                Problem::new(StatusCode::FORBIDDEN, "space_owner_required", "Space owner required")
+            } else { transport::unavailable() })?.ok_or_else(|| Problem::new(StatusCode::CONFLICT,
+                "space_offline", "An online space is required"))
+    }, || Problem::new(StatusCode::CONFLICT, "invite_outcome_unknown", "Check space membership"), false).await?;
+    transport::json_response(StatusCode::CREATED, member)
+}
+
+async fn login(State(bound): State<SocketAddr>, ConnectInfo(crate::network::Peer(peer)): ConnectInfo<crate::network::Peer>,
+    request: Request<Body>) -> V1Result<Response> {
+    use respire_app::login_transaction::{request_login, LoginAdmission};
+    let (parts, body) = request.into_parts();
+    let scope = transport::authorize(&parts, peer, bound).await?;
+    if parts.uri.query().is_some() { return Err(transport::invalid()); }
+    let intent = transport::json(body, 1024).await?;
+    let result = rest_dispatch::submit_publication(scope, move |ctx, admission| {
+        request_login(&ctx.scope.canonical_profile, &ctx.scope.account, ctx.ownership, intent,
+            || ctx.may_commit() && admission.admit())
+            .map_err(|_| transport::unavailable())
+    }, || Problem::new(StatusCode::CONFLICT, "login_request_unconfirmed", "Check the current host account state"), true).await?;
+    match result {
+        LoginAdmission::Pending => transport::json_response(StatusCode::OK, serde_json::json!({"status":"pending_confirmation"})),
+        LoginAdmission::Conflict => Err(Problem::new(StatusCode::CONFLICT,"transaction_pending","Another account transaction is pending")),
+        LoginAdmission::RequiresEmptyProfile => Err(Problem::new(StatusCode::CONFLICT,"profile_not_empty","Offline key generation requires an empty profile")),
     }
 }
