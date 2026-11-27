@@ -109,6 +109,139 @@ fn operation_recovers_snapshot_before_resubscribing() -> Result<()> {
     Ok(())
 }
 
+fn running_snapshot() -> Reply {
+    (
+        SNAPSHOT,
+        "200 OK",
+        JSON,
+        snapshot(ID, "running").to_string(),
+    )
+}
+
+fn ready() -> Reply {
+    (HEALTH, "200 OK", JSON, health())
+}
+
+fn events(body: String) -> Reply {
+    (EVENTS, "200 OK", "text/event-stream", body)
+}
+
+fn failed_diagnostic(script: Vec<Reply>, diagnostic: &str) -> Result<()> {
+    let output = invoke(script)?;
+    assert!(!output.status.success(), "{output:?}");
+    let printed = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(printed.contains(diagnostic), "{printed}");
+    assert!(!printed.contains("model_switch"), "{printed}");
+    Ok(())
+}
+
+#[test]
+fn operation_rejects_oversized_sse_line_and_accumulated_data() -> Result<()> {
+    // The second frame has individually bounded lines whose joined data is too large.
+    for (wire, diagnostic) in [
+        (
+            format!(": {}\n\n", " ".repeat(64 * 1024)),
+            "Runtime event line exceeds 64 KiB",
+        ),
+        (
+            format!(
+                "data: {}\ndata: {}\n\n",
+                " ".repeat(32768),
+                " ".repeat(32768)
+            ),
+            "Runtime event exceeds 64 KiB",
+        ),
+    ] {
+        failed_diagnostic(
+            vec![ready(), running_snapshot(), ready(), events(wire)],
+            diagnostic,
+        )?;
+    }
+    Ok(())
+}
+
+#[test]
+fn operation_rejects_malformed_or_mismatched_sse_events() -> Result<()> {
+    let data = snapshot(ID, "completed");
+    let foreign = snapshot("fc3387f5-aa39-44cc-8770-a57cabdc3789", "completed");
+    for (wire, diagnostic) in [
+        (
+            "event: completed\ndata: {\n\n".into(),
+            "EOF while parsing an object",
+        ),
+        (
+            format!(
+                "event: completed\ndata: {}\n\n",
+                json!({"event":"completed","data":foreign})
+            ),
+            "Runtime event identity or state mismatch",
+        ),
+        (
+            format!(
+                "event: progress\ndata: {}\n\n",
+                json!({"event":"completed","data":data})
+            ),
+            "Runtime event identity or state mismatch",
+        ),
+        (
+            format!(
+                "event: completed\ndata: {}\n\n",
+                json!({"event":"progress","data":data})
+            ),
+            "Runtime event identity or state mismatch",
+        ),
+    ] {
+        failed_diagnostic(
+            vec![ready(), running_snapshot(), ready(), events(wire)],
+            diagnostic,
+        )?;
+    }
+    Ok(())
+}
+
+#[test]
+fn operation_discards_truncated_sse_frame_and_recovers_snapshot() -> Result<()> {
+    let truncated = json!({"event":"completed","data":snapshot(ID,"completed")});
+    // The terminal payload is valid JSON, but EOF without a blank line does not dispatch it.
+    let wire = format!("event: completed\ndata: {truncated}\n");
+    let recovered = snapshot(ID, "failed");
+    let output = invoke(vec![
+        ready(),
+        running_snapshot(),
+        ready(),
+        events(wire),
+        ready(),
+        (SNAPSHOT, "200 OK", JSON, recovered.to_string()),
+        ready(),
+    ])?;
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let envelope: Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(envelope["command"], "runtime.operation");
+    assert_eq!(envelope["summary"], recovered);
+    Ok(())
+}
+
+#[test]
+fn operation_stops_after_repeated_sse_disconnects() -> Result<()> {
+    failed_diagnostic(
+        vec![
+            ready(),
+            running_snapshot(),
+            ready(),
+            events(String::new()),
+            ready(),
+            running_snapshot(),
+            ready(),
+            events(String::new()),
+        ],
+        "Runtime event stream disconnected repeatedly",
+    )
+}
+
 #[test]
 fn unsupported_runtime_and_foreign_operation_fail_closed() -> Result<()> {
     for (script, diagnostic) in [
