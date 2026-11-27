@@ -24,6 +24,30 @@ test("separates exact runtime, CLI, and Client2 tags", () => {
   }
 });
 
+test("publish jobs require successful prerequisites and a non-cancelled run", async () => {
+  const workflow = await readFile(new URL("../.github/workflows/release.yml", import.meta.url), "utf8");
+  for (const [component, job] of [["runtime", "runtime-assembly"], ["cli", "npm-dry-run"], ["client2", "desktop-assembly"]]) {
+    const condition = new RegExp(`^  publish-${component}:\\r?\\n(?:    [^\\r\\n]*\\r?\\n)*?    if: \\$\\{\\{ (.+?) \\}\\}$`, "m")
+      .exec(workflow)?.[1];
+    assert.ok(condition, `Missing publish-${component} condition`);
+    assert.ok(!condition.includes("||"), `publish-${component} must use conjunctions`);
+    const clauses = condition.split(" && ");
+    for (const clause of ["!cancelled()", "needs.tag-plan.result == 'success'", `needs.${job}.result == 'success'`]) {
+      assert.ok(clauses.includes(clause), `publish-${component} must require ${clause}`);
+    }
+  }
+});
+
+test("CLI musl builds mount workspace dependencies and cache under the CLI directory", async () => {
+  const cliScripts = new URL("../apps/cli/scripts/", import.meta.url);
+  const host = await readFile(new URL("build-linux-musl.sh", cliScripts), "utf8");
+  assert.match(host, /-v "\$root:\/workspace\/apps\/cli"/);
+  assert.match(host, /-v "\$repo_root\/packages\/runtime-sdk-rs:\/workspace\/packages\/runtime-sdk-rs:ro"/);
+  assert.match(host, /-v "\$repo_root\/contracts\/runtime-api:\/workspace\/contracts\/runtime-api:ro"/);
+  const container = await readFile(new URL("build-linux-musl-container.sh", cliScripts), "utf8");
+  assert.match(container, /^export CARGO_HOME="\/workspace\/apps\/cli\/target\/musl-cache\/\$TARGET\/cargo"$/m);
+});
+
 test("CLI pack inventory agrees with the current producer and actual launcher selection", async () => {
   const cli = new URL("../apps/cli/", import.meta.url);
   const manifest = JSON.parse(await readFile(new URL("npm/artifact-manifest.json", cli), "utf8"));
