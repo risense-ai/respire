@@ -432,6 +432,9 @@ main {
   align-items: flex-start;
   margin-bottom: 22px;
 }
+[data-overview-summary] .page-heading {
+  flex-wrap: wrap;
+}
 .page-heading p {
   font-size: 0.875rem;
   line-height: 1.8;
