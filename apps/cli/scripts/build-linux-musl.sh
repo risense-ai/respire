@@ -9,6 +9,7 @@ case "$target:$(uname -m)" in
 esac
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
+repo_root=$(cd "$root/../.." && pwd)
 mkdir -p "$root/target/musl-cache/$target"
 action="${2:-build}"
 case "$action" in build|candidate|key|pack) ;; *) echo 'invalid release cache action' >&2; exit 1 ;; esac
@@ -16,11 +17,11 @@ image=rust:1.95.0-alpine3.23
 if ! docker image inspect "$image" >/dev/null 2>&1; then docker pull "$image"; fi
 image="$(docker image inspect "$image" --format '{{.Id}}')"
 docker run --rm \
-  -v "$root:/workspace" -w /workspace \
+  -v "$root:/workspace/apps/cli" -v "$repo_root/packages/runtime-sdk-rs:/workspace/packages/runtime-sdk-rs:ro" -v "$repo_root/contracts/runtime-api:/workspace/contracts/runtime-api:ro" -w /workspace/apps/cli \
   -e TARGET="$target" -e RELEASE_CACHE_ACTION="$action" \
   -e RELEASE_DEPENDENCY_CACHE="${RELEASE_DEPENDENCY_CACHE:-}" \
   -e GITHUB_SHA -e GITHUB_RUN_ID -e GITHUB_RUN_ATTEMPT \
-  -e RELEASE_CONTAINER_IMAGE="$image" -e GITHUB_OUTPUT=/workspace/.rust-release-output \
+  -e RELEASE_CONTAINER_IMAGE="$image" -e GITHUB_OUTPUT=/workspace/apps/cli/.rust-release-output \
   "$image" sh scripts/build-linux-musl-container.sh
 if [ "$action" = key ]; then
   cat "$root/.rust-release-output" >> "${GITHUB_OUTPUT:?release key requires GITHUB_OUTPUT}"

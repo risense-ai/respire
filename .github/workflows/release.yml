@@ -611,7 +611,7 @@ jobs:
 
   publish-runtime:
     needs: [tag-plan, runtime-assembly]
-    if: github.repository == 'risense-ai/respire' && github.event_name == 'push' && github.ref_type == 'tag' && !github.event.deleted && needs.tag-plan.outputs.component == 'runtime' && needs.tag-plan.outputs.tag == github.ref_name
+    if: ${{ !cancelled() && needs.tag-plan.result == 'success' && needs.runtime-assembly.result == 'success' && github.repository == 'risense-ai/respire' && github.event_name == 'push' && github.ref_type == 'tag' && !github.event.deleted && needs.tag-plan.outputs.component == 'runtime' && needs.tag-plan.outputs.tag == github.ref_name }}
     permissions: {contents: write}
     runs-on: ubuntu-22.04
     timeout-minutes: 20
@@ -640,7 +640,7 @@ jobs:
           gh release create "$RELEASE_TAG" --repo risense-ai/respire --verify-tag --title "$RELEASE_TAG" --notes "Built from $GITHUB_SHA." "${flags[@]}" ./*
   publish-cli:
     needs: [tag-plan, npm-dry-run]
-    if: github.repository == 'risense-ai/respire' && github.event_name == 'push' && github.ref_type == 'tag' && !github.event.deleted && needs.tag-plan.outputs.component == 'cli' && needs.tag-plan.outputs.tag == github.ref_name
+    if: ${{ !cancelled() && needs.tag-plan.result == 'success' && needs.npm-dry-run.result == 'success' && github.repository == 'risense-ai/respire' && github.event_name == 'push' && github.ref_type == 'tag' && !github.event.deleted && needs.tag-plan.outputs.component == 'cli' && needs.tag-plan.outputs.tag == github.ref_name }}
     permissions: {contents: write}
     runs-on: ubuntu-22.04
     timeout-minutes: 20
@@ -669,7 +669,7 @@ jobs:
           gh release create "$RELEASE_TAG" --repo risense-ai/respire --verify-tag --title "$RELEASE_TAG" --notes "Built from $GITHUB_SHA." "${flags[@]}" ./*
   publish-client2:
     needs: [tag-plan, desktop-assembly]
-    if: github.repository == 'risense-ai/respire' && github.event_name == 'push' && github.ref_type == 'tag' && !github.event.deleted && needs.tag-plan.outputs.component == 'client2' && needs.tag-plan.outputs.tag == github.ref_name
+    if: ${{ !cancelled() && needs.tag-plan.result == 'success' && needs.desktop-assembly.result == 'success' && github.repository == 'risense-ai/respire' && github.event_name == 'push' && github.ref_type == 'tag' && !github.event.deleted && needs.tag-plan.outputs.component == 'client2' && needs.tag-plan.outputs.tag == github.ref_name }}
     permissions: {contents: write}
     runs-on: ubuntu-22.04
     timeout-minutes: 20
