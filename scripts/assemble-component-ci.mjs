@@ -32,7 +32,7 @@ export async function readWorkflowEvent(path) {
   }
 }
 
-export function workflowIdentity(env, event) {
+export function workflowIdentity(env, event, tag) {
   assert.equal(env.GITHUB_ACTIONS, "true", "Requires GitHub Actions");
   assert.equal(env.RUNNER_ENVIRONMENT, "github-hosted", "Requires GitHub-hosted runner");
   assert.equal(env.GITHUB_REPOSITORY, repository, "Unexpected repository");
@@ -53,6 +53,11 @@ export function workflowIdentity(env, event) {
     assert.equal(pr?.base?.ref, "main", "Unexpected PR base branch");
     assert(pr?.labels?.some(label => label.name === "native-release-dry-run"),
       "Expected native release dry-run opt-in");
+  } else if (env.GITHUB_EVENT_NAME === "push") {
+    const ref = "refs/tags/" + parseComponentTag(tag).tag;
+    assert.equal(env.GITHUB_REF, ref, "Expected the matching component tag ref");
+    assert.equal(event.ref, ref, "Push event ref differs");
+    assert.equal(event.deleted, false, "Deleted tags cannot assemble releases");
   } else {
     assert.equal(env.GITHUB_EVENT_NAME, "workflow_dispatch", "Unexpected dry-run event");
     assert.equal(env.GITHUB_REF, "refs/heads/main", "Workflow dispatch must use trusted main");
@@ -84,7 +89,7 @@ async function run(args, env) {
   const plan = parseComponentTag(tag);
   assert.equal(npm !== "-", plan.component === "cli", "Exactly CLI needs npm packs");
   assert(isAbsolute(env.GITHUB_EVENT_PATH ?? ""), "Missing GitHub event path");
-  const provenance = workflowIdentity(env, await readWorkflowEvent(env.GITHUB_EVENT_PATH));
+  const provenance = workflowIdentity(env, await readWorkflowEvent(env.GITHUB_EVENT_PATH), tag);
   const workspace = await exactDirectory(env.GITHUB_WORKSPACE ?? "");
   const checkout = resolve(dirname(process.argv[1]), "..");
   assert.equal(await realpath(checkout), workspace, "Assembler is not running from the Actions checkout");

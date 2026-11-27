@@ -40,11 +40,12 @@ assert.equal(run('git', ['status', '--porcelain', '--untracked-files=no']).trim(
 const tag = env.RUNTIME_COMPONENT_TAG;
 const {component, version} = parseComponentTag(tag);
 assert.equal(component, 'runtime');
+if (env.GITHUB_EVENT_NAME === 'push') assert.equal(env.GITHUB_REF, `refs/tags/${tag}`);
 const manifest = readFileSync(join(root, 'apps/runtime/runtime/Cargo.toml'), 'utf8');
 const lock = readFileSync(join(root, 'apps/runtime/Cargo.lock'), 'utf8');
-assert.equal(/^version = "([^"]+)"/m.exec(manifest)?.[1], version, 'Dispatch tag differs from checked-in Runtime version');
+assert.equal(/^version = "([^"]+)"/m.exec(manifest)?.[1], version, 'Tag differs from checked-in Runtime version');
 assert.equal(/\[\[package\]\]\r?\nname = "respire_runtime"\r?\nversion = "([^"]+)"/.exec(lock)?.[1], version,
-  'Dispatch tag differs from checked-in Runtime lockfile');
+  'Tag differs from checked-in Runtime lockfile');
 
 const work = mkdtempSync(join(nativeRealpath(env.RUNNER_TEMP), `runtime-release-${lane}-`));
 const targetDir = join(work, 'cargo-target'), cargoLog = join(work, 'cargo.jsonl');

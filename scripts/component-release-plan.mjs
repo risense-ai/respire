@@ -199,12 +199,38 @@ export async function verifyLocalRelease({tag, source, monorepoDir, legacyDir, n
   return {mode: "dry-run", ...plan, source, assets, npm};
 }
 
+async function verifyPublication(tag, directory, env) {
+  const plan = parseComponentTag(tag);
+  assert.equal(env.GITHUB_EVENT_NAME, "push");
+  assert.equal(env.GITHUB_REPOSITORY, plan.monorepo);
+  assert.equal(env.GITHUB_REF, "refs/tags/" + tag);
+  assert.equal(env.RELEASE_CHANNEL, plan.channel);
+  const expected = expectedReleaseAssets(tag);
+  const receiptName = "component-release-receipt.json";
+  const files = await examine(directory, [receiptName, ...expected.github, ...Object.values(expected.npm)]);
+  const {schema, provenance, receipt} = metadata(files, receiptName);
+  assert.equal(schema, 1);
+  assert.deepEqual(provenance, {
+    repository: plan.monorepo, event: "push", source: env.GITHUB_SHA,
+    workflow_ref: env.GITHUB_WORKFLOW_REF, workflow_sha: env.GITHUB_WORKFLOW_SHA,
+    run_id: env.GITHUB_RUN_ID, run_attempt: env.GITHUB_RUN_ATTEMPT,
+  });
+  for (const [key, value] of Object.entries(plan)) assert.equal(receipt[key], value);
+  assert.equal(receipt.source, env.GITHUB_SHA);
+  const inventory = names => summarize(Object.fromEntries(names.map(name => [name, files[name]])));
+  assert.deepEqual(receipt.assets, inventory(expected.github));
+  assert.deepEqual(receipt.npm, inventory(Object.values(expected.npm)));
+}
+
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const [operation, tag, source, monorepoDir, legacyDir, npmDir, ...extra] = process.argv.slice(2);
   assert(extra.length === 0, "Unexpected release plan arguments");
   if (operation === "tag") {
     assert(source === undefined, "Tag accepts exactly one argument");
     console.log(JSON.stringify(parseComponentTag(tag)));
+  } else if (operation === "verify-publication") {
+    assert(tag && source && monorepoDir === undefined, "Usage: component-release-plan.mjs verify-publication <tag> <asset-dir>");
+    await verifyPublication(tag, source, process.env);
   } else {
     assert(operation === "dry-run" && tag && source && monorepoDir && legacyDir,
       "Usage: component-release-plan.mjs tag <tag> | dry-run <tag> <source-sha> <monorepo-dir> <legacy-dir> [npm-dir]");

@@ -1,4 +1,4 @@
-name: Component native release dry run
+name: Component native release
 
 on:
   push:
@@ -32,15 +32,24 @@ jobs:
     if: github.repository == 'risense-ai/respire' && github.event_name == 'push' && github.ref_type == 'tag' && !github.event.deleted
     runs-on: ubuntu-22.04
     timeout-minutes: 2
+    outputs:
+      component: ${{ steps.plan.outputs.component }}
+      version: ${{ steps.plan.outputs.version }}
+      channel: ${{ steps.plan.outputs.channel }}
+      tag: ${{ steps.plan.outputs.tag }}
+      legacy: ${{ steps.plan.outputs.legacy }}
+      legacy_tag: ${{ steps.plan.outputs.legacy_tag }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
       - name: Resolve component and legacy tag offline
+        id: plan
         run: |
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          node scripts/component-release-plan.mjs tag "$GITHUB_REF_NAME"
+          plan=$(node scripts/component-release-plan.mjs tag "$GITHUB_REF_NAME")
+          jq -r 'del(.monorepo) | .legacy_tag = .legacyTag | del(.legacyTag) | to_entries[] | "\(.key)=\(.value)"' <<< "$plan" >> "$GITHUB_OUTPUT"
 
   eligible:
     if: >-
@@ -56,7 +65,8 @@ jobs:
 
   native:
     name: Runtime / ${{ matrix.lane }}
-    needs: eligible
+    needs: [eligible, tag-plan]
+    if: ${{ !cancelled() && (needs.eligible.result == 'success' || (needs.tag-plan.result == 'success' && needs.tag-plan.outputs.component == 'runtime')) }}
     strategy:
       fail-fast: false
       matrix:
@@ -73,18 +83,16 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: ${{ matrix.lane == 'macos-intel' && 135 || 50 }}
     env:
-      RUNTIME_COMPONENT_TAG: runtime-v2.0.0-dev.31
+      RUNTIME_COMPONENT_TAG: ${{ needs.tag-plan.outputs.tag || 'runtime-v2.0.0-dev.32' }}
       RUNTIME_DRY_RUN_LANE: ${{ matrix.lane }}
       RUST_HOST: ${{ matrix.target }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
       - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-          architecture: ${{ matrix.node_arch }}
+        with: {node-version: '22', architecture: '${{ matrix.node_arch }}'}
       - name: Install pinned native Rust
         shell: bash
         run: |
@@ -102,8 +110,8 @@ jobs:
           path: release-evidence/runtime-${{ matrix.lane }}.json
           if-no-files-found: error
           retention-days: 7
-      - name: Keep the verified main-branch dry-run bytes
-        if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+      - name: Keep the verified Runtime bytes
+        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
         uses: actions/upload-artifact@v4
         with:
           name: runtime-${{ matrix.lane }}-payload-${{ github.run_id }}-${{ github.run_attempt }}
@@ -117,18 +125,19 @@ jobs:
 
   runtime-assembly:
     name: Verify six native Runtime lanes from this attempt
-    needs: native
-    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    needs: [native, tag-plan]
+    if: ${{ !cancelled() && needs.native.result == 'success' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) }}
     runs-on: ubuntu-22.04
     timeout-minutes: 30
+    env:
+      RUNTIME_COMPONENT_TAG: ${{ needs.tag-plan.outputs.tag || 'runtime-v2.0.0-dev.32' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
       - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
+        with: {node-version: '22'}
       - uses: actions/download-artifact@v4
         with:
           pattern: runtime-*-evidence-${{ github.run_id }}-${{ github.run_attempt }}
@@ -140,18 +149,37 @@ jobs:
           path: ${{ runner.temp }}/runtime-payload
           merge-multiple: false
       - run: >-
-          node scripts/assemble-runtime-release-ci.mjs runtime-v2.0.0-dev.31
+          node scripts/assemble-runtime-release-ci.mjs "$RUNTIME_COMPONENT_TAG"
           "$RUNNER_TEMP/runtime-evidence" "$RUNNER_TEMP/runtime-payload" "$RUNNER_TEMP/runtime-assembly"
       - uses: actions/upload-artifact@v4
+        if: github.event_name == 'workflow_dispatch'
         with:
           name: runtime-component-receipt-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/runtime-assembly/component-release-receipt.json
           if-no-files-found: error
           retention-days: 2
+      - name: Stage verified release assets
+        if: github.event_name == 'push'
+        env:
+          COMPONENT: ${{ needs.tag-plan.outputs.component }}
+        run: |
+          assembly="$RUNNER_TEMP/$COMPONENT-assembly"
+          output="$RUNNER_TEMP/release-assets"
+          mkdir "$output"
+          cp -l "$assembly/component-release-receipt.json" "$assembly"/component-release-dry-run-*/monorepo/* "$output/"
+          if [[ "$COMPONENT" == cli ]]; then cp -l "$assembly"/component-release-dry-run-*/npm/* "$output/"; fi
+      - uses: actions/upload-artifact@v4
+        if: github.event_name == 'push'
+        with:
+          name: ${{ needs.tag-plan.outputs.component }}-release-assets-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release-assets/
+          if-no-files-found: error
+          compression-level: 0
 
   cli:
     name: CLI / ${{ matrix.target }}
-    needs: eligible
+    needs: [eligible, tag-plan]
+    if: ${{ !cancelled() && (needs.eligible.result == 'success' || (needs.tag-plan.result == 'success' && needs.tag-plan.outputs.component == 'cli')) }}
     strategy:
       fail-fast: false
       matrix:
@@ -174,15 +202,14 @@ jobs:
       NATIVE_ARCH: ${{ matrix.node_arch }}
       RUST_HOST: ${{ matrix.host }}
       CLI_TARGET: ${{ matrix.target }}
+      RELEASE_VERSION: ${{ needs.tag-plan.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
       - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-          architecture: ${{ matrix.node_arch }}
+        with: {node-version: '22', architecture: '${{ matrix.node_arch }}'}
       - name: Install pinned native Rust
         shell: bash
         run: |
@@ -193,6 +220,9 @@ jobs:
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           test "$RUNNER_ENVIRONMENT" = github-hosted
+          if [[ "$GITHUB_EVENT_NAME" == push ]]; then
+            test "$RELEASE_VERSION" = "$(node -p 'require("./npm/artifact-manifest.json").cliVersion')"
+          fi
           node -e 'const a = require("node:assert/strict"); a.equal(process.arch, process.env.NATIVE_ARCH); a.equal(process.env.RUNNER_ARCH.toLowerCase(), process.arch);'
           test "$(rustc +1.95.0 -vV | tr -d '\r' | sed -n 's/^host: //p')" = "$RUST_HOST"
           if [[ "$RUNNER_OS" == macOS && "$NATIVE_ARCH" == x64 ]]; then
@@ -219,20 +249,21 @@ jobs:
 
   npm-dry-run:
     name: CLI / no-publish packing and byte assembly
-    needs: cli
+    needs: [cli, tag-plan]
+    if: ${{ !cancelled() && needs.cli.result == 'success' }}
     runs-on: ubuntu-22.04
     timeout-minutes: 15
     env:
       CLI_PRODUCER_RUN_ID: ${{ github.run_id }}
       CLI_PRODUCER_ATTEMPT: ${{ github.run_attempt }}
+      COMPONENT_TAG: ${{ needs.tag-plan.outputs.tag }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
       - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
+        with: {node-version: '22'}
       - name: Download only this run and attempt's CLI binary pairs
         uses: actions/download-artifact@v4
         with:
@@ -253,7 +284,7 @@ jobs:
         run: |
           set -euo pipefail
           version="$(node -p 'require("./apps/cli/npm/artifact-manifest.json").cliVersion')"
-          node scripts/assemble-component-ci.mjs "cli-v$version" "$RUNNER_TEMP/cli-native" "$RUNNER_TEMP/cli-npm" "$RUNNER_TEMP/cli-assembly"
+          node scripts/assemble-component-ci.mjs "${COMPONENT_TAG:-cli-v$version}" "$RUNNER_TEMP/cli-native" "$RUNNER_TEMP/cli-npm" "$RUNNER_TEMP/cli-assembly"
       - name: Keep CLI packaging and local assembly evidence
         uses: actions/upload-artifact@v4
         with:
@@ -264,10 +295,28 @@ jobs:
             ${{ runner.temp }}/cli-packs/SHA256SUMS
           if-no-files-found: error
           retention-days: 7
+      - name: Stage verified release assets
+        if: github.event_name == 'push'
+        env:
+          COMPONENT: ${{ needs.tag-plan.outputs.component }}
+        run: |
+          assembly="$RUNNER_TEMP/$COMPONENT-assembly"
+          output="$RUNNER_TEMP/release-assets"
+          mkdir "$output"
+          cp -l "$assembly/component-release-receipt.json" "$assembly"/component-release-dry-run-*/monorepo/* "$output/"
+          if [[ "$COMPONENT" == cli ]]; then cp -l "$assembly"/component-release-dry-run-*/npm/* "$output/"; fi
+      - uses: actions/upload-artifact@v4
+        if: github.event_name == 'push'
+        with:
+          name: ${{ needs.tag-plan.outputs.component }}-release-assets-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release-assets/
+          if-no-files-found: error
+          compression-level: 0
 
   desktop:
     name: Client2 / build ${{ matrix.platform }}-${{ matrix.arch }}
-    needs: eligible
+    needs: [eligible, tag-plan]
+    if: ${{ !cancelled() && (needs.eligible.result == 'success' || (needs.tag-plan.result == 'success' && needs.tag-plan.outputs.component == 'client2')) }}
     strategy:
       fail-fast: false
       matrix:
@@ -281,19 +330,17 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     env:
-      CANDIDATE_VERSION: '2.0.0-dev.13'
+      CANDIDATE_VERSION: ${{ needs.tag-plan.outputs.version || '2.0.0-dev.26' }}
       CLIENT2_PLATFORM: ${{ matrix.platform }}
       CLIENT2_ARCH: ${{ matrix.arch }}
       NATIVE_ARCH: ${{ matrix.node_arch }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
       - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-          architecture: ${{ matrix.node_arch }}
+        with: {node-version: '22', architecture: '${{ matrix.node_arch }}'}
       - uses: actions/setup-go@v5
         with:
           go-version-file: apps/client2/go.mod
@@ -364,20 +411,20 @@ jobs:
 
   desktop-candidate:
     name: Client2 / bind all nine exact package bytes
-    needs: desktop
+    needs: [desktop, tag-plan]
+    if: ${{ !cancelled() && needs.desktop.result == 'success' }}
     runs-on: ubuntu-22.04
     timeout-minutes: 10
     env:
-      CANDIDATE_VERSION: '2.0.0-dev.13'
+      CANDIDATE_VERSION: ${{ needs.tag-plan.outputs.version || '2.0.0-dev.26' }}
       CANDIDATE_SOURCE: ${{ github.sha }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
       - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
+        with: {python-version: '3.12'}
       - name: Download only this run and attempt's six Client2 payloads
         uses: actions/download-artifact@v4
         with:
@@ -413,7 +460,11 @@ jobs:
           cp LICENSE "$candidate/LICENSE.txt"
           cp internal/desktop/frontend/notices.txt "$candidate/THIRD_PARTY_NOTICES.txt"
           (cd "$candidate" && sha256sum respire-* > SHA256SUMS)
-          printf 'Client2 %s native packaging dry run for source %s. This is not a release.\n' "$CANDIDATE_VERSION" "$CANDIDATE_SOURCE" > "$candidate/release-notes.md"
+          if [[ "$GITHUB_EVENT_NAME" == push ]]; then
+            printf 'Client2 %s built from source %s.\n' "$CANDIDATE_VERSION" "$CANDIDATE_SOURCE" > "$candidate/release-notes.md"
+          else
+            printf 'Client2 %s native packaging dry run for source %s. This is not a release.\n' "$CANDIDATE_VERSION" "$CANDIDATE_SOURCE" > "$candidate/release-notes.md"
+          fi
           python scripts/update-manifest.py "v$CANDIDATE_VERSION" "$candidate" "$candidate/release-notes.md" "$candidate/client-updates.json" 6
           python scripts/desktop-candidate.py manifest --root "$candidate"
       - name: Keep source-bound Client2 candidate for six native checks
@@ -427,7 +478,8 @@ jobs:
 
   desktop-package-check:
     name: Client2 / smoke ${{ matrix.target }}
-    needs: desktop-candidate
+    needs: [desktop-candidate, tag-plan]
+    if: ${{ !cancelled() && needs.desktop-candidate.result == 'success' }}
     strategy:
       fail-fast: false
       matrix:
@@ -441,11 +493,11 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 25
     env:
-      CANDIDATE_VERSION: '2.0.0-dev.13'
+      CANDIDATE_VERSION: ${{ needs.tag-plan.outputs.version || '2.0.0-dev.26' }}
       CANDIDATE_SOURCE: ${{ github.sha }}
       CLIENT2_TARGET: ${{ matrix.target }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
@@ -454,9 +506,7 @@ jobs:
           python-version: '3.12'
           architecture: ${{ matrix.node_arch }}
       - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-          architecture: ${{ matrix.node_arch }}
+        with: {node-version: '22', architecture: '${{ matrix.node_arch }}'}
       - name: Install native Linux desktop smoke dependencies
         if: startsWith(matrix.target, 'linux-')
         timeout-minutes: 7
@@ -490,23 +540,23 @@ jobs:
 
   desktop-assembly:
     name: Client2 / seal receipts and assemble both namespaces locally
-    needs: desktop-package-check
+    needs: [desktop-package-check, tag-plan]
+    if: ${{ !cancelled() && needs.desktop-package-check.result == 'success' }}
     runs-on: ubuntu-22.04
     timeout-minutes: 10
     env:
-      CANDIDATE_VERSION: '2.0.0-dev.13'
+      CANDIDATE_VERSION: ${{ needs.tag-plan.outputs.version || '2.0.0-dev.26' }}
       CANDIDATE_SOURCE: ${{ github.sha }}
+      COMPONENT_TAG: ${{ needs.tag-plan.outputs.tag }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
       - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
+        with: {python-version: '3.12'}
       - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
+        with: {node-version: '22'}
       - uses: actions/download-artifact@v4
         with:
           name: client2-candidate-${{ github.run_id }}-${{ github.run_attempt }}
@@ -530,7 +580,7 @@ jobs:
               *) cp "$file" "$payload/";;
             esac
           done
-          node scripts/assemble-component-ci.mjs "client2-v$CANDIDATE_VERSION" "$payload" - "$RUNNER_TEMP/client2-assembly"
+          node scripts/assemble-component-ci.mjs "${COMPONENT_TAG:-client2-v$CANDIDATE_VERSION}" "$payload" - "$RUNNER_TEMP/client2-assembly"
       - name: Keep Client2 native and local assembly evidence
         uses: actions/upload-artifact@v4
         with:
@@ -541,3 +591,108 @@ jobs:
             ${{ runner.temp }}/client2-assembly/component-release-receipt.json
           if-no-files-found: error
           retention-days: 7
+      - name: Stage verified release assets
+        if: github.event_name == 'push'
+        env:
+          COMPONENT: ${{ needs.tag-plan.outputs.component }}
+        run: |
+          assembly="$RUNNER_TEMP/$COMPONENT-assembly"
+          output="$RUNNER_TEMP/release-assets"
+          mkdir "$output"
+          cp -l "$assembly/component-release-receipt.json" "$assembly"/component-release-dry-run-*/monorepo/* "$output/"
+          if [[ "$COMPONENT" == cli ]]; then cp -l "$assembly"/component-release-dry-run-*/npm/* "$output/"; fi
+      - uses: actions/upload-artifact@v4
+        if: github.event_name == 'push'
+        with:
+          name: ${{ needs.tag-plan.outputs.component }}-release-assets-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release-assets/
+          if-no-files-found: error
+          compression-level: 0
+
+  publish-runtime:
+    needs: [tag-plan, runtime-assembly]
+    if: github.repository == 'risense-ai/respire' && github.event_name == 'push' && github.ref_type == 'tag' && !github.event.deleted && needs.tag-plan.outputs.component == 'runtime' && needs.tag-plan.outputs.tag == github.ref_name
+    permissions: {contents: write}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with: {node-version: '22'}
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.tag-plan.outputs.component }}-release-assets-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release-assets
+      - name: Publish the verified component assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.tag-plan.outputs.tag }}
+          RELEASE_CHANNEL: ${{ needs.tag-plan.outputs.channel }}
+        run: |
+          node scripts/component-release-plan.mjs verify-publication "$RELEASE_TAG" "$RUNNER_TEMP/release-assets"
+          cd "$RUNNER_TEMP/release-assets"
+          test "$(gh api "repos/risense-ai/respire/commits/refs/tags/$RELEASE_TAG" --jq .sha)" = "$GITHUB_SHA"
+          flags=()
+          if [[ "$RELEASE_CHANNEL" == dev ]]; then flags+=(--prerelease); fi
+          gh release create "$RELEASE_TAG" --repo risense-ai/respire --verify-tag --title "$RELEASE_TAG" --notes "Built from $GITHUB_SHA." "${flags[@]}" ./*
+  publish-cli:
+    needs: [tag-plan, npm-dry-run]
+    if: github.repository == 'risense-ai/respire' && github.event_name == 'push' && github.ref_type == 'tag' && !github.event.deleted && needs.tag-plan.outputs.component == 'cli' && needs.tag-plan.outputs.tag == github.ref_name
+    permissions: {contents: write}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with: {node-version: '22'}
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.tag-plan.outputs.component }}-release-assets-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release-assets
+      - name: Publish the verified component assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.tag-plan.outputs.tag }}
+          RELEASE_CHANNEL: ${{ needs.tag-plan.outputs.channel }}
+        run: |
+          node scripts/component-release-plan.mjs verify-publication "$RELEASE_TAG" "$RUNNER_TEMP/release-assets"
+          cd "$RUNNER_TEMP/release-assets"
+          test "$(gh api "repos/risense-ai/respire/commits/refs/tags/$RELEASE_TAG" --jq .sha)" = "$GITHUB_SHA"
+          flags=()
+          if [[ "$RELEASE_CHANNEL" == dev ]]; then flags+=(--prerelease); fi
+          gh release create "$RELEASE_TAG" --repo risense-ai/respire --verify-tag --title "$RELEASE_TAG" --notes "Built from $GITHUB_SHA." "${flags[@]}" ./*
+  publish-client2:
+    needs: [tag-plan, desktop-assembly]
+    if: github.repository == 'risense-ai/respire' && github.event_name == 'push' && github.ref_type == 'tag' && !github.event.deleted && needs.tag-plan.outputs.component == 'client2' && needs.tag-plan.outputs.tag == github.ref_name
+    permissions: {contents: write}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with: {node-version: '22'}
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.tag-plan.outputs.component }}-release-assets-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release-assets
+      - name: Publish the verified component assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.tag-plan.outputs.tag }}
+          RELEASE_CHANNEL: ${{ needs.tag-plan.outputs.channel }}
+        run: |
+          node scripts/component-release-plan.mjs verify-publication "$RELEASE_TAG" "$RUNNER_TEMP/release-assets"
+          cd "$RUNNER_TEMP/release-assets"
+          test "$(gh api "repos/risense-ai/respire/commits/refs/tags/$RELEASE_TAG" --jq .sha)" = "$GITHUB_SHA"
+          flags=()
+          if [[ "$RELEASE_CHANNEL" == dev ]]; then flags+=(--prerelease); fi
+          gh release create "$RELEASE_TAG" --repo risense-ai/respire --verify-tag --title "$RELEASE_TAG" --notes "Built from $GITHUB_SHA." "${flags[@]}" ./*
