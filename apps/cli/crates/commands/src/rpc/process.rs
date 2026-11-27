@@ -1,4 +1,6 @@
 use super::*;
+#[cfg(any(test, unix))]
+use std::path::Path;
 
 pub fn process_is_running(pid: u32) -> Result<bool> {
     #[cfg(target_os = "linux")]
@@ -69,6 +71,7 @@ pub struct RuntimeProcessIdentity {
 
 /// An endpoint PID is only a locator. Verify runtime arguments and creation time
 /// before waiting, then compare again before forcefully terminating the process.
+#[cfg(any(test, all(unix, not(target_os = "linux"))))]
 fn foreground_runtime_arguments(args: &[&str]) -> bool {
     let standalone = args.first().is_some_and(|program| {
         Path::new(program).file_name().and_then(|name| name.to_str()) == Some("rsrs-runtime")
@@ -84,6 +87,7 @@ fn foreground_runtime_arguments(args: &[&str]) -> bool {
         || (command == Some("runtime") && args.next() == Some("run"))
 }
 
+#[cfg(any(test, target_os = "linux"))]
 fn runtime_role_arguments(executable: &Path, args: &[&str]) -> bool {
     let image_name = executable
         .file_name()
@@ -124,6 +128,7 @@ fn runtime_role_arguments(executable: &Path, args: &[&str]) -> bool {
     combined_foreground_runtime_arguments(args)
 }
 
+#[cfg(any(test, target_os = "linux"))]
 fn combined_foreground_runtime_arguments(args: &[&str]) -> bool {
     let mut args = args.iter().copied().skip(1);
     let command = loop {

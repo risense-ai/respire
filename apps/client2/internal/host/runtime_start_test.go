@@ -190,6 +190,7 @@ func TestStandaloneMaintenanceWithoutHostAuthority(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		run  func(context.Context) error
+		want error
 	}{
 		{"uninstall", func(ctx context.Context) error {
 			result, err := m.uninstallM3Locked(ctx)
@@ -197,7 +198,7 @@ func TestStandaloneMaintenanceWithoutHostAuthority(t *testing.T) {
 				t.Fatalf("unadmitted removal returned a result: %s", result)
 			}
 			return err
-		}},
+		}, errOnlineModelUnavailable},
 		{"account", func(ctx context.Context) error {
 			_, lock, err := m.beginOfflineRuntimeAccountMaintenance(ctx, m.DataRoot, "test-issuer", runtimeLoginIntent{
 				OperationID: "25bf4cf1-9865-47fa-bf59-5147307883f9", User: "fixture", Server: "https://example.invalid",
@@ -206,14 +207,14 @@ func TestStandaloneMaintenanceWithoutHostAuthority(t *testing.T) {
 				t.Fatal("unadmitted account operation received ownership")
 			}
 			return err
-		}},
-		{"settings", func(ctx context.Context) error { return m.SetWorkspaceMode(ctx, "readonly") }},
+		}, errRuntimeHostAuthorityUnavailable},
+		{"settings", func(ctx context.Context) error { return m.SetWorkspaceMode(ctx, "readonly") }, errRuntimeHostAuthorityUnavailable},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 			defer cancel()
-			if err := tc.run(ctx); !errors.Is(err, errRuntimeHostAuthorityUnavailable) {
-				t.Fatalf("maintenance did not expose missing production authority: %v", err)
+			if err := tc.run(ctx); !errors.Is(err, tc.want) {
+				t.Fatalf("maintenance error = %v, want %v", err, tc.want)
 			}
 			if after := standaloneTestSnapshot(t, m.DataRoot); !reflect.DeepEqual(before, after) {
 				t.Fatal("unadmitted maintenance changed disposable profile state")

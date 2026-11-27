@@ -12,10 +12,15 @@ import (
 	"path/filepath"
 	"strconv"
 	"time"
+
+	"respire-client2/internal/i18n"
+
+	runtimesdk "github.com/risense-ai/respire/packages/runtime-sdk-go"
 )
 
 var errOnlineModelUnavailable = errors.New("Runtime could not verify a managed local model for online uninstall")
 var errOnlineModelUnconfirmed = errors.New("Runtime did not confirm the model operation. Check model status before retrying")
+var errM3Active = errors.New(i18n.ModelUninstallActive)
 
 type onlineModelReceipt struct {
 	ModelID       string  `json:"model_id"`
@@ -24,6 +29,64 @@ type onlineModelReceipt struct {
 	Detached      int     `json:"detached_files"`
 	Deleted       int     `json:"deleted_files"`
 	Cleanup       *string `json:"cleanup_error"`
+}
+
+func (m *Manager) uninstallM3(ctx context.Context) (json.RawMessage, error) {
+	var result json.RawMessage
+	err := m.RunTask(i18n.Messagec28b96a00f38a2b7, func() error {
+		var err error
+		result, err = m.uninstallM3Locked(ctx)
+		return err
+	})
+	return result, err
+}
+
+func (m *Manager) uninstallM3Locked(ctx context.Context) (json.RawMessage, error) {
+	release, err := m.holdProfile()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	selected, err := m.Installed()
+	if err != nil {
+		return nil, errors.Join(errOnlineModelUnavailable, err)
+	}
+	if err := m.verifyRuntimeSelection(selected); err != nil {
+		return nil, errors.Join(errOnlineModelUnavailable, err)
+	}
+	if _, _, err := m.runtimeAccountEndpoint(); err != nil {
+		return nil, err
+	}
+	health, _, err := m.Health(ctx)
+	if err != nil {
+		return nil, err
+	}
+	client, supported, err := m.runtimeSDK(ctx, "model.active_assets")
+	if err != nil {
+		return nil, err
+	}
+	if supported {
+		raw, err := sdkJSON(client.GetActiveModelAssets(ctx, m.authorizeRuntime))
+		if err != nil {
+			return nil, err
+		}
+		var assets runtimesdk.ActiveModelAssetsResponse
+		if err := json.Unmarshal(raw, &assets); err != nil || assets.ActiveModelId == "" || assets.ActivePaths == nil {
+			return nil, errOnlineModelUnavailable
+		}
+		if assets.ActiveModelId == "m3" || assets.ActiveModelId == "bge-m3" {
+			return nil, errM3Active
+		}
+	}
+	receipt, err := m.removeRuntimeOwnedModel(ctx, health, "m3")
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(map[string]any{
+		"command": "model", "status": "ok",
+		"summary": map[string]any{"model": "bge-m3", "removed": true, "deleted_files": receipt.Deleted},
+		"items":   []map[string]string{{"name": "model", "status": "ok", "value": "bge-m3"}},
+	})
 }
 
 // Runtime itself checks the listening process, installed endpoint receipt,

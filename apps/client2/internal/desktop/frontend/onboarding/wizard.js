@@ -294,7 +294,6 @@ export function createWizard(ctx) {
       device: "cpu",
       variant: "",
       variantTouched: false,
-      inventories: {},
       stages: {},
       agentScope: "prompt",
       agentTargets: null,

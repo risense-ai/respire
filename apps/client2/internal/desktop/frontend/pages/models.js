@@ -11,7 +11,6 @@ import {
   modeForVariant,
   performanceAvailable,
   detectBestEngine,
-  fetchInventory,
   fetchProfileState,
   readProfileState,
   activeModelScope,
@@ -30,7 +29,7 @@ export function models(root, ctx) {
     runtimeActive: undefined,
     runtimeActiveScope: null,
     legacyEngineState: null,
-    inventory: null,
+    get inventory() { return ctx.modelInventory.get(this.modelID); },
     sawMissingBaseline: false,
     baselinePrepared: false,
     modelID: localStorage.getItem("respire-model") || "m3",
@@ -105,6 +104,8 @@ export function models(root, ctx) {
       `<form data-api class="panel-body stack"><div class="form-grid">${input("base", i18nMessages.md94c3fb876621695, "https://api.deepseek.com/v1", { required: true })}${input("model", i18nMessages.mc98e118e0a43f078, "deepseek-flash", { required: true })}</div>${input("key", i18nMessages.m6f390ff0a6915223, "", { type: "password" })}${i18nMessages.ma276baf02d7ae01d}`,
     ) +
     `<div data-result class="section-gap"></div>`;
+  $("[data-model=providers]", root)?.remove();
+  $("[data-engine-hint]", root).textContent = "";
   const live = $("[data-live]", root);
   function currentMirror() {
     const value = $("[data-mirror] [name=mirror]", root).value;
@@ -152,7 +153,7 @@ export function models(root, ctx) {
         getMirror: currentMirror,
       }).done;
       if (!completed || !root.isConnected) return;
-      view.inventory = await fetchInventory(view.modelID);
+      await ctx.modelInventory.load(view.modelID);
     }
     const variant = modeVariant(mode);
     if (!variant?.installed || !view.inventory?.tokenizer_installed ||
@@ -167,8 +168,7 @@ export function models(root, ctx) {
         label: mode.title,
         getMirror: currentMirror,
       }).done;
-      const fresh = await fetchInventory(view.modelID).catch(() => null);
-      if (fresh) view.inventory = fresh;
+      await ctx.modelInventory.load(view.modelID);
       if (!root.isConnected) return;
       if (view.inventory?.tokenizer_installed && modeVariant(mode)?.installed &&
           (!cpuBaseline || view.inventory.cpu_container_ready))
@@ -303,7 +303,7 @@ export function models(root, ctx) {
         execute("agent_config"),
         execute("model_engine"),
         execute("classification_config", { backend: "ds" }),
-        fetchInventory(view.modelID),
+        ctx.modelInventory.load(view.modelID),
         fetchProfileState(),
       ]);
       if (!root.isConnected) return;
@@ -328,9 +328,9 @@ export function models(root, ctx) {
       }
       if (values[2].status === "fulfilled") backend = summary(values[2].value);
       if (values[3].status === "fulfilled") {
-        view.inventory = values[3].value;
-        if (view.inventory.model && MODEL_OPTIONS.some(([id]) => id === view.inventory.model)) {
-          view.modelID = view.inventory.model;
+        const inventory = values[3].value;
+        if (inventory.model && MODEL_OPTIONS.some(([id]) => id === inventory.model)) {
+          view.modelID = inventory.model;
         }
       }
       if (values[4].status === "fulfilled") {
@@ -345,7 +345,7 @@ export function models(root, ctx) {
           if (!savedModel && known) view.modelID = activeModel;
           if (view.modelID === activeModel) {
             if (view.modelID !== (view.inventory?.model || "")) {
-              view.inventory = await fetchInventory(view.modelID);
+              await ctx.modelInventory.load(view.modelID);
             }
             view.engineState = {
               engine: active.engine || "cpu",
@@ -428,13 +428,12 @@ export function models(root, ctx) {
     if (!MODEL_OPTIONS.some(([id]) => id === next) || next === view.modelID) return;
     view.modelID = next;
     localStorage.setItem("respire-model", view.modelID);
-    view.inventory = null;
     view.profileState = null;
     const node = $("[data-variants]", root);
     if (node) node.innerHTML = i18nMessages.m6cb3cc3ccc61b15a;
     (async () => {
       try {
-        view.inventory = await fetchInventory(view.modelID);
+        await ctx.modelInventory.load(view.modelID);
         await refreshProfileState();
       } catch (error) {
         notify(error.message, true);
@@ -495,9 +494,8 @@ export function models(root, ctx) {
   async function refreshM3Inventory() {
     if (!root.isConnected || view.modelID !== "m3") return true;
     try {
-      const inventory = await fetchInventory("m3");
+      const inventory = await ctx.modelInventory.load("m3");
       if (root.isConnected && view.modelID === "m3" && inventory.model === "m3") {
-        view.inventory = inventory;
         renderVariants();
         renderDynamic(true);
       }

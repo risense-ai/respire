@@ -212,7 +212,7 @@ func (m *Manager) desktopSpaceMembership(ctx context.Context, id string, args []
 	if record.WasServing {
 		h, err := m.startDetachedLocked(ctx, info)
 		if err == nil && (!samePath(h.DataDir, profile) || h.AccountID != account ||
-			!m.isDirectM3Runtime(h)) {
+			!m.ownsDirectRuntime(h)) {
 			err = errors.New(i18n.Messageb77de293ad41644e)
 		}
 		if err == nil && record.StoreReady && !h.StoreReady {
@@ -313,7 +313,7 @@ func (m *Manager) stoppedSpaceKick(ctx context.Context, r spaceKickRecord, actio
 		}
 		defer lock.Close()
 	}
-	if err := requireStoppedM3Runtime(ctx, r.Root, address); err != nil {
+	if err := requireStoppedRuntime(ctx, r.Root, address); err != nil {
 		return nil, err
 	}
 	selected, err := selectedRuntimeLoginProfile(r.Root)

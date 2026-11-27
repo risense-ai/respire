@@ -12,8 +12,8 @@ use sha2::{Digest, Sha256};
 mod lifecycle;
 mod operation;
 mod snapshot_control;
-pub(crate) use snapshot_control::{SnapshotOperation, SnapshotOutcomeUnknown, SnapshotRemoteFailure};
 mod recovery;
+#[cfg(test)]
 pub(crate) use recovery::StaleOwner;
 mod manager;
 pub(crate) use manager::process_birth;
@@ -39,18 +39,18 @@ pub(crate) use supervise::{
 pub(crate) use supervise::{run_config_control, run_profile_config_control};
 pub(crate) use supervise::{control_secret, control_keys_export, control_session_list, control_login_step};
 pub(crate) use lifecycle::{snapshot_recover_control, snapshot_restore_control};
+pub(crate) use lifecycle::cleanup_paused;
 pub(crate) use supervise::{
-    auth_keygen_locked, auth_result_locked, control_auth_result, control_keygen,
+    control_auth_result, control_keygen,
     control_memory_revision, run_detached_plugin_host, spawn_authorized_runtime, spawn_detached_runtime,
-    control_account_result, control_account_rollback, control_login, control_register,
-    prepare_model_locked, model_install_plan_locked, model_install_verify_locked,
-    prepare_auth_account_request, validate_auth_account_receipt, AuthAccountControl, AccountOutcomeUnknown, AuthOutcomeUnknown,
+    control_account_result, control_account_rollback, control_register,
+    validate_auth_account_receipt, AccountOutcomeUnknown, AuthOutcomeUnknown,
 };
 pub(crate) use lifecycle::current_boot_token as lifecycle_boot_token;
 pub(crate) use lifecycle::{
     authorize_detached_boot_locked, background_paused, begin_maintenance_locked,
     check_direct_access, check_managed_request, credential_state,
-    ensure_managed_locked, ensure_managed_locked_with_expectation, execute, managed_enabled, managed_id, may_reuse_runtime,
+    ensure_managed_locked_with_expectation, execute, managed_enabled, managed_id, may_reuse_runtime,
     note_credential_access, prepare_cold_restart_locked, prepare_cold_start_locked, record_exit,
     restart_maintenance_locked, restart_stage,
     stop_managed_locked, verify_managed_boot, with_explicit_recovery,

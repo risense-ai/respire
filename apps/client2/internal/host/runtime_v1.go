@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"slices"
 
 	runtimesdk "github.com/risense-ai/respire/packages/runtime-sdk-go"
 )
@@ -68,43 +67,4 @@ func discoverRuntime(ctx context.Context, client *runtimesdk.Client) (*runtimesd
 func matchesRuntime(discovered runtimesdk.HealthResponse, health HealthInfo) bool {
 	return health.InstanceID == discovered.InstanceId &&
 		(discovered.Pid == nil || int64(health.PID) == int64(*discovered.Pid))
-}
-
-// Use the live inspection only to refuse deletion before stopping Runtime.
-func (m *Manager) checkLiveM3Assets(ctx context.Context, health HealthInfo, target string) error {
-	client, err := runtimesdk.NewClient(m.Endpoint, runtimesdk.WithHTTPClient(m.localClient))
-	if err != nil {
-		return err
-	}
-	discovered, err := discoverRuntime(ctx, client)
-	if err != nil || discovered == nil {
-		return err
-	}
-	if !matchesRuntime(*discovered, health) {
-		return errors.New("Runtime changed during health discovery")
-	}
-	if !slices.Contains(discovered.Capabilities, "model.active_assets") {
-		return nil
-	}
-	response, err := client.GetActiveModelAssets(ctx, m.authorizeRuntime)
-	if err != nil {
-		return err
-	}
-	defer response.Body.Close()
-	raw, err := readRuntimeJSON(response)
-	if err != nil {
-		return err
-	}
-	var assets runtimesdk.ActiveModelAssetsResponse
-	if json.Unmarshal(raw, &assets) != nil || assets.ActivePaths == nil {
-		return errors.New("Runtime active model inspection response is invalid")
-	}
-	if isM3Model(assets.ActiveModelId) {
-		return errM3Active
-	}
-	inUse, err := m3AssetsUseTarget(assets.ActivePaths, target)
-	if inUse {
-		return errM3Active
-	}
-	return err
 }

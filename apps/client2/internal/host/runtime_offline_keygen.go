@@ -160,7 +160,7 @@ func (m *Manager) withStoppedKeygenLibrary(ctx context.Context, record runtimeOf
 		}
 		defer library.Close()
 	}
-	if err := requireStoppedM3Runtime(ctx, record.Root, address); err != nil {
+	if err := requireStoppedRuntime(ctx, record.Root, address); err != nil {
 		return err
 	}
 	selected, err := selectedRuntimeLoginProfile(record.Root)

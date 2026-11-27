@@ -13,6 +13,9 @@ use respire_protocol::{
     RpcRequest, RpcResponse, HOST_MODEL_SCHEMA_V,
 };
 
+#[path = "model_control/online.rs"]
+mod online;
+
 /// No destination supplied by a plan can extend this local allowlist.
 pub(crate) fn allowed_model_roots() -> Result<Vec<PathBuf>> {
     let (root, profile) = local_roots()?;
@@ -59,8 +62,11 @@ pub(super) fn owner_scope_id(profile: &Path, account_id: Option<&str>) -> Result
 }
 
 /// Host entry point. Only a previously serving owner is restarted on success.
-pub(crate) fn control_prepare_model(intent: &ModelInstallIntent) -> Result<(AssetsStatus, bool)> {
+pub(crate) fn control_prepare_model(intent: &ModelInstallIntent) -> Result<ResultEnvelope> {
     crate::runtime_policy::require_host("model preparation")?;
+    if let Some(mirror) = intent.mirror.as_deref().filter(|mirror| mirror.trim() != "auto") {
+        model_mirror_origin(mirror)?;
+    }
     anyhow::ensure!(super::lifecycle::current_boot_token().is_none(),
         "model preparation must own its host maintenance transaction");
     let takeover = crate::runtime_policy::takeover_lock()?;
@@ -89,6 +95,17 @@ pub(crate) fn control_prepare_model(intent: &ModelInstallIntent) -> Result<(Asse
     }
     if let Some(owner) = owner.as_ref() {
         verify_model_owner(owner, &root, &profile, managed, &binary, &manifest, expected_account.as_deref())?;
+        if intent.model.is_none() {
+            let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+            let sdk = crate::net_rpc::openapi_client(&crate::net_rpc::rpc_base_url(), crate::net_rpc::read_token()?)?;
+            if let Some(operation) = runtime.block_on(online::download_m3(&sdk, &owner.instance_id, intent))? {
+                let mut output = ResultEnvelope::new("model install-m3", Status::Ok,
+                    serde_json::json!({"model":"m3","activated":false,"operation_id":operation.operation_id}),
+                    vec![respire_commands::output::Item::new("model", Status::Ok, "Runtime completed the model download")]);
+                output.details = serde_json::to_value(operation)?;
+                return Ok(output);
+            }
+        }
     }
     let mut maintenance = super::lifecycle::begin_maintenance_locked()?;
     let prepared: Result<(AssetsStatus, bool)> = (|| {
@@ -113,7 +130,19 @@ pub(crate) fn control_prepare_model(intent: &ModelInstallIntent) -> Result<(Asse
         Ok(assets)
     })();
     match prepared {
-        Ok(assets) => { maintenance.finish_handoff()?; Ok(assets) },
+        Ok((assets, skipped)) => {
+            maintenance.finish_handoff()?;
+            let directory = assets.assets.iter().find(|asset| {
+                matches!(asset.name.as_str(), "bge-m3-tokenizer" | "profile-tokenizer")
+            }).and_then(|asset| asset.path.as_deref()).and_then(|path| Path::new(path).parent())
+                .context("Runtime model receipt is missing its tokenizer directory")?;
+            let mut output = ResultEnvelope::new("model install-m3", Status::Ok,
+                serde_json::json!({"dir":directory,"skipped":skipped,"activated":false,"model":"m3"}),
+                vec![respire_commands::output::Item::new("model", Status::Ok,
+                    "Runtime verified model files and fresh backend loading; run rsrs reembed to rebuild an old index")]);
+            output.details = serde_json::to_value(&assets)?;
+            Ok(output)
+        }
         Err(error) => {
             if let Err(pause) = maintenance.mark(super::lifecycle::Phase::Paused) {
                 return Err(error.context(format!("model preparation failed; Paused marker publication failed: {pause:#}")));

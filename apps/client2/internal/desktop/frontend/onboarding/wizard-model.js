@@ -8,7 +8,6 @@ import {
   graniteVariant,
   DEVICES,
   engineAvailable,
-  fetchInventory,
   isProfileModel,
   openDownloadModal,
   applyEngineChoice,
@@ -40,10 +39,7 @@ export function modelSteps(wizard, {
   exitToModels,
 }) {
   async function ensureInventory(model) {
-    if (!wizard.state.inventories[model]) {
-      wizard.state.inventories[model] = await fetchInventory(model);
-    }
-    return wizard.state.inventories[model];
+    return ctx.modelInventory.get(model) || ctx.modelInventory.load(model);
   }
 
   function renderModel(body) {
@@ -103,7 +99,6 @@ export function modelSteps(wizard, {
     // OS-level entry gates from the shared kit; real capability is decided
     // by the runtime's inference probe at enable time.
     const gpuEntry = engineAvailable(platform, "gpu");
-    const npuEntry = engineAvailable(platform, "npu");
     body.innerHTML = frame(
       i18nMessages.mbbccf7516f5e53ae,
       i18nMessages.m4b4018eca61fe94e,
@@ -111,16 +106,11 @@ export function modelSteps(wizard, {
         card(device.title, device.detail, device.id, {
           disabled:
             (Boolean(graniteVariant(wizard.state.model)) && device.id !== "cpu") ||
-            (device.id === "gpu" && !gpuEntry) ||
-            (device.id === "npu" && !npuEntry),
+            (device.id === "gpu" && !gpuEntry),
           badge: device.id === "cpu" ? i18nMessages.m844b8cc8dff7c1d8 : "",
           active: wizard.state.device === device.id,
         }),
-      ).join("")}</div>${
-        wizard.state.device === "npu" && npuEntry
-          ? i18nMessages.m1b7677da01a888d8
-          : ""
-      }${i18nMessages.meefec8afa359fa58}`,
+      ).join("")}</div>${i18nMessages.meefec8afa359fa58}`,
       backButton("model") +
         `${i18nMessages.m8c76acc0c2bd1487}`,
     );
@@ -131,17 +121,10 @@ export function modelSteps(wizard, {
         render();
       }),
     );
-    const install = $("[data-install-engines]", body);
-    if (install)
-      install.addEventListener("click", () =>
-        execute("model_install_engines")
-          .then(() => notify(i18nMessages.m45f94e9e8fea6d1f))
-          .catch((error) => setError(error.message)),
-      );
     loadWeights(body);
   }
 
-  // Weights follow the device: CPU defaults to quantized, GPU/NPU to fp16;
+  // Weights follow the device: CPU defaults to quantized, GPU to fp16;
   // the advanced section may override. Download estimate always reflects the
   // files actually missing on disk.
   async function loadWeights(body) {
@@ -399,8 +382,7 @@ export function modelSteps(wizard, {
       if (index + 1 < downloads.length) element.close();
     }
     try {
-      inventory = await fetchInventory(wizard.state.model);
-      wizard.state.inventories[wizard.state.model] = inventory;
+      inventory = await ctx.modelInventory.load(wizard.state.model);
     } catch (error) {
       failure("verify", error.message);
       return false;

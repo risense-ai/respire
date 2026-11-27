@@ -6,6 +6,7 @@ import { diary, localCalendarDay } from "./memory/diary.js";
 import { organize } from "./pages/organize.js";
 import { sessionImport } from "./pages/session-import.js";
 import { models } from "./pages/models.js";
+import { activeModelScope, createModelInventory } from "./pages/model-kit.js";
 import {
   settings,
   updates,
@@ -54,6 +55,7 @@ const ctx = {
   desktop: null,
   status: null,
   statusError: "",
+  modelInventory: createModelInventory(() => ctx.desktop),
   api,
   execute,
   notify,
@@ -158,10 +160,16 @@ function route() {
   view = definitions[page][1](root, ctx);
   document.querySelector(".view-scroll").scrollTop = 0;
 }
-// Sidebar nav counts: memories come from the status summary; diary (today)
-// and organize (pending suggestions) are RPC-backed and refreshed sparingly.
-const navCounts = { at: 0, running: false };
+// The sidebar shows today's diary count from a periodic diary query.
+const navCounts = { at: 0, running: false, scope: undefined };
 async function refreshNavCounts() {
+  const scope = activeModelScope(ctx.desktop?.health);
+  if (scope !== navCounts.scope) {
+    navCounts.scope = scope;
+    navCounts.at = 0;
+    $("#nav-organize-count").textContent = "";
+    $("#nav-diary-count").textContent = "";
+  }
   if (!ctx.desktop?.connected || navCounts.running) return;
   if (Date.now() - navCounts.at < 60000) return;
   navCounts.running = true;
@@ -169,22 +177,13 @@ async function refreshNavCounts() {
   try {
     const day = localCalendarDay(new Date());
     const diaryEnv = await execute("diary_list", { from: day, to: day });
-    if (!document.isConnected) return;
+    if (!document.isConnected || scope !== navCounts.scope) return;
     $("#nav-diary-count").textContent = number(rows(diaryEnv).length);
   } catch {
-    $("#nav-diary-count").textContent = "";
+    if (scope === navCounts.scope) $("#nav-diary-count").textContent = "";
+  } finally {
+    navCounts.running = false;
   }
-  try {
-    const suggestEnv = await execute("organize_suggestions", { top: 50 });
-    if (!document.isConnected) return;
-    const items = suggestEnv?.details?.suggests;
-    $("#nav-organize-count").textContent = Array.isArray(items)
-      ? number(items.length)
-      : "";
-  } catch {
-    $("#nav-organize-count").textContent = "";
-  }
-  navCounts.running = false;
 }
 // Keep unchanged refresh labels' text nodes intact, including for accessibility.
 // Compare the live DOM rather than cached values so external changes are repaired.

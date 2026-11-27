@@ -296,7 +296,7 @@ func (m *Manager) runOperation(spec commandSpec, args []string, secret, id, name
 	switch {
 	case handled || err != nil:
 	case spec.method == "model.apply-engine":
-		envelope, err = applyEngine(ctx, m, args, id)
+		envelope, err = m.applyLegacyEngine(ctx, args, id)
 	case spec.method == "desktop.device-config":
 		envelope, err = m.desktopDeviceConfig(ctx, deviceConfigIntent{})
 	case spec.method == "desktop.server-set":
@@ -351,8 +351,6 @@ func (m *Manager) runOperation(spec commandSpec, args []string, secret, id, name
 		envelope, err = m.removeDesktopSpace(ctx, id, args[0], false)
 	case spec.method == "desktop.space-join":
 		envelope, err = m.desktopSpaceMembership(ctx, id, args, "join", "", nativeRuntimeCredentialStore(ctx))
-	case spec.method == "desktop.install-engines":
-		envelope, err = m.installModelEngines(ctx)
 	case spec.host:
 		err = errors.New(i18n.Message6fe3d2196bba4844)
 	default:

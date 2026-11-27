@@ -11,9 +11,14 @@ fn control_host_agent_config(intent: Option<respire_protocol::config_control::Ag
     let identity = metadata_identity(&profile, super::hash)?;
     let account = identity.account_id.clone().unwrap_or_else(|| super::hash(profile.display().to_string().as_bytes()));
     let saved = super::lifecycle::pending_agent_config(&root, query.is_some() || request.is_some())?;
+    let online = OnlineAgentConfig::read(&root)?;
+    anyhow::ensure!(saved.is_none() || online.record.is_none(), "multiple agent configuration operations are pending");
     let mut query_only = query.is_some() || request.is_some_and(|(_, query)| query);
     let requested = query.map(|(context, _)| context.operation_id.as_str())
         .or(request.map(|(id, _)| id));
+    if online.record.as_ref().is_some_and(|record| requested.is_none_or(|id| id == record.review.operation_id)) {
+        return online.resume(intent.as_ref(), requested, query, &profile, &identity);
+    }
     if let Some(operation_id) = requested {
         if let Some((context, source)) = query {
             anyhow::ensure!(source.canonicalize()? == profile && context.operation_id == context.idempotency_key,
@@ -49,7 +54,7 @@ fn control_host_agent_config(intent: Option<respire_protocol::config_control::Ag
                 "core configuration terminal receipt identity mismatch");
             return Ok(output);
         } else {
-            anyhow::ensure!(saved.is_none(), "another agent configuration operation is pending");
+            anyhow::ensure!(saved.is_none() && online.record.is_none(), "another agent configuration operation is pending");
         }
     }
     let registration = super::read_registration(&root)?;
@@ -69,31 +74,29 @@ fn control_host_agent_config(intent: Option<respire_protocol::config_control::Ag
         super::model_control::verify_model_owner(owner, &root, &profile, managed, binary, manifest, Some(&account))?;
     }
     host_config_preflight(&root, &profile)?;
+    if saved.is_none() {
+        super::lifecycle::check_direct_access()?;
+        let intent = intent.context("core configuration query cannot create an operation")?;
+        validate_host_agent_config(&intent, &profile)?;
+        let review = crate::client_config::review_agent_config_for_operation(intent, root, profile,
+            request.map(|(id, _)| id))?;
+        return online.start(review, owner.as_ref());
+    }
     let (mut record, mut maintenance) = if let Some((record, token, coordinator)) = saved {
         anyhow::ensure!(intent.as_ref().is_none_or(|intent| record.review.intent == *intent) && record.review.identity == identity
             && record.review.installation_root == root && record.review.profile == profile,
             "repeat the original agent-config intent and identity; a new operation is not allowed");
         let maintenance = super::lifecycle::resume_agent_config_maintenance(&root, &profile, &token, &coordinator)?;
         (record, maintenance)
-    } else {
-        let intent = intent.context("core configuration query cannot create an operation")?;
-        validate_host_agent_config(&intent, &profile)?;
-        let review = crate::client_config::review_agent_config_for_operation(intent, root.clone(), profile.clone(),
-            request.map(|(id, _)| id))?;
-        let mut maintenance = super::lifecycle::begin_maintenance_locked()?;
-        maintenance.auth_launch_binding(&profile)?.context("agent config requires actual Paused maintenance")?;
-        let record = AgentConfigMaintenance { review, was_serving: owner.is_some(),
-            store_ready: owner.as_ref().is_some_and(|health| health.store_ready), sent: false, receipt: None };
-        maintenance.save_agent_config(&record)?;
-        (record, maintenance)
-    };
+    } else { anyhow::bail!("legacy agent configuration operation disappeared"); };
     let operation = record.review.operation_id.clone();
     let core_setting = matches!(record.review.intent.key.trim(), "read_heat" | "recall_fusion");
     let mut finished = false;
     let result = (|| -> Result<ResultEnvelope> {
         maintenance.auth_launch_binding(&profile)?.context("agent config lost its Paused grant")?;
         if core_setting {
-            let mut output = control_core_setting(&mut record, &mut maintenance, owner.as_ref(), query_only)?;
+            let mut output = control_core_setting(&mut record, &mut AgentConfigJournal::Legacy(&mut maintenance),
+                owner.as_ref(), query_only)?;
             if let Some(previous) = owner.as_ref() {
                 let current = crate::rpc::probe_runtime()?.context("core config owner exited before completion")?;
                 let (binary, manifest) = runtime.as_ref().context("core config Runtime selection missing")?;

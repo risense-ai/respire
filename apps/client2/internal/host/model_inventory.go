@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
+
+	"respire-client2/internal/i18n"
 )
 
 // BGE-M3 onnx variants accepted by the runtime's `model engine --model` and
@@ -38,15 +41,8 @@ func variantFileName(name string) string {
 // health.data_dir is the workspace profile (client.json data_dir) and must
 // not be used for model files.
 func (m *Manager) modelDir(ctx context.Context) (string, error) {
-	_, body, err := m.Health(ctx)
+	health, _, err := m.Health(ctx)
 	if err != nil {
-		return "", err
-	}
-	var health struct {
-		Exe              string `json:"exe"`
-		InstallationRoot string `json:"installation_root"`
-	}
-	if err = json.Unmarshal(body, &health); err != nil {
 		return "", err
 	}
 	home, err := os.UserHomeDir()
@@ -92,22 +88,15 @@ func modelFilesPresent(dir string) bool {
 	return err == nil && !info.IsDir()
 }
 
-// installedVariantsFor returns the variants of one catalog model whose onnx
-// file exists with the exact pinned size under dir.
-func installedVariantsFor(definition modelDefinition, dir string) map[string]int64 {
+// installedVariants returns the legacy M3 weights with the exact pinned size.
+func installedVariants(dir string) map[string]int64 {
 	present := map[string]int64{}
-	for _, variant := range definition.Variants {
-		if info, err := os.Stat(filepath.Join(dir, definition.weightPath(variant.Name))); err == nil && info.Size() == variant.Size {
+	for _, variant := range modelVariantFiles {
+		if info, err := os.Stat(filepath.Join(dir, variantFileName(variant.Name))); err == nil && info.Size() == variant.Size {
 			present[variant.Name] = info.Size()
 		}
 	}
 	return present
-}
-
-// installedVariants returns the m3 variants whose onnx file exists with the
-// exact pinned size under dir.
-func installedVariants(dir string) map[string]int64 {
-	return installedVariantsFor(modelDefinition{Variants: modelVariantFiles}, dir)
 }
 
 // ModelVariants reports install state and location for every variant of one
@@ -127,7 +116,6 @@ func (m *Manager) ModelVariants(ctx context.Context, model string) (map[string]a
 	} else {
 		dir = m.ProfileDir(model)
 	}
-	present := installedVariantsFor(definition, dir)
 	var managedWeights, managedTokenizer string
 	var managed bool
 	if definition.ID == "m3" {
@@ -137,15 +125,16 @@ func (m *Manager) ModelVariants(ctx context.Context, model string) (map[string]a
 	}
 	variants := make([]map[string]any, 0, len(definition.Variants))
 	for _, variant := range definition.Variants {
+		path := filepath.Join(dir, definition.weightPath(variant.Name))
 		entry := map[string]any{
 			"name":      variant.Name,
 			"size":      variant.Size,
-			"path":      filepath.Join(dir, definition.weightPath(variant.Name)),
+			"path":      path,
 			"bytes":     0,
 			"installed": false,
 		}
-		if size, ok := present[variant.Name]; ok {
-			entry["bytes"], entry["installed"] = size, true
+		if info, err := os.Stat(path); err == nil && info.Size() == variant.Size {
+			entry["bytes"], entry["installed"] = variant.Size, true
 		}
 		if managed && variant.Name == "quantized" {
 			entry["path"], entry["bytes"], entry["installed"], entry["runtime_managed"] = managedWeights, variant.Size, true, true
@@ -161,4 +150,76 @@ func (m *Manager) ModelVariants(ctx context.Context, model string) (map[string]a
 		"cpu_container_size":  m3CPUContainer.size,
 		"variants":            variants,
 	}, nil
+}
+
+type inferenceSelection struct {
+	Engine string
+	Model  string
+}
+
+func defaultVariantFor(engine string) string {
+	if engine == "gpu" || engine == "npu" {
+		return "fp16"
+	}
+	return "quantized"
+}
+
+func (m *Manager) readInferenceSelection() inferenceSelection {
+	data, err := os.ReadFile(filepath.Join(m.DataRoot, "inference.json"))
+	if err != nil {
+		return inferenceSelection{}
+	}
+	var parsed struct {
+		Engine   string `json:"engine"`
+		Model    string `json:"model"`
+		ForceCPU bool   `json:"force_cpu"`
+	}
+	if json.Unmarshal(data, &parsed) != nil {
+		return inferenceSelection{}
+	}
+	engine := strings.ToLower(strings.TrimSpace(parsed.Engine))
+	if parsed.ForceCPU || engine == "" || engine == "auto" {
+		engine = "cpu"
+	}
+	return inferenceSelection{Engine: engine, Model: strings.TrimSpace(parsed.Model)}
+}
+
+func (m *Manager) EngineSnapshot(installationRoot, exe string) map[string]any {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		home = ""
+	}
+	if installationRoot == "" && home != "" {
+		installationRoot = filepath.Join(home, ".rsrs")
+	}
+	dir := resolveModelDir(installationRoot, exe, m.Owns(exe), home)
+	selection := m.readInferenceSelection()
+	engine := selection.Engine
+	if engine == "" {
+		engine = "cpu"
+	}
+	variant, note := selection.Model, ""
+	installed := installedVariants(dir)
+	if variant == "" {
+		variant = defaultVariantFor(engine)
+		if engine != "cpu" && installed[variant] == 0 && installed["quantized"] != 0 {
+			note = i18n.Message000cd5b14a20fcfc + variant + i18n.Message1c535a5ffbbdf556
+			variant = "quantized"
+		}
+	}
+	_, variantInstalled := installed[variant]
+	if !variantInstalled && note == "" {
+		note = i18n.Message6dee3c4aa4702705
+	}
+	file := variantFileName(variant)
+	return map[string]any{
+		"source":            "legacy",
+		"engine":            engine,
+		"variant":           variant,
+		"file":              file,
+		"path":              filepath.Join(dir, file),
+		"model_dir":         dir,
+		"variant_installed": variantInstalled,
+		"note":              note,
+	}
 }

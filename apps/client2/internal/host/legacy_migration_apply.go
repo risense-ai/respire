@@ -286,7 +286,7 @@ func (m *Manager) claimLegacyMigrationMarker(ctx context.Context, journal legacy
 		}
 		defer func() { err = errors.Join(err, lock.Close()) }()
 	}
-	if err := requireStoppedM3Runtime(ctx, root, address); err != nil {
+	if err := requireStoppedRuntime(ctx, root, address); err != nil {
 		return nil, err
 	}
 	birth, err := hostControlBirth(ctx)

@@ -1,4 +1,6 @@
-fn workspace_label(mode: &str) -> String {
+use super::*;
+
+pub(super) fn workspace_label(mode: &str) -> String {
     match mode {
         "readonly" => t("\u{53ea}\u{8bfb}\u{670d}\u{52a1}", "Read-only service"),
         "off" => t("\u{7981}\u{7528}\u{670d}\u{52a1}", "Disabled service"),
@@ -6,7 +8,7 @@ fn workspace_label(mode: &str) -> String {
     }
 }
 
-fn overlay_lines(app: &App) -> Option<Vec<Line<'static>>> {
+pub(super) fn overlay_lines(app: &App) -> Option<Vec<Line<'static>>> {
     match &app.overlay {
         Overlay::None => None,
         Overlay::ModelWeights(form) => Some(form.lines(&app.live.model_settings)),
@@ -32,7 +34,6 @@ fn overlay_lines(app: &App) -> Option<Vec<Line<'static>>> {
             Some(lines)
         }
         Overlay::RecallApi(_) | Overlay::RecallTest(_) => Some(Vec::new()),
-        Overlay::ModelTask(task) => Some(task.lines()),
         Overlay::Edit { buf, cursor } => {
             let mut shown = String::new();
             for (index, ch) in buf.chars().enumerate() {
@@ -59,11 +60,11 @@ fn overlay_lines(app: &App) -> Option<Vec<Line<'static>>> {
     }
 }
 
-fn line(text: String) -> Line<'static> {
+pub(super) fn line(text: String) -> Line<'static> {
     Line::from(text)
 }
 
-fn choice(on: bool, text: String) -> Line<'static> {
+pub(super) fn choice(on: bool, text: String) -> Line<'static> {
     let prefix = if on { "> " } else { "  " };
     let style = if on {
         Style::default().add_modifier(Modifier::REVERSED)
@@ -73,19 +74,19 @@ fn choice(on: bool, text: String) -> Line<'static> {
     Line::from(Span::styled(format!("{prefix}{text}"), style))
 }
 
-fn ok_line(text: String) -> Line<'static> {
+pub(super) fn ok_line(text: String) -> Line<'static> {
     Line::from(Span::styled(text, Style::default().fg(Color::Green)))
 }
 
-fn warn_line(text: String) -> Line<'static> {
+pub(super) fn warn_line(text: String) -> Line<'static> {
     Line::from(Span::styled(text, Style::default().fg(Color::Yellow)))
 }
 
-fn fail_line(text: String) -> Line<'static> {
+pub(super) fn fail_line(text: String) -> Line<'static> {
     Line::from(Span::styled(text, Style::default().fg(Color::Red)))
 }
 
-fn setup() -> Result<Terminal<CrosstermBackend<Stdout>>> {
+pub(super) fn setup() -> Result<Terminal<CrosstermBackend<Stdout>>> {
     let result = (|| -> Result<_> {
         execute!(stdout(), EnterAlternateScreen, event::EnableBracketedPaste)?;
         Ok(Terminal::new(CrosstermBackend::new(stdout()))?)
@@ -111,7 +112,7 @@ fn setup() -> Result<Terminal<CrosstermBackend<Stdout>>> {
     }
 }
 
-fn restore(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
+pub(super) fn restore(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
     execute!(
         terminal.backend_mut(),
         event::DisableBracketedPaste,
