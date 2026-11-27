@@ -252,6 +252,10 @@ export async function waitForProfileSwitch({ onTick, timeoutMs = 15 * 60_000 } =
   return { settled: true, failed: true, details: {}, timeout: true };
 }
 
+const DOWNLOAD_WATCH_MS = 61 * 60_000;
+const DOWNLOAD_STREAM_IDLE_MS = 10_000;
+const TEMPORARY_TASK_STATUSES = new Set([408, 429, 502, 503, 504]);
+
 // Download progress modal: live bytes, pause / resume / cancel, result.
 // Resolves `done` with true only when the task reached the completed stage.
 export function openDownloadModal({
@@ -296,15 +300,20 @@ export function openDownloadModal({
   let timer = null;
   let stream = null;
   let taskID = "";
+  let request = null;
   let watchDeadline = 0;
+  let pollFailures = 0;
   function stopUpdates() {
     clearTimeout(timer);
-    stream?.close();
+    const activeStream = stream;
     stream = null;
+    activeStream?.close();
+    request?.abort();
   }
   async function start() {
     paused = false;
     taskID = "";
+    pollFailures = 0;
     errorNode.hidden = true;
     setMode("downloading");
     const mirror = getMirror?.() || "auto";
@@ -314,7 +323,7 @@ export function openDownloadModal({
       });
       if (!receipt?.id) throw new Error("Missing download receipt");
       taskID = receipt.id;
-      watchDeadline = Date.now() + 61 * 60_000;
+      watchDeadline = performance.now() + DOWNLOAD_WATCH_MS;
     } catch (error) {
       if (!element.open) return;
       stageNode.textContent = i18nMessages.m7e24b28fccaf9e1e;
@@ -325,26 +334,45 @@ export function openDownloadModal({
     }
     if (!element.open) return;
     if (typeof EventSource === "undefined") return poll();
-    const fallback = () => {
-      stopUpdates();
-      if (element.open) poll();
-    };
+    const id = taskID;
+    let source;
     try {
-      stream = new EventSource("/api/task-events?id=" + encodeURIComponent(taskID));
+      source = new EventSource("/api/task-events?id=" + encodeURIComponent(id));
     } catch {
-      fallback();
-      return;
+      return poll();
     }
-    // Some native bridges buffer the response until EOF despite accepting SSE.
-    timer = setTimeout(fallback, 2000);
-    stream.onmessage = (event) => {
-      clearTimeout(timer);
-      receive(JSON.parse(event.data));
+    stream = source;
+    const fallback = () => {
+      if (stream !== source) return;
+      stopUpdates();
+      if (canWatch(id)) poll();
     };
-    stream.onerror = fallback;
+    const armWatchdog = (idleMs) => {
+      clearTimeout(timer);
+      timer = setTimeout(fallback, Math.min(idleMs, remainingWatch()));
+    };
+    // Some native bridges buffer the first frame until EOF. Even after a frame
+    // arrives, switch to snapshots if the stream ceases making progress.
+    armWatchdog(2000);
+    source.onmessage = (event) => {
+      if (stream !== source || !canWatch(id)) return;
+      let task;
+      try {
+        task = JSON.parse(event.data);
+      } catch {
+        fallback();
+        return;
+      }
+      if (!validTask(task, id)) return fallback();
+      receive(task);
+      if (stream === source) armWatchdog(DOWNLOAD_STREAM_IDLE_MS);
+    };
+    source.onerror = fallback;
+  }
+  function validTask(task, id) {
+    return task?.id === id && typeof task.busy === "boolean";
   }
   function receive(task) {
-    if (!element.open || task?.id !== taskID) return;
     stageNode.textContent = task.stage || "";
     bytesNode.textContent = task.total
       ? `${bytes(task.done)} / ${bytes(task.total)}`
@@ -381,32 +409,43 @@ export function openDownloadModal({
     errorNode.hidden = false;
     resolveDone(false);
   }
-  function canPoll(id) {
+  function remainingWatch() {
+    return Math.max(0, watchDeadline - performance.now());
+  }
+  function canWatch(id) {
     if (!element.open || id !== taskID) return false;
-    if (Date.now() < watchDeadline) return true;
-    failWatch(i18nMessages.mde475b35590ce61d);
+    if (remainingWatch() > 0) return true;
+    failWatch(i18nMessages.m23dfe4404e8a5ebe);
     return false;
   }
   async function poll() {
     const id = taskID;
-    if (!canPoll(id)) return;
+    if (!canWatch(id)) return;
     const abort = new AbortController();
-    const timeout = setTimeout(() => abort.abort(), Math.min(5000, watchDeadline - Date.now()));
+    request = abort;
+    const timeout = setTimeout(() => abort.abort(), Math.min(5000, remainingWatch()));
     try {
       const task = await api("task?id=" + encodeURIComponent(id), undefined, abort.signal);
-      if (!canPoll(id)) return;
+      if (!canWatch(id)) return;
+      if (!validTask(task, id)) {
+        failWatch(i18nMessages.m23dfe4404e8a5ebe);
+        return;
+      }
+      pollFailures = 0;
       receive(task);
-      if (task?.id === id && !task.busy) return;
+      if (!task.busy) return;
     } catch (error) {
-      if (!canPoll(id)) return;
-      if (error.status === 410) {
-        failWatch(error.message);
+      if (!canWatch(id)) return;
+      const temporary = abort.signal.aborted || TEMPORARY_TASK_STATUSES.has(error.status);
+      if (!temporary || ++pollFailures >= 3) {
+        failWatch(error.status ? error.message : i18nMessages.m23dfe4404e8a5ebe);
         return;
       }
     } finally {
       clearTimeout(timeout);
+      if (request === abort) request = null;
     }
-    if (canPoll(id)) timer = setTimeout(poll, Math.min(700, watchDeadline - Date.now()));
+    if (canWatch(id)) timer = setTimeout(poll, Math.min(700, remainingWatch()));
   }
   element.addEventListener("click", (event) => {
     const button = event.target.closest("[data-dl]");

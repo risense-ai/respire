@@ -61,3 +61,42 @@ func TestDownloadStreamBoundsAndShutdown(t *testing.T) {
 		t.Fatal("subscriber leaked")
 	}
 }
+
+func TestDownloadStreamReleasesSubscriberOnDisconnect(t *testing.T) {
+	var streams downloadStreams
+	var manager host.Manager
+	finish := make(chan struct{})
+	defer close(finish)
+	id := manager.StartDownload("test", func(context.Context) error { <-finish; return nil })
+	done := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer close(done)
+		streams.serve(w, r, &manager, nil)
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL+"?id="+id, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := server.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK || streams.active.Load() != 1 {
+		t.Fatalf("expected a live subscription, got %s with %d active", res.Status, streams.active.Load())
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("handler did not exit after client disconnect")
+	}
+	if streams.active.Load() != 0 {
+		t.Fatal("subscriber leaked")
+	}
+}

@@ -679,6 +679,7 @@ jobs:
         run: |
           node scripts/test-account-session-state.cjs
           node scripts/test-client-refresh.cjs
+          node --test scripts/test-download-dialog.cjs
           node scripts/test-settings-proxy.cjs
 
   ci-gate:
