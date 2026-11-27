@@ -150,7 +150,6 @@ pub fn login(
                     );
                 }
             }
-            // Super password source: --super > interactive (TTY) > local keyring
             let super_pass = obtain_super(user, super_pass)?;
             return unlock_cloud_vault(&mut data, addr, user, &token, &vault, &super_pass, secret_key);
         }
@@ -182,15 +181,10 @@ fn vault_matches(vault: &serde_json::Value, data: &serde_json::Value) -> bool {
         && vault["urk_nonce"] == data["urk_nonce"]
 }
 
-/// Super password source order: --super > interactive (TTY) > local keyring.
-/// Interactive comes before the keyring: when the user is logging in, use the code they type —
-/// the keyring may still hold an old code (after rotation/reissue) and would only yield "decrypt failed".
+/// Use the explicit super password before the local keyring.
 fn obtain_super(user: &str, super_arg: Option<&str>) -> Result<String> {
     if let Some(s) = super_arg.filter(|s| !s.is_empty()) {
         return Ok(s.to_owned());
-    }
-    if crate::prompt::interactive() {
-        return crate::prompt::ask_secret("super password (A3-\u{2026}, used to decrypt memories; if missing, export first on the old machine with rsrs keys-export): ");
     }
     crate::keystore::load_super(user).ok_or_else(|| {
         anyhow!(
@@ -216,18 +210,9 @@ fn unlock_cloud_vault(
     let nonce = vault["urk_nonce"].as_str().ok_or_else(|| anyhow!("vault missing urk_nonce"))?;
     let version = vault["version"].as_i64().unwrap_or(2);
     if version >= 4 {
-        // v4: super password as the single factor. Keyring may hold an old code — on unlock failure in a TTY, ask again.
         match crate::memory::SessionKeys::unlock_v4(super_pass, salt, wrapped, nonce) {
             Ok(_) => {
                 apply_vault_v4(data, user, super_pass, salt.to_owned(), wrapped.to_owned(), nonce.to_owned())?;
-                write_session_json(data)?;
-                Ok(None)
-            }
-            Err(e) if crate::prompt::interactive() => {
-                eprintln!("warning: this code cannot unwrap cloud memories ({e:#}) \u{2014} re-enter");
-                let retry = crate::prompt::ask_secret("super password: ")?;
-                crate::memory::SessionKeys::unlock_v4(&retry, salt, wrapped, nonce)?;
-                apply_vault_v4(data, user, &retry, salt.to_owned(), wrapped.to_owned(), nonce.to_owned())?;
                 write_session_json(data)?;
                 Ok(None)
             }

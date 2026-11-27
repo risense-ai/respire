@@ -168,10 +168,9 @@
     }
     pub fn reset_sessions() -> Result<()> {
         let _gate = crate::model_selection::gate(true)?;
-        let _config_lock = inference_config_lock()?;
         reset_sessions_locked()
     }
-    // The caller holds the model gate and inference configuration lock through reset.
+    // The caller holds the model gate through reset.
     pub(crate) fn reset_sessions_locked() -> Result<()> {
         execute::<()>("engine_control", json!({"action":"reset"}))?;
         crate::host::reset_model_cache()

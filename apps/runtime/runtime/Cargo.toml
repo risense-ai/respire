@@ -17,7 +17,7 @@ e2e-loopback-mirror = ["respire_commands/e2e-loopback-mirror"]
 
 [dependencies]
 respire_client_host = { path = "../crates/client-host", features = ["locks"] }
-respire_app = { package = "respire_app", path = "../crates/app", default-features = false }
+respire_app = { path = "../crates/app" }
 respire_commands = { path = "../crates/commands" }
 respire_core_sdk = { path = "../crates/core-sdk" }
 respire_protocol = { path = "../crates/protocol" }

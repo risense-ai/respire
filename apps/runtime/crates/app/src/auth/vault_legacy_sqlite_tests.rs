@@ -8,9 +8,9 @@ use rusqlite::{params, Connection};
 use serde_json::json;
 
 const LEGACY_RECORD: &str =
-    include_str!("../../../app/src/fixtures/legacy-memory-v1/legacy_stored_memory.json");
+    include_str!("../fixtures/legacy-memory-v1/legacy_stored_memory.json");
 const LEGACY_PLAINTEXT: &str =
-    include_str!("../../../app/src/fixtures/legacy-memory-v1/legacy_payload_v2.json");
+    include_str!("../fixtures/legacy-memory-v1/legacy_payload_v2.json");
 const SALT: &str = "000102030405060708090a0b0c0d0e0f";
 const URK: [u8; 32] = [42; 32];
 const LOGIN: &str = "synthetic-original-login";

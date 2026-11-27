@@ -82,7 +82,7 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
         }
     }
     // keygen/defrag/scope/config etc. do not need the embedder - handle early
-    include!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/engine/parts/dispatch_without_embedder.rs"));
+    dispatch_light!(args);
     let command = args.command.unwrap_or(Command::Status);
     // Lazy-load the embedder: Show/Sync/Status/tree ops do not pay BGE cost.
     // The runtime worker puts the loaded model back so the next request does not pay it again.

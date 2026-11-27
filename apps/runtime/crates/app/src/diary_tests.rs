@@ -39,8 +39,8 @@ fn fixture(content: String) -> Result<(crate::test_lock::Isolate, LocalStore, Se
 #[test]
 fn lexical_finds_long_keyword_across_index_fragment_boundary() -> Result<()> {
     let query: String = (0..200)
-        .map(|n| char::from_u32(0x4e00 + n).unwrap())
-        .collect();
+        .map(|n| char::from_u32(0x4e00 + n).context("invalid fixture character"))
+        .collect::<Result<_>>()?;
     let content = format!("{}{}{}", "x".repeat(700), query, "x".repeat(700));
     let (_isolate, store, keys) = fixture(content.clone())?;
     let result = search(&store, &keys, &query, 5, 4000, false)?;
@@ -100,8 +100,8 @@ fn unicode_case_expansion_and_multiple_terms_keep_original_offsets() -> Result<(
 #[test]
 fn full_maximum_keyword_is_found_and_invalid_query_does_not_create_cache() -> Result<()> {
     let query: String = (0..500)
-        .map(|n| char::from_u32(0x4e00 + n).unwrap())
-        .collect();
+        .map(|n| char::from_u32(0x4e00 + n).context("invalid fixture character"))
+        .collect::<Result<_>>()?;
     let (_isolate, store, keys) =
         fixture(format!("{}{}{}", "x".repeat(700), query, "x".repeat(700)))?;
     let result = search(&store, &keys, &query, 5, 4000, false)?;
@@ -130,7 +130,7 @@ fn hybrid_falls_back_and_background_reconstructs_bad_derived_bytes() -> Result<(
         || Ok(()),
         |action| action(),
     )?;
-    let db = cache(true)?.unwrap();
+    let db = cache(true)?.context("fixture cache missing")?;
     assert_eq!(
         db.query_row("SELECT count(*) FROM diary_sources", [], |r| r
             .get::<_, i64>(0))?,
@@ -179,7 +179,7 @@ fn cancellation_during_prepare_cannot_publish_a_cache_artifact() -> Result<()> {
         },
     );
     assert!(result.is_err());
-    let db = cache(true)?.unwrap();
+    let db = cache(true)?.context("fixture cache missing")?;
     assert_eq!(
         db.query_row("SELECT count(*) FROM diary_artifacts", [], |r| r
             .get::<_, i64>(0))?,
@@ -220,7 +220,7 @@ fn source_changes_during_prepare_reject_the_derived_commit() -> Result<()> {
         |action| action(),
     );
     assert!(result.unwrap_err().to_string().contains("source changed"));
-    let db = cache(true)?.unwrap();
+    let db = cache(true)?.context("fixture cache missing")?;
     assert_eq!(
         db.query_row("SELECT count(*) FROM diary_artifacts", [], |r| r
             .get::<_, i64>(0))?,
@@ -344,7 +344,7 @@ fn deleting_last_diary_cleans_derived_rows_without_a_model_provider() -> Result<
     assert!(store.forget("synthetic-diary-source")?);
     assert!(needs_rebuild(&store)?);
     assert!(clear_if_empty(&store, |action| action())?);
-    let db = cache(true)?.unwrap();
+    let db = cache(true)?.context("fixture cache missing")?;
     assert_eq!(
         db.query_row("SELECT count(*) FROM diary_artifacts", [], |r| r
             .get::<_, i64>(0))?,

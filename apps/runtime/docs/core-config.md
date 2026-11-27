@@ -111,7 +111,7 @@ capabilities, application, recall parameter selection, readback, revision
 conflicts, invalid candidate rejection and null reset without Core test mode:
 
 ```text
-cargo test --locked -p respire_app_domain --lib feedback::tests::defaults_are_off_and_old_sdk_cannot_silently_accept_enabled_feedback -- --exact --test-threads=1
+cargo test --locked -p respire_app --lib feedback::tests::defaults_are_off_and_old_sdk_cannot_silently_accept_enabled_feedback -- --exact --test-threads=1
 cargo test --locked -p respire_commands --lib rpc_serve::tests:: -- --test-threads=1
 cargo test --locked -p respire_protocol
 ```

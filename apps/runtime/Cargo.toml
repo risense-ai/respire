@@ -9,7 +9,6 @@ members = [
     "crates/crypto",
     "crates/storage",
     "crates/core-sdk",
-    "crates/app-domain",
     "crates/app",
     "crates/commands",
 ]
@@ -24,7 +23,6 @@ repository = "https://github.com/risense-ai/respire"
 [workspace.dependencies]
 respire_protocol = { path = "crates/protocol", version = "=2.0.0-dev.17" }
 respire_core_sdk = { path = "crates/core-sdk" }
-respire_app_domain = { path = "crates/app-domain" }
 respire_app = { path = "crates/app" }
 respire_storage = { path = "crates/storage" }
 respire_crypto = { path = "crates/crypto" }

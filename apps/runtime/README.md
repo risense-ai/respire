@@ -33,7 +33,7 @@ checks, including confirmation before encrypted account state is committed.
 | `runtime/` | `rsrs-runtime` binary crate: serve/dispatch/admission, loopback HTTP, MCP endpoints, health, sync worker, snapshot apply |
 | `crates/protocol/` | `respire-protocol` RPC contract crate, published to crates.io; the shared contract of this repo and `respire-cli` |
 | `crates/core-sdk/` | Safe Runtime adapter to the in-repository Core C ABI |
-| `crates/app-domain/` | Domain services: memory engine, sync worker, resident recall, snapshot, diary, review, embedding contracts |
+| `crates/app/` | Application services: account transactions, memory, sync, resident recall, snapshots, diary, review, and embedding |
 | `crates/storage/` | Encrypted storage layer |
 | `crates/crypto/` | Cryptography primitives |
 | `scripts/` | Build, native dependency verification and compatibility tooling |

@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
 //! Runtime host identity and low-level helpers without app or Core dependencies.
-//! Account and installation root resolution is owned by app-domain service.
+//! The application service owns account and installation root resolution.
 
 pub mod config;
 pub mod credential;
