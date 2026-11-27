@@ -23,6 +23,15 @@ func (d *desktop) businessRoute(w http.ResponseWriter, r *http.Request) bool {
 	var result any
 	var err error
 	switch {
+	case r.Method == "GET" && r.URL.Path == "/api/task-events":
+		d.taskStreams.serve(w, r, d.m, d.closing)
+		return true
+	case r.Method == "GET" && r.URL.Path == "/api/task":
+		task, _, found := d.m.WatchTask(r.URL.Query().Get("id"))
+		if !found {
+			w.WriteHeader(http.StatusGone)
+		}
+		result = task
 	case r.Method == "GET" && r.URL.Path == "/api/fonts":
 		result, err = SystemFonts()
 	case r.Method == "GET" && r.URL.Path == "/api/runtime-status":
@@ -120,16 +129,17 @@ func (d *desktop) businessRoute(w http.ResponseWriter, r *http.Request) bool {
 		// Start in the background so the POST returns before the download
 		// finishes; otherwise progress polling could only begin after the
 		// task was already over and the modal never showed a live bar.
-		if !d.m.StartTaskCancellable(i18n.Message446478c6a451bc64+variant, func(ctx context.Context) error {
+		id := d.m.StartDownload(i18n.Message446478c6a451bc64+variant, func(ctx context.Context) error {
 			ctx, cancel := context.WithTimeout(ctx, 60*time.Minute)
 			defer cancel()
 			return d.m.DownloadModel(ctx, model, variant, mirror)
-		}) {
+		})
+		if id == "" {
 			w.WriteHeader(http.StatusConflict)
 			err = errors.New(i18n.Message7f7d5e3ef44921fb)
 			break
 		}
-		result = i18n.Messageed4ece41f66df572
+		result = map[string]string{"id": id}
 	case r.URL.Path == "/api/model-download-cancel":
 		if r.Method != "POST" || r.Header.Get("X-Respire-Client") != "1" {
 			w.WriteHeader(http.StatusForbidden)
@@ -137,10 +147,17 @@ func (d *desktop) businessRoute(w http.ResponseWriter, r *http.Request) bool {
 			break
 		}
 		var body struct {
-			Pause bool `json:"pause"`
+			ID    string `json:"id"`
+			Pause bool   `json:"pause"`
 		}
-		_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&body)
-		d.m.CancelTask(body.Pause)
+		if err = json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&body); err != nil {
+			break
+		}
+		if !d.m.CancelDownload(body.ID, body.Pause) {
+			w.WriteHeader(http.StatusConflict)
+			err = errors.New("Download is no longer active")
+			break
+		}
 		result = i18n.Messageb4504619611a78dc
 	case r.Method == "GET" && r.URL.Path == "/api/operation":
 		result, err = d.m.Operation(r.URL.Query().Get("id"))

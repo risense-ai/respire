@@ -8,6 +8,7 @@ import {
   action,
   notify,
   api,
+  ApiTransportError,
 } from "../ui/core.js";
 
 // Shared model business rules for the models page and the onboarding wizard:
@@ -252,6 +253,10 @@ export async function waitForProfileSwitch({ onTick, timeoutMs = 15 * 60_000 } =
   return { settled: true, failed: true, details: {}, timeout: true };
 }
 
+const DOWNLOAD_WATCH_MS = 61 * 60_000;
+const DOWNLOAD_STREAM_IDLE_MS = 10_000;
+const TEMPORARY_TASK_STATUSES = new Set([408, 429, 502, 503, 504]);
+
 // Download progress modal: live bytes, pause / resume / cancel, result.
 // Resolves `done` with true only when the task reached the completed stage.
 export function openDownloadModal({
@@ -292,37 +297,83 @@ export function openDownloadModal({
     else if (mode === "failed") buttons.retry.hidden = false, buttons.dismiss.hidden = false;
     else if (mode === "cancelled") buttons.retry.hidden = false, buttons.dismiss.hidden = false;
   }
+  let paused = false;
   let timer = null;
-  let startPromise = Promise.resolve();
-  // While our POST is in flight a terminal task snapshot may still describe
-  // the previous task, so poll() must not treat it as our result.
-  let submitting = false;
-  function start() {
+  let stream = null;
+  let taskID = "";
+  let request = null;
+  let watchDeadline = 0;
+  let pollFailures = 0;
+  function stopUpdates() {
+    clearTimeout(timer);
+    const activeStream = stream;
+    stream = null;
+    activeStream?.close();
+    request?.abort();
+  }
+  async function start() {
+    paused = false;
+    taskID = "";
+    pollFailures = 0;
     errorNode.hidden = true;
     setMode("downloading");
     const mirror = getMirror?.() || "auto";
-    submitting = true;
-    startPromise = api("model-download", {
-      model,
-      variant,
-      ...(mirror && mirror !== "auto" ? { mirror } : {}),
-    }).then(
-      () => {
-        submitting = false;
-      },
-      (error) => {
-        submitting = false;
-        // The bridge rejects with 409 when another task is running.
-        stageNode.textContent = i18nMessages.m7e24b28fccaf9e1e;
-        errorNode.textContent = error.message;
-        errorNode.hidden = false;
-        setMode("failed");
-        throw error;
-      },
-    );
-    return startPromise;
+    try {
+      const receipt = await api("model-download", {
+        model, variant, ...(mirror !== "auto" ? { mirror } : {}),
+      });
+      if (!receipt?.id) throw new Error("Missing download receipt");
+      taskID = receipt.id;
+      watchDeadline = performance.now() + DOWNLOAD_WATCH_MS;
+    } catch (error) {
+      if (!element.open) return;
+      stageNode.textContent = i18nMessages.m7e24b28fccaf9e1e;
+      errorNode.textContent = error.message;
+      errorNode.hidden = false;
+      setMode("failed");
+      return;
+    }
+    if (!element.open) return;
+    if (typeof EventSource === "undefined") return poll();
+    const id = taskID;
+    let source;
+    try {
+      source = new EventSource("/api/task-events?id=" + encodeURIComponent(id));
+    } catch {
+      return poll();
+    }
+    stream = source;
+    const fallback = () => {
+      if (stream !== source) return;
+      stopUpdates();
+      if (canWatch(id)) poll();
+    };
+    const armWatchdog = (idleMs) => {
+      clearTimeout(timer);
+      timer = setTimeout(fallback, Math.min(idleMs, remainingWatch()));
+    };
+    // Some native bridges buffer the first frame until EOF. Even after a frame
+    // arrives, switch to snapshots if the stream ceases making progress.
+    armWatchdog(2000);
+    source.onmessage = (event) => {
+      if (stream !== source || !canWatch(id)) return;
+      let task;
+      try {
+        task = JSON.parse(event.data);
+      } catch {
+        fallback();
+        return;
+      }
+      if (!validTask(task, id)) return fallback();
+      receive(task);
+      if (stream === source) armWatchdog(DOWNLOAD_STREAM_IDLE_MS);
+    };
+    source.onerror = fallback;
   }
-  function applyTask(task) {
+  function validTask(task, id) {
+    return task?.id === id && typeof task.busy === "boolean";
+  }
+  function receive(task) {
     stageNode.textContent = task.stage || "";
     bytesNode.textContent = task.total
       ? `${bytes(task.done)} / ${bytes(task.total)}`
@@ -331,59 +382,86 @@ export function openDownloadModal({
       bar.value = task.done;
       bar.max = task.total;
     }
-  }
-  async function poll() {
-    if (submitting) return;
-    try {
-      const state = await api("state");
-      const task = state.task || {};
-      applyTask(task);
-      if (task.busy) return;
-      // The download ended: success, paused, cancelled or failed.
-      clearInterval(timer);
-      timer = null;
-      if (task.stage === i18nMessages.meb0c326b60ae897a) {
-        setMode("paused");
-        stageNode.textContent = i18nMessages.m807d77097ff13314;
-      } else if (task.stage === i18nMessages.mc0b3fbff51ccc40b) {
-        setMode("done");
-        stageNode.textContent = i18nMessages.m1e60d41bd478c07a;
-        bar.value = bar.max = task.total || 1;
-        resolveDone(true);
-        onDone?.();
-      } else if (task.stage === i18nMessages.ma37778f17c5f3ee5) {
-        setMode("cancelled");
-        stageNode.textContent = i18nMessages.ma37778f17c5f3ee5;
-        resolveDone(false);
-      } else {
-        setMode("failed");
-        stageNode.textContent = i18nMessages.m8a03e35ad323e387;
-        errorNode.textContent = task.error || i18nMessages.m45f5dfb2c9262c74;
-        errorNode.hidden = false;
-        resolveDone(false);
-      }
-    } catch {
-      // transient state poll failure: keep the modal as-is
+    if (task.busy) return;
+    stopUpdates();
+    if (task.stage === i18nMessages.meb0c326b60ae897a) {
+      paused = true;
+      setMode("paused");
+      stageNode.textContent = i18nMessages.m807d77097ff13314;
+    } else if (task.stage === i18nMessages.mc0b3fbff51ccc40b) {
+      setMode("done");
+      stageNode.textContent = i18nMessages.m1e60d41bd478c07a;
+      bar.value = bar.max = task.total || 1;
+      resolveDone(true);
+      onDone?.();
+    } else if (task.stage === i18nMessages.ma37778f17c5f3ee5) {
+      setMode("cancelled");
+      stageNode.textContent = i18nMessages.ma37778f17c5f3ee5;
+      resolveDone(false);
+    } else {
+      stageNode.textContent = i18nMessages.m8a03e35ad323e387;
+      failWatch(task.error || i18nMessages.m45f5dfb2c9262c74);
     }
   }
-  const resumeOrRetry = (button) =>
-    action(button, async () => {
-      setMode("downloading");
-      await start();
-      if (!timer) timer = setInterval(poll, 700);
-    });
+  function failWatch(message) {
+    stopUpdates();
+    setMode("failed");
+    errorNode.textContent = message;
+    errorNode.hidden = false;
+    resolveDone(false);
+  }
+  function remainingWatch() {
+    return Math.max(0, watchDeadline - performance.now());
+  }
+  function canWatch(id) {
+    if (!element.open || id !== taskID) return false;
+    if (remainingWatch() > 0) return true;
+    failWatch(i18nMessages.m23dfe4404e8a5ebe);
+    return false;
+  }
+  async function poll() {
+    const id = taskID;
+    if (!canWatch(id)) return;
+    const abort = new AbortController();
+    request = abort;
+    const timeout = setTimeout(() => abort.abort(), Math.min(5000, remainingWatch()));
+    try {
+      const task = await api("task?id=" + encodeURIComponent(id), undefined, abort.signal);
+      if (!canWatch(id)) return;
+      if (!validTask(task, id)) {
+        failWatch(i18nMessages.m23dfe4404e8a5ebe);
+        return;
+      }
+      pollFailures = 0;
+      receive(task);
+      if (!task.busy) return;
+    } catch (error) {
+      if (!canWatch(id)) return;
+      const temporary = abort.signal.aborted || error instanceof ApiTransportError
+        || TEMPORARY_TASK_STATUSES.has(error.status);
+      if (!temporary || ++pollFailures >= 3) {
+        failWatch(error.status ? error.message : i18nMessages.m23dfe4404e8a5ebe);
+        return;
+      }
+    } finally {
+      clearTimeout(timeout);
+      if (request === abort) request = null;
+    }
+    if (canWatch(id)) timer = setTimeout(poll, Math.min(700, remainingWatch()));
+  }
   element.addEventListener("click", (event) => {
     const button = event.target.closest("[data-dl]");
     if (!button || button.hidden) return;
     const act = button.dataset.dl;
+    if ((act === "pause" || act === "cancel") && !taskID) return;
     if (act === "pause")
       action(button, async () => {
-        await api("model-download-cancel", { pause: true });
+        await api("model-download-cancel", { id: taskID, pause: true });
       });
-    else if (act === "resume" || act === "retry") resumeOrRetry(button);
+    else if (act === "resume" || act === "retry") action(button, start);
     else if (act === "cancel")
       action(button, async () => {
-        await api("model-download-cancel", { pause: false });
+        if (!paused) await api("model-download-cancel", { id: taskID, pause: false });
         element.close();
       });
     else if (act === "dismiss") element.close();
@@ -391,10 +469,7 @@ export function openDownloadModal({
   element.addEventListener(
     "close",
     () => {
-      if (timer) {
-        clearInterval(timer);
-        timer = null;
-      }
+      stopUpdates();
       // Closing the modal does not stop the download; an unresolved `done`
       // settles false so the awaiting wizard can recover from task state.
       resolveDone(false);
@@ -402,10 +477,6 @@ export function openDownloadModal({
     },
     { once: true },
   );
-  setMode("downloading");
-  // Poll from the start, not after the POST resolves: the server answers as
-  // soon as the task is registered, so progress streams in while it runs.
-  timer = setInterval(poll, 700);
   start();
   return { element, done };
 }
