@@ -216,9 +216,10 @@ pub fn deepen_plan(
             x
         }
     }
-    for i in 0..n {
+    for i in 0..n.saturating_sub(1) {
+        let similarity = respire_core::search::centered_cosine_from(vecs[i], &mu);
         for j in (i + 1)..n {
-            let sim = respire_core::search::centered_cosine(vecs[i], vecs[j], &mu);
+            let sim = similarity(vecs[j]);
             if sim >= min_sim {
                 let a = find(&mut parent, i);
                 let b = find(&mut parent, j);
