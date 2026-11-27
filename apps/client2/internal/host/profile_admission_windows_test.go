@@ -91,9 +91,6 @@ func TestNewBindsConfiguredJunctionToPhysicalProfile(t *testing.T) {
 		t.Fatalf("replacement client directory should pass owner checks: %v", err)
 	}
 	replacement.close()
-	if _, err := m.installModelEngines(t.Context()); !errors.Is(err, errJunctionTakeover) {
-		t.Fatalf("junction provider install reached catalog download: %v", err)
-	}
 	checkReplacedProfileControls(t, m)
 }
 
@@ -112,7 +109,6 @@ func TestNewRefusesMissingProfileBelowOwnedJunction(t *testing.T) {
 		t.Fatalf("unresolved profile touched: %v", err)
 	}
 }
-
 
 func TestNewRefusesJunctionAsProfileLeaf(t *testing.T) {
 	selected := syntheticJunctionProfile(t, t.TempDir())

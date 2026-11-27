@@ -69,8 +69,8 @@ export const MODEL_CARDS = [
 export const graniteVariant = (model) =>
   ({ "granite-311m-r2": "quantized", "granite-97m-r2": "standard" })[model];
 
-// Weight per device: CPU stays quantized; GPU/NPU prefer fp16.
-export const DEVICE_VARIANTS = { cpu: "quantized", gpu: "fp16", npu: "fp16" };
+// Weight per device: CPU stays quantized; GPU prefers fp16.
+export const DEVICE_VARIANTS = { cpu: "quantized", gpu: "fp16" };
 
 // Scenario modes for the models page: three intent cards instead of the raw
 // variant/engine matrix. Subtitles are static fallbacks; the page overrides
@@ -113,11 +113,10 @@ export function modeForVariant(variant) {
 }
 
 export function performanceAvailable(platform) {
-  return engineAvailable(platform, "gpu") || engineAvailable(platform, "npu");
+  return engineAvailable(platform, "gpu");
 }
 
 export function detectBestEngine(platform) {
-  if (engineAvailable(platform, "npu")) return "npu";
   if (engineAvailable(platform, "gpu")) return "gpu";
   return "cpu";
 }
@@ -133,11 +132,6 @@ export const DEVICES = [
     title: "GPU",
     detail: i18nMessages.mc935637ded3b5ec6,
   },
-  {
-    id: "npu",
-    title: "NPU",
-    detail: i18nMessages.mc3b16af08c93ecb1,
-  },
 ];
 
 export const isProfileModel = (model) => model !== "m3";
@@ -147,17 +141,45 @@ export function variantFromItem(item) {
   return match ? match[1] : "";
 }
 
-// OS-level engine entry availability. This is not hardware detection: NPU and
-// GPU still go through the runtime's real inference probe when applied.
+// GPU still goes through the runtime's inference probe when applied.
 export function engineAvailable(platform, engine) {
   if (engine === "cpu") return true;
-  if (engine === "gpu") return !String(platform || "").startsWith("linux");
-  if (engine === "npu") return String(platform || "").startsWith("windows");
+  if (engine === "gpu") return /^(windows|darwin)/.test(platform || "");
   return false;
 }
 
-export async function fetchInventory(model) {
-  return api("model-variants?model=" + encodeURIComponent(model));
+export function createModelInventory(getDesktop) {
+  const entries = new Map();
+  let scope;
+  function currentScope() {
+    const desktop = getDesktop();
+    const next = desktop?.connected ? activeModelScope(desktop.health) ?? desktop.health?.data_dir ?? "connected" : null;
+    if (scope !== next) {
+      entries.clear();
+      scope = next;
+    }
+    return next;
+  }
+  return {
+    get(model) {
+      currentScope();
+      return entries.get(model)?.value ?? null;
+    },
+    load(model) {
+      const owner = currentScope();
+      const entry = entries.get(model) || {};
+      if (entry.pending) return entry.pending;
+      entries.set(model, entry);
+      entry.pending = api("model-variants?model=" + encodeURIComponent(model))
+        .then((value) => {
+          if (currentScope() !== owner || entries.get(model) !== entry)
+            throw new Error("Runtime changed while reading model inventory");
+          entry.value = value;
+          return value;
+        }).finally(() => { entry.pending = null; });
+      return entry.pending;
+    },
+  };
 }
 
 export async function fetchProfileState() {

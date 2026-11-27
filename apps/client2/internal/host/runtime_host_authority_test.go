@@ -15,8 +15,7 @@ import (
 
 // Models the caller contract for tests. It does not test exclusion with Rust.
 type hostAuthorityFixture struct {
-	held   map[string]*hostOwnershipFixture
-	remove func(io.Closer, m3Removal) (bool, error)
+	held map[string]*hostOwnershipFixture
 }
 
 type hostOwnershipFixture struct {
@@ -51,10 +50,6 @@ func (lock *hostOwnershipFixture) Close() error {
 	}
 	delete(lock.authority.held, lock.directory)
 	return nil
-}
-
-func (f *hostAuthorityFixture) removeM3(_ context.Context, takeover io.Closer, removal m3Removal) (bool, error) {
-	return f.remove(takeover, removal)
 }
 
 func TestRuntimeHostTakeoverOwnership(t *testing.T) {
@@ -95,53 +90,6 @@ func TestRuntimeHostTakeoverOwnership(t *testing.T) {
 	}
 	if err := next.Close(); err != nil {
 		t.Fatal(err)
-	}
-}
-
-func TestM3UninstallRequiresOwnedRemoval(t *testing.T) {
-	root, err := canonicalSessionDirectory(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	m := Manager{DataRoot: root, Endpoint: "http://127.0.0.1:15169"}
-	ctx := context.Background()
-	if _, err := m.uninstallM3Locked(ctx); !errors.Is(err, errRuntimeHostAuthorityUnavailable) {
-		t.Fatalf("uninstall continued without ownership: %v", err)
-	}
-	f := &hostAuthorityFixture{}
-	m.hostAuthority = f
-	lock, err := m.lockRuntimeTakeover(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if err := lock.Close(); err != nil {
-			t.Error(err)
-		}
-	})
-	input := m3Removal{root: root, profile: root, target: m.ModelDir(), client: modelConfigDigest([]byte("{}"))}
-	changed := errors.New("configuration changed")
-	if _, err := m.removeM3UnderTakeover(ctx, lock, input, func() error { return changed }); !errors.Is(err, changed) {
-		t.Fatalf("scope change was ignored: %v", err)
-	}
-	cancelled, cancel := context.WithCancel(ctx)
-	cancel()
-	if _, err := m.removeM3UnderTakeover(cancelled, lock, input, func() error { return nil }); !errors.Is(err, context.Canceled) {
-		t.Fatalf("cancelled removal was admitted: %v", err)
-	}
-	for _, tc := range []struct {
-		removed bool
-		err     error
-	}{{false, errM3Active}, {false, nil}, {true, nil}} {
-		f.remove = func(lease io.Closer, got m3Removal) (bool, error) {
-			if lease != lock || got != input || len(f.held) != 1 {
-				t.Fatalf("removal received a different binding or lost ownership: %+v", got)
-			}
-			return tc.removed, tc.err
-		}
-		if removed, err := m.removeM3UnderTakeover(ctx, lock, input, func() error { return nil }); removed != tc.removed || err != tc.err {
-			t.Fatalf("removal outcome changed: %t, %v", removed, err)
-		}
 	}
 }
 

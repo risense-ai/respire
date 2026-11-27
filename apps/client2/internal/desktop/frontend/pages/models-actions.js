@@ -188,9 +188,7 @@ export function bindModelActions(view, {
         notify(
           `${i18nMessages.md7104a3e99ee9fd9}${probe.selected || i18nMessages.m46cbcb7c5a65bff9} · ${probe.elapsed_ms ?? "—"}ms · cosine ${typeof probe.cosine === "number" ? probe.cosine.toFixed(4) : "—"}`,
         );
-      } else if (operation === "providers")
-        result = await execute("model_install_engines");
-      else if (operation === "index") result = await execute("index_prepare");
+      } else if (operation === "index") result = await execute("index_prepare");
       else if (operation === "rebuild") {
         if (
           !(await confirm(

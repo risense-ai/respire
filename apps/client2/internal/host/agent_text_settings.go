@@ -1,14 +1,17 @@
 package host
 
-import "respire-client2/internal/i18n"
-
 import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"respire-client2/internal/i18n"
+
+	runtimesdk "github.com/risense-ai/respire/packages/runtime-sdk-go"
 )
 
 func isDesktopAgentTextSetting(key string) bool {
@@ -36,6 +39,36 @@ func (m *Manager) setDesktopAgentTextSetting(ctx context.Context, id, setting st
 	encoded, err := json.Marshal(value)
 	if err != nil {
 		return nil, err
+	}
+	if key == "diary_mode" {
+		release, err := m.holdProfile()
+		if err != nil {
+			return nil, err
+		}
+		defer release()
+		client, supported, err := m.runtimeSDK(ctx, "openapi.v1")
+		if err != nil && !IsUnavailable(err) {
+			return nil, err
+		}
+		if supported {
+			if err := m.markV1Operation(id, ""); err != nil {
+				return nil, err
+			}
+			raw, err := sdkJSON(client.PatchHostConfig(ctx, runtimesdk.PatchHostConfigRequest{DiaryMode: &value}, m.authorizeRuntime))
+			if err != nil {
+				var rejected *RuntimeHTTPError
+				if errors.As(err, &rejected) && rejected.Status < http.StatusInternalServerError &&
+					rejected.Status != http.StatusRequestTimeout && !strings.HasSuffix(rejected.Code, "_outcome_unknown") {
+					return nil, err
+				}
+				return nil, &unconfirmedError{id, err}
+			}
+			var config runtimesdk.HostConfig
+			if err := json.Unmarshal(raw, &config); err != nil || config.DiaryMode != value {
+				return nil, &unconfirmedError{id, errors.New("Runtime did not confirm the requested diary mode")}
+			}
+			return desktopAgentSettingResult(key, encoded)
+		}
 	}
 	takeover, err := m.lockRuntimeTakeover(ctx)
 	if err != nil {

@@ -12,6 +12,8 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 )
 
 // The caller holds takeover. Only the current listener and library locks matter.
@@ -105,4 +107,55 @@ func requireClosedRuntimePort(ctx context.Context, address string) error {
 	}
 	err = connection.Close()
 	return errors.Join(fmt.Errorf(i18n.Messagea3727b6d5b134d26, address), err)
+}
+
+func runtimeBirthID(birth string) string {
+	switch runtime.GOOS {
+	case "windows":
+		return "windows-filetime-" + birth
+	case "darwin":
+		return "darwin-lstart-" + birth
+	default:
+		return "linux-starttime-" + birth
+	}
+}
+
+func (m *Manager) ownsDirectRuntime(h HealthInfo) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	owner := m.directRuntime
+	return owner.PID != 0 && owner.PID == h.PID &&
+		owner.InstanceID == h.InstanceID && owner.ProcessStartID == h.ProcessStartID
+}
+
+func requireStoppedRuntime(ctx context.Context, root, address string) error {
+	if err := requireClosedRuntimePort(ctx, address); err != nil {
+		return err
+	}
+	path := filepath.Join(root, "runtime", "endpoint.json")
+	if checkModelUninstallPath(path) != nil {
+		return ctx.Err()
+	}
+	raw, err := readCredentialConfig(path, 64<<10)
+	var endpoint HealthInfo
+	if err != nil || json.Unmarshal(raw, &endpoint) != nil ||
+		endpoint.PID == 0 || endpoint.ProcessStartID == "" || endpoint.Server != "respire" ||
+		!samePath(endpoint.InstallationRoot, root) || !filepath.IsAbs(endpoint.Exe) ||
+		!samePath(endpoint.Exe, endpoint.ImagePath) || !validHash(endpoint.ImageSHA256) {
+		return ctx.Err()
+	}
+	birth, err := runtimeControlProcessBirth(ctx, int(endpoint.PID))
+	if err != nil || birth == "" || runtimeBirthID(birth) != endpoint.ProcessStartID ||
+		verifyHostProcess(endpoint) != nil {
+		return ctx.Err()
+	}
+	hash, err := fileHash(endpoint.Exe)
+	if err != nil || !strings.EqualFold(hash, endpoint.ImageSHA256) {
+		return ctx.Err()
+	}
+	birth, err = runtimeControlProcessBirth(ctx, int(endpoint.PID))
+	if err == nil && birth != "" && runtimeBirthID(birth) == endpoint.ProcessStartID {
+		return errors.New(i18n.Messageada9194429241ab9)
+	}
+	return ctx.Err()
 }

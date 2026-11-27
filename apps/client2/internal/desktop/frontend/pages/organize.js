@@ -3,6 +3,7 @@ import {
   $,
   all,
   h,
+  number,
   raw,
   input,
   select,
@@ -18,6 +19,7 @@ import {
 } from "../ui/core.js";
 import { heading } from "./overview.js";
 import { report, entry } from "../memory/model.js";
+import { activeModelScope } from "./model-kit.js";
 
 export function organize(root, ctx) {
   let plan = null,
@@ -60,6 +62,7 @@ export function organize(root, ctx) {
     $("[data-plan-apply]", root).disabled = true;
   }
   async function inspect(kind) {
+    const scope = activeModelScope(ctx.desktop?.health);
     const names = {
       suggestions: "organize_suggestions",
       duplicates: "organize_duplicates",
@@ -75,12 +78,13 @@ export function organize(root, ctx) {
           ? { min: 0.8, top: 30 }
           : {},
     );
-    if (!root.isConnected) return;
+    if (!root.isConnected || scope !== activeModelScope(ctx.desktop?.health)) return;
     const value = report(result);
     if (kind === "suggestions") {
       if (!Array.isArray(value.suggests))
         throw new Error(i18nMessages.m506261e7db1c5ca7);
       suggestions = value.suggests;
+      $("#nav-organize-count").textContent = number(suggestions.length);
       area.innerHTML = panel(
         i18nMessages.m2bc0ee63d3cd9cfe,
         suggestions.length

@@ -126,23 +126,14 @@ func (m *Manager) executeV1Operation(ctx context.Context, name, id string, input
 		}
 	case "space_use", "space_remove":
 		spaceID := strings.TrimPrefix(args.Name, "v1:")
-		if spaceID == "main" {
-			if name == "space_remove" {
-				return nil, true, errors.New("The original space cannot be deleted")
-			}
-			active := true
-			raw, err = sdkJSON(client.UpdateSpace(ctx, "main", runtimesdk.UpdateSpaceRequest{Active: &active}, m.authorizeRuntime))
-			break
-		}
-		space, found, findErr := m.findSpaceV1(ctx, client, spaceID)
-		if findErr != nil || !found {
-			return nil, true, errors.Join(findErr, errors.New("Runtime space was not found"))
+		if spaceID == "main" && name == "space_remove" {
+			return nil, true, errors.New("The original space cannot be deleted")
 		}
 		if name == "space_use" {
 			active := true
-			raw, err = sdkJSON(client.UpdateSpace(ctx, space.Id, runtimesdk.UpdateSpaceRequest{Active: &active}, m.authorizeRuntime))
+			raw, err = sdkJSON(client.UpdateSpace(ctx, spaceID, runtimesdk.UpdateSpaceRequest{Active: &active}, m.authorizeRuntime))
 		} else {
-			raw, err = sdkJSON(client.DeleteSpace(ctx, space.Id, m.authorizeRuntime))
+			raw, err = sdkJSON(client.DeleteSpace(ctx, spaceID, m.authorizeRuntime))
 		}
 	case "memory_backup", "memory_import":
 		raw, err = m.backupV1(ctx, client, args.Path, name == "memory_import")
@@ -225,23 +216,6 @@ func (m *Manager) recoverV1Operation(ctx context.Context, job Operation) (json.R
 		return nil, &unconfirmedError{job.ID, err}
 	}
 	return desktopEnvelope(job.Name, map[string]string{"operation_id": job.RuntimeID, "state": "completed"})
-}
-
-func (m *Manager) findSpaceV1(ctx context.Context, client *runtimesdk.Client, name string) (runtimesdk.SpaceItem, bool, error) {
-	raw, err := sdkJSON(client.ListSpaces(ctx, m.authorizeRuntime))
-	if err != nil {
-		return runtimesdk.SpaceItem{}, false, err
-	}
-	var spaces runtimesdk.SpaceListResponse
-	if err := json.Unmarshal(raw, &spaces); err != nil {
-		return runtimesdk.SpaceItem{}, false, err
-	}
-	for _, space := range spaces.Spaces {
-		if space.Id == name {
-			return space, true, nil
-		}
-	}
-	return runtimesdk.SpaceItem{}, false, nil
 }
 
 func (m *Manager) listSpacesV1(ctx context.Context, client *runtimesdk.Client) (json.RawMessage, bool, error) {
