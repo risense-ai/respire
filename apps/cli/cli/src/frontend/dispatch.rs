@@ -306,25 +306,7 @@ pub(super) fn run(args: Cli) -> Result<()> {
             model: model.clone(),
             for_engine: for_engine.clone(),
         };
-        let (assets, skipped) = autostart::control_prepare_model(&intent)?;
-        let directory = assets
-            .assets
-            .iter()
-            .find(|asset| {
-                matches!(
-                    asset.name.as_str(),
-                    "bge-m3-tokenizer" | "profile-tokenizer"
-                )
-            })
-            .and_then(|asset| asset.path.as_deref())
-            .and_then(|path| std::path::Path::new(path).parent())
-            .context("Runtime model receipt is missing its tokenizer directory")?;
-        let mut result = ResultEnvelope::new("model install-m3", OutputStatus::Ok,
-            serde_json::json!({"dir":directory,"skipped":skipped,"activated":false,"model":"m3"}),
-            vec![OutputItem::new("model", OutputStatus::Ok,
-                "Runtime verified model files and fresh backend loading; run rsrs reembed to rebuild an old index")]);
-        result.details = serde_json::to_value(&assets)?;
-        return emit_result(result);
+        return emit_result(autostart::control_prepare_model(&intent)?);
     }
     if let Some(Command::Model {
         action: ModelAction::InstallGranite { model, mirror },

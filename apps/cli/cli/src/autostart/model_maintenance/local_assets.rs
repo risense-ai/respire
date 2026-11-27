@@ -66,7 +66,12 @@ pub(super) fn local_m3_directory() -> Result<PathBuf> {
     Ok(std::path::absolute(path)?)
 }
 
-fn remove_m3(root: &Path, profile: &Path, target: &Path) -> Result<bool> {
+fn remove_m3(
+    root: &Path,
+    profile: &Path,
+    target: &Path,
+    check_active: impl FnOnce(Option<&Path>) -> Result<()>,
+) -> Result<bool> {
     let local = local_m3_directory()?;
     anyhow::ensure!(
         target == local
@@ -92,7 +97,10 @@ fn remove_m3(root: &Path, profile: &Path, target: &Path) -> Result<bool> {
         );
     }
     match fs::symlink_metadata(target) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            check_active(None)?;
+            return Ok(false);
+        }
         Err(error) => return Err(error.into()),
         Ok(metadata) => anyhow::ensure!(
             metadata.is_dir(),
@@ -133,6 +141,7 @@ fn remove_m3(root: &Path, profile: &Path, target: &Path) -> Result<bool> {
             }
         }
     }
+    check_active(Some(&canonical))?;
     check_path(target)?;
     anyhow::ensure!(
         target.canonicalize()? == canonical,

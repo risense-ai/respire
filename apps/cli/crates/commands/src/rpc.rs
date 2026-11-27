@@ -16,6 +16,7 @@ use serde_json::{json, Value};
 
 mod api;
 pub use api::command_roundtrip;
+pub use api::{openapi_client, openapi_health, openapi_optional};
 
 pub const DEFAULT_RPC_HOST: &str = "127.0.0.1";
 pub const DEFAULT_RPC_PORT: u16 = 15169;

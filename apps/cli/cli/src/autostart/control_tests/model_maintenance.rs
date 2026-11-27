@@ -24,6 +24,8 @@ fn isolate(root: &Path) -> Restore {
         "RSRS_M3_DIR",
         "ONEMEMORY_M3_DIR",
         "RESPIRE_M3_DIR",
+        "RSRS_RPC_PORT",
+        "RSRS_RPC_TOKEN",
     ];
     let restore = Restore(
         names
@@ -38,6 +40,65 @@ fn isolate(root: &Path) -> Restore {
     std::env::set_var("USERPROFILE", root);
     std::env::set_var("RSRS_DATA_DIR", root.join("installation"));
     restore
+}
+
+#[test]
+fn online_uninstall_refuses_active_models_and_overlapping_paths() -> Result<()> {
+    let _guard = crate::TEST_ENV_LOCK.lock()
+        .map_err(|_| anyhow::anyhow!("test environment lock poisoned"))?;
+    let dir = tempfile::tempdir()?;
+    let _restore = isolate(dir.path());
+    let directory = local_m3_directory()?;
+    let root = dir.path().join("installation");
+    let marker = root.join("runtime/autostart/maintenance.json");
+    let asset = directory.join("weights");
+    let sibling = root.join("models/other-weights");
+    fs::create_dir_all(&directory)?;
+    fs::write(&asset, b"asset")?;
+    fs::write(&sibling, b"other asset")?;
+    let legacy = json!({"server":"respire","bin":"fixture","v":1,"pid":1,
+        "installation_root":root,"instance_id":"fixture","account_id":"fixture-account",
+        "generation":1,"process_start_id":"fixture-start"});
+    let owner = serde_json::from_value(legacy.clone())?;
+    let health = json!({"status":"ready","instance_id":"fixture","capabilities":["model.active_assets"]});
+    for (model, active, permitted) in [
+        ("m3", &sibling, false),
+        ("bge-m3", &sibling, false),
+        ("other", &asset, false),
+        ("other", &root, false),
+        ("other", &sibling, true),
+    ] {
+        let server = crate::loopback_http::Server::bind()?;
+        std::env::set_var("RSRS_RPC_PORT", server.addr().port().to_string());
+        std::thread::scope(|scope| -> Result<()> {
+            let worker = scope.spawn(|| -> Result<()> {
+                let assets = json!({"active_model_id":model,"active_paths":[active],"locked":true});
+                let mut replies = vec![("/v1/health", &health), ("/v1/models/active-assets", &assets)];
+                if permitted {
+                    replies.push(("/api/health", &legacy));
+                }
+                for (path, body) in replies {
+                    let request = server.recv_timeout(Duration::from_secs(3))?.context("missing uninstall request")?;
+                    assert_eq!(request.url(), path);
+                    assert!(!marker.exists());
+                    request.reply(body.to_string())?;
+                }
+                Ok(())
+            });
+            let result = uninstall_m3_online(&owner, &root, &root);
+            worker.join().map_err(|_| anyhow::anyhow!("uninstall fixture panicked"))??;
+            if permitted {
+                assert_eq!(result?.context("missing online uninstall receipt")?.summary["removed"], true);
+            } else {
+                assert!(result.is_err());
+            }
+            assert_eq!(asset.exists(), !permitted);
+            assert!(sibling.is_file());
+            assert!(!marker.exists());
+            Ok(())
+        })?;
+    }
+    Ok(())
 }
 
 #[test]
@@ -136,9 +197,9 @@ fn uninstall_removes_only_the_exact_model_tree_and_is_idempotent() -> Result<()>
     )?;
     fs::write(profile.join("keep.txt"), b"synthetic profile marker")?;
     fs::write(root.join("models/keep.txt"), b"unrelated model marker")?;
-    assert!(remove_m3(&root, &profile, &root.join("models")).is_err());
+    assert!(remove_m3(&root, &profile, &root.join("models"), |_| Ok(())).is_err());
     assert!(target.exists());
-    assert!(remove_m3(&root, &profile, &target)?);
+    assert!(remove_m3(&root, &profile, &target, |_| Ok(()))?);
     assert!(!target.exists());
     assert_eq!(
         fs::read(profile.join("keep.txt"))?,
@@ -148,12 +209,12 @@ fn uninstall_removes_only_the_exact_model_tree_and_is_idempotent() -> Result<()>
         fs::read(root.join("models/keep.txt"))?,
         b"unrelated model marker"
     );
-    assert!(!remove_m3(&root, &profile, &target)?);
+    assert!(!remove_m3(&root, &profile, &target, |_| Ok(()))?);
     let plan = local_plan(ModelMaintenanceKind::UninstallM3, &root, &profile)?;
     assert_eq!(plan.uninstall_directory.as_deref(), Some(target.as_path()));
     assert!(plan.catalog.is_none() && plan.preparation.is_none());
     fs::write(&target, b"not a directory")?;
-    assert!(remove_m3(&root, &profile, &target).is_err());
+    assert!(remove_m3(&root, &profile, &target, |_| Ok(())).is_err());
     assert_eq!(fs::read(&target)?, b"not a directory");
     Ok(())
 }
@@ -171,7 +232,7 @@ fn uninstall_preserves_installation_profile_home_and_linked_content() -> Result<
     fs::create_dir_all(&profile)?;
     for protected in [&home, &root, &profile] {
         std::env::set_var("RSRS_M3_DIR", protected);
-        assert!(remove_m3(&root, &profile, protected).is_err());
+        assert!(remove_m3(&root, &profile, protected, |_| Ok(())).is_err());
         assert!(protected.is_dir());
     }
     #[cfg(unix)]
@@ -183,7 +244,7 @@ fn uninstall_preserves_installation_profile_home_and_linked_content() -> Result<
         let link = target.join("linked.onnx");
         std::os::unix::fs::symlink(&outside, &link)?;
         std::env::set_var("RSRS_M3_DIR", &target);
-        assert!(remove_m3(&root, &profile, &target).is_err());
+        assert!(remove_m3(&root, &profile, &target, |_| Ok(())).is_err());
         assert!(target.is_dir());
         assert_eq!(fs::read(outside)?, b"outside synthetic marker");
     }
