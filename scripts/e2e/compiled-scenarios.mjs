@@ -6,6 +6,7 @@ import {withRuntime} from '../../referee/test-cases/targets.mjs';
 import {cliTarget} from '../../referee/test-cases/cli-e2e/command.mjs';
 import {prepareSwitch, settledSwitchTarget} from './switch-fixture.mjs';
 import {runDownload} from './download-fixture.mjs';
+import {verifyPluginTransport} from './plugin-transport.mjs';
 
 // The frozen referee reports "HTTP status mismatch" without the received status.
 channel('undici:request:headers').subscribe(({request, response}) => {
@@ -43,6 +44,7 @@ for (const scenario of scenarios) {
       const target = models ? settledSwitchTarget(runtime) :
         scenario.target === 'cli' ? cliTarget(cli,runtime) : runtime.target;
       await runScenario(scenario,target,inputs);
+      if (scenario.id === 'E2E-007') await verifyPluginTransport(runtime.target);
     },{deviceLocal:models || scenario.id === 'E2E-005'});
     console.log('PASS '+label);
     passed++;
