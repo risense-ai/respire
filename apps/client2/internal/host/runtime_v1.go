@@ -28,6 +28,17 @@ func (m *Manager) DashboardHealth(ctx context.Context) (HealthInfo, json.RawMess
 	if discovered != nil && !matchesRuntime(*discovered, health) {
 		return HealthInfo{}, nil, errors.New("Runtime changed during health discovery")
 	}
+	if discovered != nil {
+		var fields map[string]any
+		if err := json.Unmarshal(details, &fields); err != nil {
+			return HealthInfo{}, nil, err
+		}
+		fields["capabilities"] = discovered.Capabilities
+		details, err = json.Marshal(fields)
+		if err != nil {
+			return HealthInfo{}, nil, err
+		}
+	}
 	return health, details, nil
 }
 
@@ -75,7 +86,7 @@ func (m *Manager) checkLiveM3Assets(ctx context.Context, health HealthInfo, targ
 	if !slices.Contains(discovered.Capabilities, "model.active_assets") {
 		return nil
 	}
-	response, err := client.GetActiveModelAssets(ctx)
+	response, err := client.GetActiveModelAssets(ctx, m.authorizeRuntime)
 	if err != nil {
 		return err
 	}

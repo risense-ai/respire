@@ -15,6 +15,7 @@ import (
 )
 
 type Operation struct {
+	RuntimeV1       bool              `json:"runtimeV1,omitempty"`
 	ID              string            `json:"id"`
 	Name            string            `json:"name"`
 	State           string            `json:"state"`
@@ -36,6 +37,7 @@ type Operation struct {
 }
 
 type operationRecord struct {
+	RuntimeV1     bool              `json:"runtimeV1,omitempty"`
 	ID            string            `json:"id"`
 	Name          string            `json:"name"`
 	Started       time.Time         `json:"started"`
@@ -85,7 +87,7 @@ func (m *Manager) loadOperations() error {
 		if state == "running" {
 			state = "unconfirmed"
 		}
-		m.jobs[r.ID] = &Operation{ID: r.ID, Name: r.Name, Started: r.Started, State: state, host: r.Host, write: true, Scope: r.Scope, RuntimeID: r.RuntimeID, Transaction: r.Transaction, TransportID: r.TransportID, MaterialSaved: r.MaterialSaved, coreChange: r.CoreChange}
+		m.jobs[r.ID] = &Operation{RuntimeV1: r.RuntimeV1, ID: r.ID, Name: r.Name, Started: r.Started, State: state, host: r.Host, write: true, Scope: r.Scope, RuntimeID: r.RuntimeID, Transaction: r.Transaction, TransportID: r.TransportID, MaterialSaved: r.MaterialSaved, coreChange: r.CoreChange}
 	}
 	return nil
 }
@@ -99,7 +101,7 @@ func (m *Manager) persistOperationsLocked() error {
 	var records []operationRecord
 	for _, j := range m.jobs {
 		if j.write {
-			records = append(records, operationRecord{ID: j.ID, Name: j.Name, Started: j.Started, State: j.State, Host: j.host, Scope: j.Scope, RuntimeID: j.RuntimeID, Transaction: j.Transaction, TransportID: j.TransportID, MaterialSaved: j.MaterialSaved, CoreChange: j.coreChange})
+			records = append(records, operationRecord{RuntimeV1: j.RuntimeV1, ID: j.ID, Name: j.Name, Started: j.Started, State: j.State, Host: j.host, Scope: j.Scope, RuntimeID: j.RuntimeID, Transaction: j.Transaction, TransportID: j.TransportID, MaterialSaved: j.MaterialSaved, CoreChange: j.coreChange})
 		}
 	}
 	sort.Slice(records, func(i, j int) bool { return records[i].Started.After(records[j].Started) })
@@ -179,38 +181,6 @@ func (m *Manager) Acknowledge(id string) error {
 		delete(m.jobs, id)
 	}
 	return nil
-}
-
-func (m *Manager) RuntimeStatus(ctx context.Context) (json.RawMessage, error) {
-	scope, err := m.requestScope(ctx)
-	if err != nil {
-		return nil, err
-	}
-	id := "status-" + fmt.Sprint(time.Now().UnixNano())
-	reply, err := m.rpcResponse(ctx, "cli.exec", []string{"--json", "status"}, id, scope)
-	if err != nil {
-		return m.inspectResult(ctx, id, scope, err)
-	}
-	if reply.Scope == nil || *reply.Scope != *scope || reply.OperationID != id {
-		return nil, &unconfirmedError{id, errors.New(i18n.Messagefb9a457abcc23607)}
-	}
-	var status struct {
-		Command string `json:"command"`
-		Status  string `json:"status"`
-		Summary struct {
-			CredentialState string `json:"credential_state"`
-			StoreReady      *bool  `json:"store_ready"`
-		} `json:"summary"`
-		Errors []string `json:"errors"`
-	}
-	// A locked store is a valid read-only status, but other RPC warnings still fail.
-	if !reply.OK && reply.Exit == 2 && reply.Code == "" && reply.Error == "" &&
-		json.Unmarshal(reply.Envelope, &status) == nil && status.Command == "status" &&
-		status.Status == "warn" && status.Summary.CredentialState == "required" &&
-		status.Summary.StoreReady != nil && !*status.Summary.StoreReady && len(status.Errors) == 0 {
-		return reply.Envelope, nil
-	}
-	return reply.Envelope, responseError(reply)
 }
 
 func (m *Manager) Submit(name, id string, raw json.RawMessage, confirmed bool, secret string) (Operation, error) {
@@ -303,11 +273,11 @@ func (m *Manager) Submit(name, id string, raw json.RawMessage, confirmed bool, s
 	}
 	copy := *job
 	m.mu.Unlock()
-	go m.runOperation(spec, argv, secret, id)
+	go m.runOperation(spec, argv, secret, id, name, append(json.RawMessage(nil), raw...))
 	return copy, nil
 }
 
-func (m *Manager) runOperation(spec commandSpec, args []string, secret, id string) {
+func (m *Manager) runOperation(spec commandSpec, args []string, secret, id, name string, raw json.RawMessage) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	// Account operations wait for human authorization without a wall-clock deadline.
@@ -319,7 +289,12 @@ func (m *Manager) runOperation(spec commandSpec, args []string, secret, id strin
 	var envelope json.RawMessage
 	var keygenRecovery string
 	var err error
+	envelope, handled, err := m.executeV1Operation(ctx, name, id, raw)
+	if handled {
+		spec.host = false
+	}
 	switch {
+	case handled || err != nil:
 	case spec.method == "model.apply-engine":
 		envelope, err = applyEngine(ctx, m, args, id)
 	case spec.method == "desktop.device-config":

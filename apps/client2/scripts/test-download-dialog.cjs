@@ -34,17 +34,25 @@ function fixture({ starts = initial, snapshot = () => ok(busy), sse = false } = 
     },
   };
   const open = build(
-    { createElement: () => dialog, body: { append() {} } },
+    { createElement: () => dialog, body: { append() {} }, dispatchEvent() {} },
     async (url, opts) => {
       requests.push({ url, opts });
       if (url === "/api/model-download") return starts();
+	  if (url === "/api/runtime-operation?id=fixture" && opts?.method === "DELETE") return ok({ state: "cancelled" });
       assert.equal(url, "/api/task?id=fixture");
       return snapshot(opts);
     },
     !sse ? undefined : class {
       constructor(url) {
-        assert.equal(url, "/api/task-events?id=fixture");
+        assert.ok(["/api/task-events?id=fixture", "/api/runtime-operation-events?id=fixture"].includes(url));
+		this.handlers = new Map();
         streams.push(this);
+      }
+      addEventListener(name, handler) { this.handlers.set(name, handler); }
+      runtimeFrame(event, state = event) {
+        this.handlers.get(event)({ data: JSON.stringify({ event, data: {
+          operation_id: "fixture", kind: "model_download", state, progress_percent: 40,
+        } }) });
       }
       close() { this.closed = true; }
       frame(task) { this.onmessage({ data: JSON.stringify(task) }); }
@@ -75,6 +83,40 @@ function fixture({ starts = initial, snapshot = () => ok(busy), sse = false } = 
     },
   };
 }
+
+test("managed download consumes Runtime SSE without the host watchdog or snapshots", async () => {
+  const f = fixture({ sse: true, starts: () => ok({ id: "fixture", runtime: true, stream: true }) });
+  await flush();
+  f.streams[0].runtimeFrame("progress", "running");
+  assert.equal(f.timers.size, 0);
+  f.streams[0].runtimeFrame("completed");
+  assert.equal(await f.done, true);
+  assert.equal(f.requests.length, 1);
+  assert.equal(f.streams[0].closed, true);
+});
+
+test("managed download cancellation reaches Runtime DELETE", async () => {
+  const f = fixture({ sse: true, starts: () => ok({ id: "fixture", runtime: true, stream: true }) });
+  await flush();
+  f.click("cancel");
+  await flush();
+  assert.equal(await f.done, false);
+  assert.equal(f.requests[1].url, "/api/runtime-operation?id=fixture");
+  assert.equal(f.requests[1].opts.method, "DELETE");
+  assert.equal(f.streams[0].closed, true);
+});
+
+test("closing before a managed receipt arrives never creates an observer", async () => {
+  let release;
+  const pending = new Promise(resolve => { release = resolve; });
+  const f = fixture({ sse: true, starts: () => pending });
+  f.dialog.close();
+  release(ok({ id: "fixture", runtime: true, stream: true }));
+  await flush();
+  assert.equal(await f.done, false);
+  assert.equal(f.streams.length, 0);
+  assert.equal(f.timers.size, 0);
+});
 
 test("rejected start can be dismissed and retried without extra snapshots", async () => {
   const dismissed = fixture({ starts: () => failure(409) });

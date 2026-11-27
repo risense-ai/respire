@@ -64,6 +64,77 @@ export async function api(path, body, signal) {
   return data.result;
 }
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+export function watchRuntimeOperation(receipt, onProgress) {
+  const id = receipt.operation_id || receipt.id;
+  let source, closed = false, rejectDone;
+  const close = () => { closed = true; source?.close(); };
+  const done = new Promise((resolve, reject) => {
+    rejectDone = reject;
+    const fail = (error) => { close(); reject(error); };
+    const receive = (event) => {
+      const data = event.data;
+      if (closed) return;
+      if (data?.operation_id !== id || !["progress", "completed", "failed", "cancelled"].includes(event.event))
+        return fail(new Error("Invalid Runtime operation event"));
+      onProgress?.(data);
+      document.dispatchEvent(new CustomEvent("respire-runtime-progress", { detail: data }));
+      if (event.event === "progress") return;
+      close();
+      document.dispatchEvent(new CustomEvent("respire-operation", { detail: data }));
+      if (event.event === "completed") resolve(data);
+      else reject(Object.assign(new Error(data.error?.detail || data.error?.title || data.message || `Runtime operation ${event.event}`),
+        { cancelled: event.event === "cancelled" }));
+    };
+    if (receipt.stream) {
+      try {
+        source = new EventSource("/api/runtime-operation-events?id=" + encodeURIComponent(id));
+        for (const type of ["progress", "completed", "failed", "cancelled"])
+          source.addEventListener(type, (event) => {
+            try { receive(JSON.parse(event.data)); } catch (error) { fail(error); }
+          });
+        source.addEventListener("transport-error", (event) => {
+          try { fail(new Error(JSON.parse(event.data).error)); } catch (error) { fail(error); }
+        });
+        source.onerror = () => fail(new Error("Runtime operation stream disconnected"));
+      } catch (error) { fail(error); }
+    } else {
+      (async () => {
+        while (!closed) {
+          const data = await api("runtime-operation?id=" + encodeURIComponent(id));
+          receive({ event: ["pending", "running"].includes(data.state) ? "progress" : data.state, data });
+          if (!closed) await pause(1000);
+        }
+      })().catch(fail);
+    }
+  });
+  return { done, close() { close(); rejectDone(new Error("Runtime operation observation closed")); } };
+}
+
+export async function cancelRuntimeOperation(id) {
+  const response = await fetch("/api/runtime-operation?id=" + encodeURIComponent(id), {
+    method: "DELETE", headers: { "X-Respire-Client": "1" },
+  });
+  const reply = await response.json();
+  if (!response.ok || !reply.ok) throw new Error(reply.error || "Runtime cancellation rejected");
+  return reply.result;
+}
+
+let observedSwitch = null;
+export const currentRuntimeSwitch = () => observedSwitch;
+export function observeRuntimeSwitch(receipt, selection, onProgress) {
+  if (observedSwitch?.receipt.operation_id === receipt.operation_id) return observedSwitch.done;
+  const observation = { receipt, ...selection, progress: null };
+  observedSwitch = observation;
+  const watcher = watchRuntimeOperation(receipt, (data) => {
+    observation.progress = data;
+    onProgress?.(data);
+  });
+  observation.done = watcher.done.finally(() => {
+    if (observedSwitch === observation) observedSwitch = null;
+  });
+  return observation.done;
+}
+
 const pending = new Map();
 export const isPending = (name) => [...pending.values()].includes(name);
 export async function execute(

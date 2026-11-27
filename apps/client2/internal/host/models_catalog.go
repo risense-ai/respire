@@ -252,6 +252,9 @@ func (m *Manager) runtimeRPC(ctx context.Context, method string, args []string) 
 // ModelCatalogRPC reports the registry plus the active selection and any
 // pending switch task.
 func (m *Manager) ModelCatalogRPC(ctx context.Context) (json.RawMessage, error) {
+	if raw, handled, err := m.modelCatalogV1(ctx); handled || err != nil {
+		return raw, err
+	}
 	return m.runtimeRPC(ctx, "model.catalog", nil)
 }
 

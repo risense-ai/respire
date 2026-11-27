@@ -134,7 +134,7 @@ export function accounts(root, ctx) {
     if (spaceResult.status === "fulfilled") {
       const spaces = rows(spaceResult.value, "spaces");
       $("[data-spaces]", root).innerHTML = spaces.length
-        ? `<ul class="clean">${spaces.map((item) => `<li class="row"><div class="row-copy"><strong>${h(item.name)}</strong><small>${h(item.role || item.kind || "")}</small></div>${item.current ? i18nMessages.mcaf22de6f8c631b3 : `<button data-space-use="${h(item.name)}${i18nMessages.m48ab9f10de3bb930}`}${item.is_main || item.current ? "" : `<button class="danger" data-space-remove="${h(item.name)}${i18nMessages.mf2e5d6dbb59fd2c8}`}</li>`).join("")}</ul>`
+        ? `<ul class="clean">${spaces.map((item) => `<li class="row"><div class="row-copy"><strong>${h(item.name)}</strong><small>${h(item.role || item.kind || "")}</small></div>${item.current ? i18nMessages.mcaf22de6f8c631b3 : `<button data-space-use="${h(item.id ? "v1:" + item.id : item.name)}${i18nMessages.m48ab9f10de3bb930}`}${item.is_main || item.current ? "" : `<button class="danger" data-space-remove="${h(item.id ? "v1:" + item.id : item.name)}${i18nMessages.mf2e5d6dbb59fd2c8}`}</li>`).join("")}</ul>`
         : i18nMessages.m28b00c1b72e7fbc1;
     } else $("[data-spaces]", root).textContent = spaceResult.reason.message;
     $("[name=addr]", root).value = ctx.desktop?.serverAddress || "";
