@@ -28,6 +28,13 @@ fn client_sends_existing_token_on_initial_health_and_rpc_requests(
                 return Err("initial request omitted the existing runtime token".into());
             }
             paths.push(request.url().to_owned());
+            if request.url() == "/v1/health" {
+                use std::io::Write;
+                request.into_stream().write_all(
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                ).map_err(|error| error.to_string())?;
+                continue;
+            }
             let response = if request.url() == "/api/health" {
                 health_body.clone()
             } else {
@@ -70,7 +77,8 @@ fn client_sends_existing_token_on_initial_health_and_rpc_requests(
         "{}",
         String::from_utf8_lossy(&health.stdout)
     );
-    assert!(paths.iter().any(|path| path == "/api/health"));
+    assert!(paths.windows(2).any(|pair| pair == ["/v1/health", "/api/health"]));
+    assert_eq!(paths.iter().filter(|path| *path == "/v1/health").count(), 1);
     assert!(paths.iter().any(|path| path == "/api/rpc"));
     Ok(())
 }
