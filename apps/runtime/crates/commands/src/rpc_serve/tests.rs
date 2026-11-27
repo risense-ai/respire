@@ -115,7 +115,7 @@ fn business_scope_rejects_missing_empty_and_stale_identity() {
 }
 
 #[test]
-fn disabled_automatic_sync_does_not_wait_for_the_foreground_writer() {
+fn disabled_automatic_sync_does_not_wait_for_the_foreground_writer() -> Result<()> {
     let gate = shared_exclusive();
     let foreground = gate.acquire(true);
     let (result, receipt) = mpsc::channel();
@@ -124,8 +124,9 @@ fn disabled_automatic_sync_does_not_wait_for_the_foreground_writer() {
     });
     let disabled = receipt.recv_timeout(Duration::from_secs(1));
     drop(foreground);
-    attempt.join().expect("automatic sync preflight did not panic");
+    attempt.join().map_err(|_| anyhow::anyhow!("automatic sync preflight panicked"))?;
     assert!(matches!(disabled, Ok(Ok(None))));
+    Ok(())
 }
 
 #[test]
