@@ -3,8 +3,9 @@ import assert from 'node:assert/strict';
 import {channel} from 'node:diagnostics_channel';
 import {loadScenarios, runScenario} from '../../referee/test-cases/runner.mjs';
 import {withRuntime} from '../../referee/test-cases/targets.mjs';
+import {mcpRoundTrip} from '../../referee/test-cases/plugin-rpc/mcp.mjs';
 import {cliTarget} from '../../referee/test-cases/cli-e2e/command.mjs';
-import {prepareSwitch, settledSwitchTarget} from './switch-fixture.mjs';
+import {prepareRecall, prepareSwitch, settledSwitchTarget} from './switch-fixture.mjs';
 import {runDownload} from './download-fixture.mjs';
 import {verifyPluginTransport} from './plugin-transport.mjs';
 
@@ -46,6 +47,15 @@ for (const scenario of scenarios) {
       await runScenario(scenario,target,inputs);
       if (scenario.id === 'E2E-007') await verifyPluginTransport(runtime);
     },{deviceLocal:models || scenario.id === 'E2E-005'});
+    if (process.platform === 'win32' && scenario.id === 'E2E-007') {
+      for (const locale of ['en', 'zh']) {
+        const bytes = await withRuntime(binary, {syntheticReady:true}, async runtime => {
+          await prepareRecall(runtime);
+          return mcpRoundTrip(cli, runtime, locale);
+        }, {junction:true, deviceLocal:true});
+        console.log('VERIFIED WINDOWS JUNCTION MCP STDIO locale=' + locale + ' request bytes=' + bytes);
+      }
+    }
     console.log('PASS '+label);
     passed++;
   } catch (error) {
