@@ -39,7 +39,13 @@ export async function prepareSwitch(runtime, rollback) {
   if (!rollback) {
     // Populate the disposable library before starting either switch worker.
     for (let n=0;n<128;n++) {
+      const started = performance.now();
       const stored=await request({method:'POST',path:'/v1/memories',body:{content:'Synthetic background record '+n}});
+      const elapsed = Math.round(performance.now() - started);
+      if (stored.status === 503) {
+        console.error(`Seed rejected: elapsed_ms=${elapsed}; problem=${
+          stored.data?.code === 'runtime_unavailable' ? 'runtime_unavailable' : 'other'}`);
+      }
       assert.equal(stored.status,201,'fixture seed '+(n+1)+'/128: expected HTTP 201, received '+stored.status);
     }
   }

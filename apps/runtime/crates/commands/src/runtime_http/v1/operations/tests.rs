@@ -13,6 +13,7 @@ use sha2::{Digest, Sha256};
 use std::{fs, net::SocketAddr, process::Command, thread, time::Duration};
 use tower::ServiceExt;
 
+mod main_create_tests;
 #[path = "sse_cursor_tests.rs"]
 mod sse_cursor_tests;
 use sse_cursor_tests::events;
@@ -142,9 +143,9 @@ pub(super) fn production_router_fixture(test: &'static str) -> Result<()> {
         .build()?
         .block_on(async {
             let app = crate::runtime_http::router(BOUND);
-            if test == space_members_tests::INVITE_TEST {
+            if matches!(test, space_members_tests::INVITE_TEST | main_create_tests::CREATE_TEST) {
                 crate::rpc_serve::mark_http_fixture_ready();
-                return space_members_tests::loopback().await;
+                return match test { main_create_tests::CREATE_TEST => main_create_tests::check_main_create_abandonment(&app).await, _ => space_members_tests::loopback().await };
             }
             if test == SPACE_TEST {
                 crate::rpc_serve::mark_http_fixture_ready();

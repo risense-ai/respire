@@ -81,11 +81,18 @@ impl LocalStore {
         Ok(())
     }
 
-    pub(super) fn store_artifact(&self, memory: &crate::StoredMemory, model: &str) -> Result<()> {
-        self.store_artifact_in_generation(memory, &generation_key(model)?)
+    pub(super) fn store_artifact(&self, memory: &crate::StoredMemory) -> Result<()> {
+        // A source-only write invalidates stale locators across all generations.
+        // It must not call the Core worker while holding SQLite's writer.
+        let generation = if memory.deleted || memory.local_artifact.is_empty() {
+            None
+        } else {
+            Some(generation_key(&self.retrieval_model()?)?)
+        };
+        self.store_artifact_in_generation(memory, generation.as_deref())
     }
 
-    fn store_artifact_in_generation(&self, memory: &crate::StoredMemory, generation: &str) -> Result<()> {
+    fn store_artifact_in_generation(&self, memory: &crate::StoredMemory, generation: Option<&str>) -> Result<()> {
         // The source guard also protects a newer artifact from an older prepared snapshot.
         self.connection.execute_batch("SAVEPOINT core_artifact_publish")?;
         let result = (|| -> Result<()> {
@@ -94,7 +101,7 @@ impl LocalStore {
                  AND EXISTS(SELECT 1 FROM memories m WHERE m.id=?1 AND m.ciphertext=?2 AND m.deleted=?3)",
                 params![memory.id, memory.ciphertext, memory.deleted as i64],
             )?;
-            if !memory.deleted && !memory.local_artifact.is_empty() {
+            if let Some(generation) = generation.filter(|_| !memory.deleted && !memory.local_artifact.is_empty()) {
                 self.connection.execute(
                     "INSERT OR REPLACE INTO core_artifacts(memory_id,model,source,artifact)
                      SELECT id,?2,ciphertext,?4 FROM memories WHERE id=?1 AND ciphertext=?3 AND deleted=0",
@@ -280,7 +287,7 @@ impl LocalStore {
             progress(index, candidates.len())?;
             let mut derived = stored.clone();
             derived.local_artifact = prepared.artifact;
-            self.store_artifact_in_generation(&derived, resolve()?.as_ref())?;
+            self.store_artifact_in_generation(&derived, Some(resolve()?.as_ref()))?;
             completed += 1;
         }
         progress(candidates.len(), candidates.len())?;

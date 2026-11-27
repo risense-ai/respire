@@ -62,6 +62,19 @@ fn hashing_embedder_produces_normalized() {
 }
 
 #[test]
+fn reused_centered_scorer_preserves_legacy_bits() {
+    let mean = [1.0, 0.0];
+    let left = [0.0, 1.0];
+    // Golden bits from the original pairwise scorer. A vector equal to the
+    // mean has no centered direction, so two such vectors use raw cosine.
+    let expected = [0x3f35_04f4, 0, 0x3f80_0000, 0];
+    let centered = centered_cosine_from(&left, &mean);
+    let uncentered = centered_cosine_from(&mean, &mean);
+    let actual = [centered(&[-1.0, 0.0]), centered(&mean), uncentered(&mean), uncentered(&left)];
+    assert_eq!(actual.map(f32::to_bits), expected);
+}
+
+#[test]
 fn mean_vector_and_centered_cosine() {
     assert!(mean_vector(&[]).is_none());
     let a = [1.0f32, 0.0];

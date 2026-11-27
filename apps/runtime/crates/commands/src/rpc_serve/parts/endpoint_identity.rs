@@ -56,16 +56,28 @@ pub(crate) fn with_verified_owner_library_scope<T>(
 pub(crate) fn with_verified_owner_store_scope<T>(
     action: impl FnOnce(&str, &std::path::Path, uuid::Uuid, u64, uuid::Uuid, respire_app::auth::RuntimeLibrary<'_>) -> T,
 ) -> Option<T> {
-    with_owner_store_fence(|| with_locked_library(action)).flatten()
+    try_verified_owner_store_scope(action).ok().flatten()
 }
 
 // Long local model work retains the identity and store fences while releasing
 // the vault mutex between checkpoints so operation status and cancel stay live.
 pub(crate) fn with_owner_store_fence<T>(action: impl FnOnce() -> T) -> Option<T> {
-    let _identity = SCOPE_EXECUTION.try_read().ok()?;
+    try_owner_store_fence(action).ok().flatten()
+}
+
+/// Only writer contention is retryable. Never defer an unavailable identity,
+/// poisoned gate, or missing verified library.
+pub(crate) fn try_verified_owner_store_scope<T>(
+    action: impl FnOnce(&str, &std::path::Path, uuid::Uuid, u64, uuid::Uuid, respire_app::auth::RuntimeLibrary<'_>) -> T,
+) -> std::result::Result<Option<T>, ()> {
+    try_owner_store_fence(|| with_locked_library(action)).map(Option::flatten)
+}
+
+fn try_owner_store_fence<T>(action: impl FnOnce() -> T) -> std::result::Result<Option<T>, ()> {
+    let Ok(_identity) = SCOPE_EXECUTION.try_read() else { return Ok(None) };
     let writer = crate::rpc_worker::shared_exclusive();
-    let _foreground = writer.try_owner_foreground()?;
-    Some(action())
+    let Some(_foreground) = writer.try_owner_foreground()? else { return Ok(None) };
+    Ok(Some(action()))
 }
 
 fn with_locked_owner_scope<T>(

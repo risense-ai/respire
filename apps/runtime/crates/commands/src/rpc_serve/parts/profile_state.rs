@@ -364,6 +364,21 @@ fn enqueue_manual(job: Job) {
     }
 }
 
+fn automatic_sync_boundary(generation: usize, enabled: bool) -> Result<Option<i64>> {
+    // A startup timer may fire even with autosync disabled. Do not take the
+    // shared writer gate just to discover there is no automatic work to do.
+    if !enabled {
+        return Ok(None);
+    }
+    sync_local(generation, || {
+        anyhow::ensure!(
+            !respire_app::service::service_paused(),
+            "background sync paused by service mode"
+        );
+        crate::engine::build_local()?.outgoing_boundary()
+    }).map(Some)
+}
+
 fn flight_loop() {
     mark_worker();
     loop {
@@ -474,14 +489,10 @@ fn flight_loop() {
             let _ = job.reply.send(result.map_err(|error| format!("{error:#}")));
         } else {
             let generation = GENERATION.load(Ordering::Acquire);
-            let boundary = sync_local(generation, || {
-                anyhow::ensure!(
-                    !respire_app::service::service_paused(),
-                    "background sync paused by service mode"
-                );
-                crate::engine::build_local()?.outgoing_boundary()
-            });
-            let result = boundary.and_then(|boundary| {
+            let enabled = respire_app::service::autosync_active()
+                && respire_app::sync::remote_configured();
+            let result = automatic_sync_boundary(generation, enabled).and_then(|boundary| {
+                let Some(boundary) = boundary else { return Ok(false) };
                 SYNC_CONTEXT.with(|context| context.set(Some((generation, boundary))));
                 crate::engine::background_sync_once()
             });
