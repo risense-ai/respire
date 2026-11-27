@@ -70,11 +70,6 @@ fn draw(frame: &mut Frame, app: &App) {
     }
     let foot = if matches!(app.overlay, Overlay::HostModel) {
         t("\u{7b49}\u{5f85}\u{5bbf}\u{4e3b}\u{7ed3}\u{679c}\u{ff1b}\u{4e0d}\u{652f}\u{6301}\u{53d6}\u{6d88}", "Waiting for host result; cancellation unavailable")
-    } else if matches!(app.overlay, Overlay::ModelTask(_)) {
-        t(
-            "Esc / C \u{53d6}\u{6d88}\u{5f53}\u{524d}\u{6a21}\u{578b}\u{4efb}\u{52a1}",
-            "Esc / C cancels the model task",
-        )
     } else if matches!(
         app.overlay,
         Overlay::RecallApi(_) | Overlay::RecallFusion(_)

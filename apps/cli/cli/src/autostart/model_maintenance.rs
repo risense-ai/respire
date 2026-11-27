@@ -26,6 +26,8 @@ include!("model_maintenance/review.rs");
 
 include!("model_maintenance/operation.rs");
 
+include!("model_maintenance/online.rs");
+
 include!("model_maintenance/local_assets.rs");
 
 #[cfg(test)]

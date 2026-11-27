@@ -134,6 +134,12 @@ fn coordinate(kind: ModelMaintenanceKind) -> Result<ResultEnvelope> {
         );
         Ok(())
     };
+    if let Some(owner) = owner.as_ref().filter(|_| kind == ModelMaintenanceKind::UninstallM3) {
+        unchanged()?;
+        if let Some(output) = uninstall_m3_online(owner, &root, &profile)? {
+            return Ok(output);
+        }
+    }
     let mut maintenance = super::lifecycle::begin_maintenance_locked()?;
     let result = (|| -> Result<ResultEnvelope> {
         maintenance.check_account_runtime()?;
@@ -260,6 +266,7 @@ fn coordinate(kind: ModelMaintenanceKind) -> Result<ResultEnvelope> {
                             plan.uninstall_directory
                                 .as_deref()
                                 .context("host uninstall directory missing")?,
+                            |_| Ok(()),
                         )?;
                     }
                 }
@@ -314,25 +321,11 @@ fn coordinate(kind: ModelMaintenanceKind) -> Result<ResultEnvelope> {
                 Vec::new(),
             ),
             ModelMaintenanceKind::UninstallM3 => {
-                let status = if removed { Status::Ok } else { Status::Skip };
                 let directory = plan
                     .uninstall_directory
                     .as_ref()
                     .context("uninstall directory missing")?;
-                ResultEnvelope::new(
-                    "model",
-                    status,
-                    json!({"dir":directory,"removed":removed,"model":"bge-m3"}),
-                    vec![Item::new(
-                        "model",
-                        status,
-                        if removed {
-                            directory.display().to_string()
-                        } else {
-                            "not installed".into()
-                        },
-                    )],
-                )
+                uninstall_result(directory, removed)
             }
             ModelMaintenanceKind::ResetCpu => ResultEnvelope::new(
                 "model",

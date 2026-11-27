@@ -30,7 +30,7 @@ pub(crate) use launch_authorization::identity_write_control::{control_logout, co
 pub(crate) use launch_authorization::space_control::{control_space_invite, control_space_join, control_space_kick};
 pub(crate) use launch_authorization::profile_maintenance::{control_account_remove, control_space_remove};
 pub(crate) use auth_control::{control_account_result, control_account_rollback,
-    control_auth_result, control_keygen, control_login, control_login_step, control_register};
+    control_auth_result, control_keygen, control_login_step, control_register};
 pub(crate) use launch_authorization::secret_control::{control_secret, control_keys_export, control_session_list};
 pub(super) use launch_authorization::control::{installed_auth_runtime, verify_account_target};
 #[cfg(feature = "client2-host-prototype")]
@@ -38,9 +38,6 @@ pub(super) use launch_authorization::control::identity as handoff_identity;
 #[cfg(feature = "client2-host-prototype")]
 pub(super) use launch_authorization::model_control::{installed_model_runtime, verify_model_owner};
 pub(crate) use launch_authorization::control::{login_recovery_status, recover_legacy_login_locked};
-pub(crate) use launch_authorization::model_control::{
-    prepare_model_locked, model_install_plan_locked, model_install_verify_locked,
-};
 pub(crate) use launch_authorization::model_control::control_prepare_model;
 pub(crate) use launch_authorization::model_maintenance::{
     control_install_engines, control_reset_cpu, control_uninstall_m3,
@@ -49,9 +46,11 @@ pub(crate) use launch_authorization::config_control::{run_config_control, run_pr
 pub(crate) use launch_authorization::exchange_control as exchange_snapshot_control;
 pub(crate) use launch_authorization::prepare_grant_for_identity as prepare_snapshot_grant;
 pub(crate) use launch_authorization::control::{
-    account_request as prepare_auth_account_request, validate_account_receipt as validate_auth_account_receipt,
-    AccountControl as AuthAccountControl, AccountOutcomeUnknown,
-    auth_keygen_locked, auth_result_locked, AuthOutcomeUnknown,
+    validate_account_receipt as validate_auth_account_receipt, AccountOutcomeUnknown, AuthOutcomeUnknown,
+};
+#[cfg(test)]
+use launch_authorization::control::{
+    account_request as prepare_auth_account_request, AccountControl as AuthAccountControl,
 };
 
 /// Delay between a failed child attempt and the next start.

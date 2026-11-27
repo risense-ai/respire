@@ -203,3 +203,82 @@ fn client_only_rejects_stalled_inference_before_submitting_a_write(
     );
     Ok(())
 }
+
+#[test]
+fn model_commands_negotiate_v1_and_only_use_legacy_on_unavailable_routes(
+) -> Result<(), Box<dyn std::error::Error>> {
+    use serde_json::{json, Value};
+    use std::io::Write;
+    use std::sync::{atomic::{AtomicBool, Ordering}, Arc};
+
+    for (action, capabilities, status, expected_legacy) in [
+        ("catalog", true, 200, false),
+        ("switch", true, 202, false),
+        ("catalog", true, 404, true),
+        ("switch", true, 404, true),
+        ("catalog", false, 404, true),
+        ("switch", true, 409, false),
+    ] {
+        let dir = tempfile::tempdir()?;
+        let server = loopback_http::Server::bind()?;
+        let port = server.addr().port();
+        let done = Arc::new(AtomicBool::new(false));
+        let finished = Arc::clone(&done);
+        let owner = fixture_health(dir.path());
+        let worker = thread::spawn(move || -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
+            let mut paths = Vec::new();
+            while !finished.load(Ordering::Acquire) {
+                let Some(request) = server.recv_timeout(Duration::from_millis(100))? else { continue };
+                let path = request.url().to_owned();
+                paths.push(path.clone());
+                let (code, body) = match path.as_str() {
+                    "/api/health" => (200, owner.clone()),
+                    "/v1/health" => (200, json!({"status":"ready","instance_id":"fixture-instance",
+                        "capabilities":if capabilities { vec!["openapi.v1"] } else { vec![] }})),
+                    "/v1/models/catalog" if action == "catalog" => (status, json!({"active_model_id":"m3","models":[]})),
+                    "/v1/models/switch" if action == "switch" => {
+                        assert_eq!(serde_json::from_slice::<Value>(request.body())?,
+                            json!({"model_id":"m3","engine":"cpu","variant":"q4"}));
+                        (status, json!({"operation_id":"switch-operation","status":"pending"}))
+                    }
+                    "/api/rpc" => {
+                        let body: Value = serde_json::from_slice(request.body())?;
+                        assert_eq!(body["method"], format!("model.{action}"));
+                        if action == "switch" { check_fixture_operation(&body)?; }
+                        (200, json!({"v":1,"id":body["id"],"ok":true,"exit":0,"bin":"fixture",
+                            "operation_id":body["operation_id"],"scope":body["scope"],"idempotency_key":body["idempotency_key"],
+                            "envelope":{"command":body["method"],"status":"ok","summary":{"legacy":true},
+                            "items":[],"actions":[],"errors":[],"details":null}}))
+                    }
+                    _ => return Err(format!("unexpected model request {path}").into()),
+                };
+                let body = body.to_string();
+                write!(request.into_stream(), "HTTP/1.1 {code} Fixture\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())?;
+            }
+            Ok(paths)
+        });
+        let mut command = Command::new(bin());
+        command.args(["--client-only", "--json", "model", action]);
+        if action == "switch" { command.args(["m3", "--variant", "q4"]); }
+        let output = command.env("RSRS_DATA_DIR", dir.path())
+            .env("RSRS_RPC_PORT", port.to_string()).env_remove("RSRS_RPC_TOKEN").output();
+        done.store(true, Ordering::Release);
+        let paths = worker.join().map_err(|_| "model fixture panicked")?.map_err(|error| error.to_string())?;
+        assert_eq!(paths.iter().filter(|path| *path == "/api/rpc").count(), usize::from(expected_legacy));
+        assert_eq!(paths.iter().filter(|path| path.starts_with("/v1/models/")).count(), usize::from(capabilities));
+        let output = output?;
+        let envelope: Value = serde_json::from_slice(&output.stdout)?;
+        if expected_legacy {
+            assert_eq!(envelope["summary"]["legacy"], true);
+        } else if status == 409 {
+            assert!(!output.status.success());
+        } else if action == "catalog" {
+            assert!(output.status.success());
+            assert_eq!(envelope["summary"]["active_model_id"], "m3");
+        } else {
+            assert_eq!(envelope["status"], "pending");
+            assert_eq!(envelope["summary"]["id"], "switch-operation");
+        }
+    }
+    Ok(())
+}

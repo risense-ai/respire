@@ -10,12 +10,6 @@ fn handle(app: &mut App, code: KeyCode) -> bool {
         model_weights_key(app, code);
         return false;
     }
-    if let Overlay::ModelTask(task) = &app.overlay {
-        if matches!(code, KeyCode::Esc | KeyCode::Char('c' | 'C')) {
-            task.cancel.store(true, Ordering::Release);
-        }
-        return false;
-    }
     if code == KeyCode::Esc {
         if !matches!(app.overlay, Overlay::None) {
             app.overlay = Overlay::None;
