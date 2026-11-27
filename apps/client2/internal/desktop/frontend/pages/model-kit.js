@@ -9,6 +9,9 @@ import {
   notify,
   api,
   ApiTransportError,
+  watchRuntimeOperation,
+  cancelRuntimeOperation,
+  observeRuntimeSwitch,
 } from "../ui/core.js";
 
 // Shared model business rules for the models page and the onboarding wizard:
@@ -216,6 +219,14 @@ export function managedM3ApplySelection(result) {
 }
 
 export async function applyLegacyEngine(engine, variant) {
+  const receipt = await api("model-switch", { model: "m3", engine, variant });
+  if (receipt?.operation_id) {
+    const operation = await observeRuntimeSwitch(receipt, { model: "m3", engine, variant });
+    return { envelope: { status: "ok", summary: operation }, result: {
+      engine, model: variant, fallback: false,
+      probe: { state: "ready", active_changed: true, result: { selection: { model: "m3", engine, variant } } },
+    } };
+  }
   const envelope = await execute("model_engine_apply", {
     engine,
     model: variant,
@@ -223,9 +234,13 @@ export async function applyLegacyEngine(engine, variant) {
   return { envelope, result: summary(envelope) };
 }
 
-export async function submitProfileSwitch(model, engine, variant) {
-  await api("model-configure", { model, variant });
-  await api("model-switch", { model, engine, variant });
+export async function submitProfileSwitch(model, engine, variant, onProgress) {
+  const receipt = await api("model-switch", { model, engine, variant });
+  if (receipt?.operation_id) {
+    await observeRuntimeSwitch(receipt, { model, engine, variant }, onProgress);
+    return { ...receipt, settled: true };
+  }
+  return receipt;
 }
 
 // profileStateSettled reports whether a switch task reached a terminal
@@ -301,6 +316,7 @@ export function openDownloadModal({
   let timer = null;
   let stream = null;
   let taskID = "";
+  let runtimeDownload = false;
   let request = null;
   let watchDeadline = 0;
   let pollFailures = 0;
@@ -324,6 +340,31 @@ export function openDownloadModal({
       });
       if (!receipt?.id) throw new Error("Missing download receipt");
       taskID = receipt.id;
+      runtimeDownload = Boolean(receipt.runtime);
+      if (runtimeDownload) {
+        if (!element.open) return;
+        const watcher = watchRuntimeOperation(receipt, (operation) => {
+          stageNode.textContent = operation.message || operation.state;
+          if (typeof operation.progress_percent === "number") {
+            bar.max = 100; bar.value = operation.progress_percent;
+          }
+        });
+        stream = watcher;
+        buttons.pause.hidden = true;
+        try {
+          await watcher.done;
+          stopUpdates();
+          setMode("done");
+          bar.value = bar.max = 100;
+          resolveDone(true);
+          onDone?.();
+        } catch (error) {
+          if (!element.open) return;
+          if (error.cancelled) { stopUpdates(); setMode("cancelled"); resolveDone(false); }
+          else failWatch(error.message);
+        }
+        return;
+      }
       watchDeadline = performance.now() + DOWNLOAD_WATCH_MS;
     } catch (error) {
       if (!element.open) return;
@@ -461,7 +502,8 @@ export function openDownloadModal({
     else if (act === "resume" || act === "retry") action(button, start);
     else if (act === "cancel")
       action(button, async () => {
-        if (!paused) await api("model-download-cancel", { id: taskID, pause: false });
+        if (runtimeDownload) await cancelRuntimeOperation(taskID);
+        else if (!paused) await api("model-download-cancel", { id: taskID, pause: false });
         element.close();
       });
     else if (act === "dismiss") element.close();
@@ -496,8 +538,8 @@ export function fallbackMessage(engine, result) {
 
 export async function applyEngineChoice({ model, engine, variant }) {
   if (isProfileModel(model)) {
-    await submitProfileSwitch(model, engine, variant);
-    const verdict = await waitForProfileSwitch();
+    const receipt = await submitProfileSwitch(model, engine, variant);
+    const verdict = receipt?.settled ? { settled: true, failed: false, details: readProfileState(await fetchProfileState()) } : await waitForProfileSwitch();
     return {
       engine,
       variant,

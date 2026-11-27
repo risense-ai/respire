@@ -2,20 +2,35 @@ package desktop
 
 import "respire-client2/internal/i18n"
 
-import "errors"
+import (
+	"context"
+	"errors"
+	"respire-client2/internal/host"
+	"time"
+)
 
 func (d *desktop) chooseFile(kind string) (string, error) {
 	switch kind {
 	case "directory":
 		return d.app.Dialog.OpenFile().SetTitle(i18n.Message5fe04bd62763d02a).CanChooseDirectories(true).CanChooseFiles(false).AttachToWindow(d.window).PromptForSingleSelection()
 	case "import":
-		return d.app.Dialog.OpenFile().SetTitle(i18n.Messagebb6b8ef838716c2b).AddFilter(i18n.Message97f698e0b9af9922, "*.json").AttachToWindow(d.window).PromptForSingleSelection()
+		return d.app.Dialog.OpenFile().SetTitle(i18n.Messagebb6b8ef838716c2b).AddFilter(i18n.Message97f698e0b9af9922, "*.json;*.rsrs-backup").AttachToWindow(d.window).PromptForSingleSelection()
 	case "share-import":
 		return d.app.Dialog.OpenFile().SetTitle(i18n.Message34cc9246ad36c83c).AddFilter(i18n.Message66361095a9e74711, "*.txt;*.md").AttachToWindow(d.window).PromptForSingleSelection()
 	case "export":
 		return d.app.Dialog.SaveFile().SetMessage(i18n.Messaged40520260c4ea876).SetFilename("respire-memories.json").AddFilter(i18n.Message97f698e0b9af9922, "*.json").AttachToWindow(d.window).PromptForSingleSelection()
 	case "backup":
-		return d.app.Dialog.SaveFile().SetMessage(i18n.Messagee7843629b018f822).SetFilename("respire-backup.db").AddFilter(i18n.Messagea5dd79dec780abca, "*.db").AttachToWindow(d.window).PromptForSingleSelection()
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		supported, err := d.m.RuntimeSupports(ctx, "backups.v1")
+		if err != nil && !host.IsUnavailable(err) {
+			return "", err
+		}
+		name, filter := "respire-backup.db", "*.db"
+		if supported {
+			filter = "*.db;*.rsrs-backup"
+		}
+		return d.app.Dialog.SaveFile().SetMessage(i18n.Messagee7843629b018f822).SetFilename(name).AddFilter(i18n.Messagea5dd79dec780abca, filter).AttachToWindow(d.window).PromptForSingleSelection()
 	case "keys":
 		return d.app.Dialog.SaveFile().SetMessage(i18n.Messageb0a5f7f526c98c55).SetFilename("respire-keys.txt").AddFilter(i18n.Message5dc1f920f6c8ef19, "*.txt").AttachToWindow(d.window).PromptForSingleSelection()
 	case "preferences-export":

@@ -376,6 +376,14 @@ window.addEventListener("hashchange", () => {
   route();
 });
 document.addEventListener("respire-operation", () => refresh());
+document.addEventListener("respire-runtime-progress", ({ detail: operation }) => {
+  if (!ctx.status?.summary || !["model_switch", "model_download"].includes(operation.kind)) return;
+  ctx.status.summary.model_operation = {
+    id: operation.operation_id, active: ["pending", "running"].includes(operation.state),
+    phase: operation.message || operation.state, done: operation.progress_percent, total: 100,
+  };
+  view?.update?.();
+});
 let translationScheduled = false;
 new MutationObserver(() => {
   if (translationScheduled) return;
@@ -393,7 +401,8 @@ new MutationObserver(() => {
 });
 async function poll() {
   await refresh();
-  setTimeout(poll, document.hidden ? 15000 : 3000);
+  const streaming = ctx.desktop?.health?.capabilities?.includes("sse.operations.v1");
+  setTimeout(poll, streaming ? 30000 : document.hidden ? 15000 : 3000);
 }
 (async () => {
   try {

@@ -77,6 +77,8 @@ func (m *Manager) Recover(id string) (Operation, error) {
 	}
 	var envelope json.RawMessage
 	switch {
+	case job.RuntimeV1:
+		envelope, err = m.recoverV1Operation(ctx, job)
 	case job.Name == "logout", job.Name == "logout_full":
 		envelope, err = m.desktopRuntimeLogout(ctx, id, job.Name == "logout_full", true)
 	case job.Name == "server_set", job.Name == "autosync_set", job.Name == "cure_auto_set", job.Name == "data_dir_set",

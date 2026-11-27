@@ -51,10 +51,14 @@ export function bindModelActions(view, {
           view.switchingVariant = variant;
           view.switchInFlight = true;
           view.switchTicks = 0;
-          if (!view.switchTimer)
-            view.switchTimer = setInterval(() => refreshProfileState(), 3000);
           try {
-            await submitProfileSwitch(view.modelID, engine, variant);
+            const receipt = await submitProfileSwitch(view.modelID, engine, variant, (operation) => {
+              view.runtimeProgress = operation;
+              if (root.isConnected) { renderVariants(); renderDynamic(true); }
+            });
+            if (receipt?.settled) { view.switchInFlight = false; view.switchingVariant = ""; view.runtimeProgress = null; view.lastVerifiedAt = new Date(); }
+            else if (!view.switchTimer)
+              view.switchTimer = setInterval(() => refreshProfileState(), 3000);
             notify(`${i18nMessages.m0e3d526f29331bd7}${view.modelID} · ${engine.toUpperCase()} · ${variant}${i18nMessages.m1df4614471fdde44}`);
           } catch (error) {
             view.switchInFlight = false;

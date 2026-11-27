@@ -1,5 +1,5 @@
 import { messages as i18nMessages } from "../ui/i18n/messages.js";
-import { $, h, raw, bytes, number, summary, panel, pairs, input, select, execute, notify, resultView, api } from "../ui/core.js";
+import { $, h, raw, bytes, number, summary, panel, pairs, input, select, execute, notify, resultView, api, currentRuntimeSwitch, observeRuntimeSwitch } from "../ui/core.js";
 import { heading, phase } from "./overview.js";
 import { recallChecks } from "./recall.js";
 import {
@@ -38,6 +38,7 @@ export function models(root, ctx) {
     switchInFlight: false,
     switchingVariant: "",
     switchTimer: null,
+    runtimeProgress: null,
     selectedMode: localStorage.getItem("respire-model-mode") || "balanced",
     stateOverride: null,
     advancedExpanded: false,
@@ -357,12 +358,27 @@ export function models(root, ctx) {
         if (
           isProfileModel(view.modelID) &&
           !view.switchInFlight &&
-          switchState.state === "pending"
+          (switchState.state === "pending" || currentRuntimeSwitch()?.model === view.modelID)
         ) {
           view.switchInFlight = true;
           view.switchingVariant = "";
           view.switchTicks = 0;
-          if (!view.switchTimer)
+          const observed = currentRuntimeSwitch();
+          const operationID = readProfileState(view.profileState).operation.id;
+          let receipt = observed?.receipt;
+          if (!receipt && operationID && ctx.desktop?.health?.capabilities?.includes("sse.operations.v1")) {
+            try {
+              await api("runtime-operation?id=" + encodeURIComponent(operationID));
+              receipt = { operation_id: operationID, stream: true };
+            } catch (error) { if (error.status !== 404) throw error; }
+          }
+          if (receipt) {
+            const done = observeRuntimeSwitch(receipt, { model: view.modelID });
+            done.then(() => refreshProfileState()).catch(error => {
+              view.switchInFlight = false;
+              if (root.isConnected) { notify(error.message, true); renderDynamic(true); }
+            });
+          } else if (!view.switchTimer)
             view.switchTimer = setInterval(() => refreshProfileState(), 3000);
           notify(i18nMessages.m6119b43db7c76cb2);
         }
