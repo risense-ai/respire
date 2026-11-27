@@ -99,7 +99,7 @@ fn append(
         entry.id = id;
         entry.created_at = created;
         entry.importance = "trivial".to_owned();
-        ctx.library.create_device_space_memory(store, &entry, admit)?;
+        ctx.library.create_memory_with_admission(store, &entry, admit)?;
         return Ok(entry);
     };
     let mut entry = ctx.library.open_memory(primary)?;
