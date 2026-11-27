@@ -36,6 +36,8 @@ export function notify(message, error = false) {
   node.hidden = !message;
   node.classList.toggle("error", error);
 }
+export class ApiTransportError extends TypeError {}
+
 export async function api(path, body, signal) {
   const response = await fetch(
     "/api/" + path,
@@ -49,7 +51,13 @@ export async function api(path, body, signal) {
           },
           body: JSON.stringify(body),
         },
-  );
+  ).catch((error) => {
+    // Only a failure to fetch is retryable, not an error decoding the body.
+    if (error instanceof TypeError && error.status == null) {
+      throw new ApiTransportError(error.message, { cause: error });
+    }
+    throw error;
+  });
   const data = await response.json();
   if (!response.ok || !data.ok)
     throw Object.assign(new Error(data.error || `${i18nMessages.md8804b190e701500}${response.status})`), { status: response.status });

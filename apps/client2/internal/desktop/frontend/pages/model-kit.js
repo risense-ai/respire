@@ -8,6 +8,7 @@ import {
   action,
   notify,
   api,
+  ApiTransportError,
 } from "../ui/core.js";
 
 // Shared model business rules for the models page and the onboarding wizard:
@@ -436,7 +437,8 @@ export function openDownloadModal({
       if (!task.busy) return;
     } catch (error) {
       if (!canWatch(id)) return;
-      const temporary = abort.signal.aborted || TEMPORARY_TASK_STATUSES.has(error.status);
+      const temporary = abort.signal.aborted || error instanceof ApiTransportError
+        || TEMPORARY_TASK_STATUSES.has(error.status);
       if (!temporary || ++pollFailures >= 3) {
         failWatch(error.status ? error.message : i18nMessages.m23dfe4404e8a5ebe);
         return;

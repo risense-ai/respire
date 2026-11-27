@@ -180,6 +180,34 @@ test("transient status can recover, but persistent failures stop after three att
   assert.equal(failing.timers.size, 0);
 });
 
+test("status-less fetch rejection can recover within the existing retry budget", async () => {
+  let attempts = 0;
+  const offline = () => { throw new TypeError("Failed to fetch"); };
+  const recovering = fixture({ snapshot: () => ++attempts === 1 ? offline() : ok(completed) });
+  await flush();
+  await recovering.runTimer(700);
+  assert.equal(await recovering.done, true);
+
+  const failing = fixture({ snapshot: offline });
+  await flush();
+  await failing.runTimer(700);
+  await failing.runTimer(700);
+  assert.equal(await failing.done, false);
+  assert.equal(failing.requests.length, 4);
+  assert.equal(failing.timers.size, 0);
+});
+
+test("response decoding TypeError does not enter the fetch retry budget", async () => {
+  const f = fixture({ snapshot: () => ({
+    async json() { throw new TypeError("Unable to decode response"); },
+  }) });
+  await flush();
+  assert.equal(await f.done, false);
+  assert.equal(f.error().textContent, i18nMessages.m23dfe4404e8a5ebe);
+  assert.equal(f.requests.length, 2);
+  assert.equal(f.timers.size, 0);
+});
+
 test("closing the dialog aborts an in-flight snapshot", async () => {
   const f = fixture({ snapshot: ({ signal }) => new Promise((resolve, reject) => {
     signal.addEventListener("abort", () => reject(signal.reason), { once: true });

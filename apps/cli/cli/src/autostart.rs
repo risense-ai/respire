@@ -10,6 +10,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 mod lifecycle;
+mod operation;
 mod snapshot_control;
 pub(crate) use snapshot_control::{SnapshotOperation, SnapshotOutcomeUnknown, SnapshotRemoteFailure};
 mod recovery;
