@@ -123,6 +123,28 @@ async function test(name, fn) { await fn(); console.log(`PASS ${++count}: ${name
     assert.equal(elements['#status-summary'].textContent, 'Runtime disconnected');
     desktop.connected = true; await refresh(); assert.equal(elements['#connection-label'].textContent, 'Runtime connected');
   });
+  await test('Overview keeps one localized connection indicator through disconnect and reconnect', async () => {
+    const overview = read('pages/overview.js');
+    assert.match(overview, /<span class="badge" role="status" data-runtime-connection>/);
+    assert.match(overview, /updateConnectionIndicator\(connection, state\.connected\)/);
+    const start = overview.indexOf('export function updateConnectionIndicator(');
+    const updateIndicator = new Function('t', overview.slice(start + 'export '.length,
+      overview.indexOf('const ENGINE_NAMES', start)) + '\nreturn updateConnectionIndicator;')(i18n.t);
+    for (const lang of ['en', 'zh']) {
+      i18n.setLanguage(lang);
+      const indicator = new Element();
+      const connected = lang === 'en' ? 'Runtime connected' : i18nMessages.m3053ee2f4c18204a;
+      const disconnected = lang === 'en' ? 'Runtime disconnected' : i18nMessages.mcef1537a814bdc68;
+      updateIndicator(indicator, undefined);
+      assert.equal(indicator.textContent, disconnected);
+      updateIndicator(indicator, true); assert.equal(indicator.textContent, connected);
+      const node = indicator.node;
+      updateIndicator(indicator, true); assert.equal(indicator.node, node);
+      updateIndicator(indicator, false); assert.equal(indicator.textContent, disconnected);
+      updateIndicator(indicator, true); assert.equal(indicator.textContent, connected);
+    }
+    i18n.setLanguage('en');
+  });
   await test('state failure notification and next refresh recovery', async () => {
     stateFailure = true; await refresh(); assert.deepEqual(notices.pop(), ['state failed', true]);
     stateFailure = false; events.length = 0; await refresh(); assert.ok(events.includes('view.update'));
