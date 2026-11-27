@@ -214,9 +214,7 @@ pub fn index_loop_inner() -> Result<()> {
                     .is_some() =>
             {
                 model_wait_started = None;
-                work.state = "paused";
-                work.requested = false;
-                work.error = Some(format!("{error:#}"));
+                work.model_stopped(&error);
             }
             Err(error) if generation != GENERATION.load(Ordering::Acquire) => {
                 model_wait_started = None;

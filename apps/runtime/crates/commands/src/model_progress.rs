@@ -4,9 +4,13 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use anyhow::{anyhow, Result};
+#[cfg(test)]
+#[path = "model_progress_tests.rs"]
+mod preemption_tests;
 use serde_json::{json, Value};
 
 thread_local! { static TRACKED: Cell<bool> = const { Cell::new(false) }; }
+thread_local! { static OWNER_ID: RefCell<Option<String>> = const { RefCell::new(None) }; }
 thread_local! { static TASK_ID: RefCell<Option<String>> = const { RefCell::new(None) }; }
 static CURRENT: Mutex<Option<Progress>> = Mutex::new(None);
 
@@ -31,14 +35,18 @@ struct Progress {
     started: Instant,
     updated: Instant,
     idle_timeout: bool,
+    background: bool,
     cancelled: bool,
     cancellable: bool,
 }
 
-pub struct Operation;
+pub struct Operation {
+    id: String,
+}
 
 #[derive(Debug)]
 pub enum OperationStopped {
+    Preempted,
     Cancelled,
     TimedOut,
     IdleTimedOut,
@@ -47,6 +55,7 @@ pub enum OperationStopped {
 impl std::fmt::Display for OperationStopped {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
+            Self::Preempted => "background model operation preempted by foreground work",
             Self::Cancelled => "model operation cancelled",
             Self::TimedOut => "model operation timed out after 30 minutes",
             Self::IdleTimedOut => "model operation made no progress for 30 minutes",
@@ -57,6 +66,9 @@ impl std::fmt::Display for OperationStopped {
 impl std::error::Error for OperationStopped {}
 
 fn check_progress(progress: &Progress) -> Result<()> {
+    if TRACKED.get() && !OWNER_ID.with_borrow(|id| id.as_ref() == Some(&progress.id)) {
+        return Err(OperationStopped::Preempted.into());
+    }
     check_progress_at(progress, Instant::now())
 }
 
@@ -82,7 +94,7 @@ impl Operation {
 
     pub(crate) fn try_reserve_task(id: String) -> Result<Option<Self>> {
         let _scope = TaskScope::new(Some(id));
-        let operation = Self::try_begin_inner("queued", true, true)?;
+        let operation = Self::try_begin_inner("queued", true, true, false)?;
         if operation.is_some() {
             TRACKED.set(false);
         }
@@ -90,11 +102,12 @@ impl Operation {
     }
     pub fn enter_thread(&self) {
         TRACKED.set(true);
+        OWNER_ID.set(Some(self.id.clone()));
     }
     /// Loading crosses a native replacement boundary and commits inside the
     /// isolated SDK worker. Do not acknowledge a cancellation it cannot honor.
     pub fn begin_load() -> Result<Self> {
-        Self::try_begin_inner("verify", false, false)?
+        Self::try_begin_inner("verify", false, false, false)?
             .ok_or_else(|| anyhow!("another model operation is running"))
     }
     pub fn begin(phase: &str) -> Result<Self> {
@@ -108,23 +121,32 @@ impl Operation {
 
     /// Large libraries may take hours; only a lack of progress pauses indexing.
     pub fn try_begin_background_index() -> Result<Option<Self>> {
-        Self::try_begin_with_idle_timeout("index-load", true)
+        Self::try_begin_inner("index-load", true, true, true)
     }
 
     fn try_begin_with_idle_timeout(phase: &str, idle_timeout: bool) -> Result<Option<Self>> {
-        Self::try_begin_inner(phase, idle_timeout, true)
+        Self::try_begin_inner(phase, idle_timeout, true, false)
     }
-    fn try_begin_inner(phase: &str, idle_timeout: bool, cancellable: bool) -> Result<Option<Self>> {
+    fn try_begin_inner(
+        phase: &str,
+        idle_timeout: bool,
+        cancellable: bool,
+        background: bool,
+    ) -> Result<Option<Self>> {
         let mut slot = CURRENT
             .lock()
             .map_err(|_| anyhow!("model progress lock poisoned"))?;
-        if slot.is_some() {
+        if slot
+            .as_ref()
+            .is_some_and(|active| background || !active.background)
+        {
             return Ok(None);
         }
+        let id = TASK_ID
+            .with_borrow(Clone::clone)
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         *slot = Some(Progress {
-            id: TASK_ID
-                .with_borrow(|id| id.clone())
-                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+            id: id.clone(),
             phase: phase.to_owned(),
             item: String::new(),
             done: 0,
@@ -132,11 +154,13 @@ impl Operation {
             started: Instant::now(),
             updated: Instant::now(),
             idle_timeout,
+            background,
             cancelled: false,
             cancellable,
         });
         TRACKED.set(true);
-        Ok(Some(Self))
+        OWNER_ID.set(Some(id.clone()));
+        Ok(Some(Self { id }))
     }
 }
 
@@ -150,7 +174,7 @@ pub fn status() -> Result<Value> {
             "item": progress.item, "done": progress.done, "total": progress.total,
             "elapsed": progress.started.elapsed().as_secs(),
             "idle": progress.updated.elapsed().as_secs(), "cancelled": progress.cancelled,
-            "cancellable": progress.cancellable,
+            "cancellable": progress.cancellable, "background": progress.background,
         }),
         None => json!({"active": false}),
     })
@@ -158,9 +182,14 @@ pub fn status() -> Result<Value> {
 
 impl Drop for Operation {
     fn drop(&mut self) {
-        TRACKED.set(false);
+        if OWNER_ID.with_borrow(|id| id.as_ref() == Some(&self.id)) {
+            TRACKED.set(false);
+            OWNER_ID.set(None);
+        }
         if let Ok(mut slot) = CURRENT.lock() {
-            *slot = None;
+            if slot.as_ref().is_some_and(|progress| progress.id == self.id) {
+                *slot = None;
+            }
         }
     }
 }
@@ -172,7 +201,8 @@ pub fn update(phase: &str, item: &str, done: u64, total: Option<u64>) -> Result<
     let mut slot = CURRENT
         .lock()
         .map_err(|_| anyhow!("model progress lock poisoned"))?;
-    if let Some(progress) = slot.as_mut() {
+    {
+        let progress = slot.as_mut().ok_or(OperationStopped::Preempted)?;
         check_progress(progress)?;
         if progress.phase != phase || progress.item != item || progress.done != done {
             progress.updated = Instant::now();
@@ -186,8 +216,12 @@ pub fn update(phase: &str, item: &str, done: u64, total: Option<u64>) -> Result<
 }
 
 pub(crate) fn switch_checkpoint(task_id: &str, phase: Option<(&str, &str, u64)>) -> Result<()> {
-    let mut slot = CURRENT.lock().map_err(|_| anyhow!("model progress lock poisoned"))?;
-    let progress = slot.as_mut().filter(|progress| progress.id == task_id)
+    let mut slot = CURRENT
+        .lock()
+        .map_err(|_| anyhow!("model progress lock poisoned"))?;
+    let progress = slot
+        .as_mut()
+        .filter(|progress| progress.id == task_id)
         .ok_or_else(|| anyhow!("model operation no longer admitted"))?;
     check_progress(progress)?;
     if let Some((stage, item, done)) = phase {
@@ -201,12 +235,18 @@ pub(crate) fn switch_checkpoint(task_id: &str, phase: Option<(&str, &str, u64)>)
     Ok(())
 }
 
-pub(crate) fn in_model_operation<T>(action: impl FnOnce() -> T) -> T {
-    struct Restore(bool);
+pub(crate) fn in_model_operation<T>(task_id: &str, action: impl FnOnce() -> T) -> T {
+    struct Restore(bool, Option<String>);
     impl Drop for Restore {
-        fn drop(&mut self) { TRACKED.set(self.0); }
+        fn drop(&mut self) {
+            TRACKED.set(self.0);
+            OWNER_ID.set(self.1.take());
+        }
     }
-    let _restore = Restore(TRACKED.replace(true));
+    let _restore = Restore(
+        TRACKED.replace(true),
+        OWNER_ID.replace(Some(task_id.to_owned())),
+    );
     action()
 }
 
@@ -215,9 +255,8 @@ pub fn check() -> Result<()> {
         let slot = CURRENT
             .lock()
             .map_err(|_| anyhow!("model progress lock poisoned"))?;
-        if let Some(progress) = slot.as_ref() {
-            check_progress(progress)?;
-        }
+        let progress = slot.as_ref().ok_or(OperationStopped::Preempted)?;
+        check_progress(progress)?;
     }
     Ok(())
 }
@@ -235,7 +274,7 @@ pub fn commit<T>(action: impl FnOnce() -> Result<T>) -> Result<T> {
     );
     check_progress(
         slot.as_ref()
-            .ok_or_else(|| anyhow!("model operation already ended"))?,
+            .ok_or(OperationStopped::Preempted)?,
     )?;
     action()
 }
@@ -250,7 +289,7 @@ pub fn commit_final<T>(action: impl FnOnce() -> Result<T>) -> Result<T> {
     );
     let progress = slot
         .as_mut()
-        .ok_or_else(|| anyhow!("model operation already ended"))?;
+        .ok_or(OperationStopped::Preempted)?;
     check_progress(progress)?;
     let result = action()?;
     progress.cancellable = false;
@@ -372,6 +411,7 @@ mod tests {
             started: now - Duration::from_secs(3600),
             updated: now - Duration::from_secs(idle),
             idle_timeout,
+            background: false,
             cancelled: false,
             cancellable: true,
         }

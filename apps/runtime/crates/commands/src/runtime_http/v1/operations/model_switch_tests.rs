@@ -194,6 +194,8 @@ pub(super) fn check_store(store: &LocalStore) -> Result<()> {
     assert!(!selection.generation.is_empty());
     assert_eq!(store.retrieval_model()?, MODEL);
     assert!(!store.index_pending(MODEL)?);
+    assert!(store.pending_selection()?.is_none());
+    assert!(store.meta_get("embedding_pending_task_v1")?.is_none());
     assert!(!respire_app::diary::needs_rebuild(store)?);
     Ok(())
 }

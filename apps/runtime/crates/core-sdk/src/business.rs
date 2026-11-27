@@ -461,12 +461,14 @@ pub mod bge {
     }
 
     pub fn model_files_present(dir: &Path) -> bool {
-        dir.join("tokenizer.json").is_file() && dir.join("onnx/model_quantized.onnx").is_file()
+        dir.join("tokenizer.json").is_file()
+            && (dir.join("onnx/model_quantized.onnx").is_file()
+                || dir.join("onnx").join(crate::cpu_model::CPU_ORT_NAME).is_file())
     }
 
     pub fn resolve_model_dir() -> Result<PathBuf> {
         let directory = discovered_model_dir()?;
-        anyhow::ensure!(model_files_present(&directory), "BGE-M3 quantized files missing in {}; need tokenizer.json and onnx/model_quantized.onnx; run rsrs model install-m3 or set RSRS_M3_DIR",directory.display());
+        anyhow::ensure!(model_files_present(&directory), "BGE-M3 quantized files missing in {}; need tokenizer.json and the selected ONNX or CPU ORT container; run rsrs model install-m3 or set RSRS_M3_DIR",directory.display());
         Ok(directory)
     }
 

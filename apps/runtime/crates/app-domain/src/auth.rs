@@ -429,3 +429,5 @@ include!("auth/accounts.rs");
 include!("auth/authorization.rs");
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod golden_tests;

@@ -213,6 +213,10 @@ impl PendingSwitch {
             }
             Ok(phase)
         });
+        let result = match cleanup_pending(store, ownership, &job.scope().canonical_profile, &task_id) {
+            Ok(()) => result,
+            Err(error) => Some(Err(error.context("model switch pending cleanup failed"))),
+        };
         drop(reservation);
         match result {
             Some(Ok(phase)) => job.finish(phase),
@@ -224,6 +228,22 @@ impl PendingSwitch {
         }
         rpc_worker::kick_index();
     }
+}
+
+// Housekeeping uses the exact library lock and task identity, even after business
+// admission closes. It never needs a Vault unlock or a foreground store fence.
+#[cfg(test)]
+#[path = "model_switch/cleanup_tests.rs"]
+mod cleanup_tests;
+
+fn cleanup_pending(
+    store: Option<&LocalStore>, ownership: &LibraryLock,
+    profile: &std::path::Path, task_id: &str,
+) -> Result<()> {
+    let store = store.context("model switch cleanup store unavailable")?;
+    anyhow::ensure!(ownership.protects(profile)?, "model switch cleanup ownership changed");
+    anyhow::ensure!(store.backup_target()?.parent() == Some(profile), "model switch cleanup library changed");
+    store.clear_pending_selection(Some(task_id))
 }
 
 pub(super) fn with_authority<T>(

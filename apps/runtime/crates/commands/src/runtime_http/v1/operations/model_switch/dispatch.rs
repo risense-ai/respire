@@ -73,7 +73,7 @@ impl PendingSwitch {
 
                 self.target.generation = generation;
                 self.job.model_commit(false, || {
-                    model_progress::in_model_operation(|| {
+                    model_progress::in_model_operation(&self.task_id, || {
                         model_progress::commit(|| {
                             store.queue_selection(&self.target, &self.task_id)
                         })
@@ -119,7 +119,7 @@ impl PendingSwitch {
                 None
             }
             Some(Err(error)) => {
-                report_failure(&self, error);
+                report_failure(&self, Some(store), ownership, error);
                 None
             }
             None => {
@@ -172,7 +172,7 @@ impl RunningSwitch {
             }
             Err(error) => {
                 if let Some(pending) = self.pending.as_ref() {
-                    report_failure(pending, error);
+                    report_failure(pending, store, ownership, error);
                 }
                 true
             }
@@ -247,7 +247,7 @@ impl RunningSwitch {
                 );
                 prepare::authorize(scope, self.epoch, &entry, &pending.task_id)?;
                 pending.job.model_commit(true, || {
-                    model_progress::in_model_operation(|| {
+                    model_progress::in_model_operation(&pending.task_id, || {
                         model_progress::commit_final(|| {
                             store.validate_model_switch_stage(target, &prepared.source)?;
                             anyhow::ensure!(
@@ -291,7 +291,12 @@ impl Drop for RunningSwitch {
     }
 }
 
-fn report_failure(pending: &PendingSwitch, error: anyhow::Error) {
+fn report_failure(pending: &PendingSwitch, store: Option<&LocalStore>, ownership: &LibraryLock, error: anyhow::Error) {
+    let cleanup = cleanup_pending(store, ownership, &pending.job.scope().canonical_profile, &pending.task_id);
+    let error = match cleanup {
+        Ok(()) => error,
+        Err(cleanup) => anyhow::anyhow!("{error:#}; pending cleanup failed: {cleanup:#}"),
+    };
     let cancelled = pending.job.entry().cancelled().unwrap_or(false)
         || model_progress::control(&pending.task_id, false).is_ok_and(|p| p["cancelled"] == true);
     let result = Err(error);

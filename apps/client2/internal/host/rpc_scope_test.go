@@ -88,6 +88,10 @@ func TestRuntimeStatusLockedWarning(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
+				if r.URL.Path == "/v1/health" {
+					http.NotFound(w, r)
+					return
+				}
 				if r.URL.Path == "/api/health" {
 					_, _ = w.Write([]byte(`{"server":"respire","v":1,"pid":42,"account_id":"account","instance_id":"instance","generation":7}`))
 					return
