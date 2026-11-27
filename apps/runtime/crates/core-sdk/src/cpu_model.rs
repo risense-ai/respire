@@ -134,6 +134,22 @@ fn validated_path(path: PathBuf) -> Result<bool> {
 mod tests {
     use super::*;
     #[test]
+    fn cpu_container_discovery_does_not_require_legacy_onnx() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        std::fs::create_dir(directory.path().join("onnx"))?;
+        std::fs::write(directory.path().join("tokenizer.json"), b"synthetic tokenizer")?;
+        assert!(!crate::bge::model_files_present(directory.path()));
+        std::fs::write(directory.path().join("onnx").join(CPU_ORT_NAME), b"synthetic container")?;
+        assert!(crate::bge::model_files_present(directory.path()));
+        assert!(!directory.path().join("onnx/model_quantized.onnx").exists());
+        // Presence is discovery only: the pinned loader must still reject these bytes.
+        assert!(crate::model_selection::verify(
+            &directory.path().join("onnx").join(CPU_ORT_NAME), CPU_ORT_SIZE, CPU_ORT_SHA256
+        ).is_err());
+        Ok(())
+    }
+
+    #[test]
     fn explicit_variants_cannot_silently_use_the_quantized_container() -> Result<()> {
         assert!(owned_variant_policy(true, None, "quantized")?);
         for variant in ["fp16", "int8", "uint8", "q4", "q4f16"] {

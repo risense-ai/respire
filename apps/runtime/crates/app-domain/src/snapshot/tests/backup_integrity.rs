@@ -293,9 +293,9 @@
         let (nonce, ciphertext) = keys.encrypt_content("synthetic migrated snapshot content")?;
         sql.execute("INSERT INTO memories(id,ciphertext,nonce) VALUES('synthetic',?1,?2)",
             rusqlite::params![ciphertext, nonce])?;
-        sql.execute_batch("DROP INDEX idx_memories_updated; PRAGMA wal_checkpoint(TRUNCATE);")?;
+        sql.execute_batch("DROP INDEX idx_memories_updated; PRAGMA user_version=0; PRAGMA wal_checkpoint(TRUNCATE);")?;
         drop(sql);
-        // This is a real protected live 0→1 repair, not a test pragma stamp.
+        // The fixture models an unversioned schema; repair must back it up and stamp v1.
         drop(crate::transport::local::LocalStore::open(&live)?);
         let marker = |path: &Path| -> Result<i64> {
             let db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;

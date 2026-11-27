@@ -327,6 +327,28 @@ mod host_tests {
     use super::*;
 
     #[test]
+    fn golden_keyring_service_and_session_aliases() -> Result<()> {
+        let _isolate = crate::test_lock::Isolate::new()?;
+        assert_eq!((SERVICE, VAULT_SERVICE), ("rsrs", "rsrs"));
+        for alias in ["legacy-golden", "login-golden"] {
+            crate::auth::write_session_json(&serde_json::json!({
+                "user":"golden-user", "keyring_account":alias
+            }))?;
+            assert_eq!(credential_account("golden-user"), alias);
+            assert_eq!(credential_account("other-user"), "other-user");
+        }
+        for alias in ["unrecognized", "login-invalid/slot", "legacy-invalid:slot"] {
+            crate::auth::write_session_json(&serde_json::json!({
+                "user":"golden-user", "keyring_account":alias
+            }))?;
+            assert_eq!(credential_account("golden-user"), "golden-user");
+        }
+        let saved = crate::auth::read_session_json()?;
+        for field in ["pass", "super", "secret_key"] { assert!(saved.get(field).is_none()); }
+        Ok(())
+    }
+
+    #[test]
     fn host_of_strips_scheme_and_path() {
         assert_eq!(host_of("https://api.deepseek.com/v1"), "api.deepseek.com");
         assert_eq!(host_of("api.b.ai/chat"), "api.b.ai");

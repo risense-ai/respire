@@ -355,23 +355,22 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
     connection.execute_batch("CREATE UNIQUE INDEX IF NOT EXISTS idx_query_request ON query_log(request_id) WHERE request_id IS NOT NULL;
         CREATE TABLE IF NOT EXISTS query_feedback(query_log_id INTEGER NOT NULL REFERENCES query_log(id),memory_id TEXT NOT NULL,good INTEGER NOT NULL CHECK(good IN(0,1)),source TEXT NOT NULL CHECK(source IN('human','model','task_outcome')),marked_at INTEGER NOT NULL,revision INTEGER NOT NULL,PRIMARY KEY(query_log_id,memory_id));")?;
 
-    // query_log v1→v2: hit_ids/hit_scores renamed candidates/candidate_scores (candidates are not hits —
-    // a hit is a model self-grade useful, in good_ids/bad_ids); old DBs add columns, new DBs already match and skip.
-    let mut qcols: Vec<String> = connection
+    // Keep historical column names for old readers; populate additive replacements once.
+    let qcols: Vec<String> = connection
         .prepare("PRAGMA table_info(query_log)")?
         .query_map([], |row| row.get::<_, String>(1))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    if qcols.iter().any(|c| c == "hit_ids") {
-        connection.execute_batch(
-            "
-            ALTER TABLE query_log RENAME COLUMN hit_ids TO candidates;
-            ALTER TABLE query_log RENAME COLUMN hit_scores TO candidate_scores;
-            ",
-        )?;
-        qcols = connection
-            .prepare("PRAGMA table_info(query_log)")?
-            .query_map([], |row| row.get::<_, String>(1))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
+    anyhow::ensure!(
+        qcols.iter().any(|column| column == "hit_ids") == qcols.iter().any(|column| column == "hit_scores"),
+        "unsupported legacy query_log schema: hit_ids and hit_scores must be present together"
+    );
+    for (old, new) in [("hit_ids", "candidates"), ("hit_scores", "candidate_scores")] {
+        if qcols.iter().any(|column| column == old) && !qcols.iter().any(|column| column == new) {
+            connection.execute_batch(&format!(
+                "ALTER TABLE query_log ADD COLUMN {new} TEXT NOT NULL DEFAULT '[]';
+                 UPDATE query_log SET {new}={old};"
+            ))?;
+        }
     }
     if !qcols.is_empty() && !qcols.iter().any(|c| c == "good_ids") {
         connection.execute_batch(

@@ -315,6 +315,21 @@ impl LocalStore {
         self.meta_get(respire_core_sdk::profiles::ACTIVE_SELECTION_KEY)?.map(|v| serde_json::from_str(&v).map_err(Into::into)).transpose()
     }
 
+    /// Clear only this task's pending markers; a late failure cannot erase a newer task.
+    /// None is reserved for startup under exclusive library ownership.
+    pub fn clear_pending_selection(&self, task_id: Option<&str>) -> Result<()> {
+        let tx = rusqlite::Transaction::new_unchecked(&self.connection, rusqlite::TransactionBehavior::Immediate)?;
+        let matches: bool = tx.query_row(
+            "SELECT ?1 IS NULL OR EXISTS(SELECT 1 FROM meta WHERE key='embedding_pending_task_v1'
+             AND json_extract(value,'$.id')=?1)", [task_id], |row| row.get(0),
+        )?;
+        if matches {
+            tx.execute("DELETE FROM meta WHERE key IN ('embedding_pending_selection_v1','embedding_pending_task_v1')", [])?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn pending_selection(&self) -> Result<Option<respire_core_sdk::profiles::Selection>> {
         self.meta_get("embedding_pending_selection_v1")?
             .map(|value| serde_json::from_str(&value).map_err(Into::into))
