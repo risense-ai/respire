@@ -47,6 +47,9 @@ fn verify_key_custody(operation_id: &str, source: &Path) -> Result<crate::output
 
 pub(crate) fn execute(command: &RuntimeCommand) -> Result<()> {
     match command {
+        RuntimeCommand::Operation { operation_id, follow } => {
+            return super::operation::inspect(operation_id, *follow);
+        }
         RuntimeCommand::CoreConfigResult { context, source_profile } => {
             return crate::emit_result(super::supervise::control_core_config_result(context, source_profile)?);
         }

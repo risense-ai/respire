@@ -34,6 +34,13 @@ pub enum RuntimeCommand {
     Status,
     /// Supply the existing local private key to the selected Runtime, without starting it.
     Unlock,
+    /// Inspect a frozen HTTP operation without starting Runtime.
+    Operation {
+        operation_id: String,
+        /// Follow SSE progress through the terminal snapshot.
+        #[arg(long)]
+        follow: bool,
+    },
     /// Query an operation using its original context without starting a runtime.
     Result {
         #[arg(long, value_name = "JSON", value_parser = parse_operation_context)]
