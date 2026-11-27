@@ -16,3 +16,24 @@ again to inspect a longer operation. After a disconnect the CLI rechecks the
 Runtime instance, reads a new snapshot and resubscribes once. It requires
 an existing local bearer and the `sse.operations.v1` capability.
 Legacy scoped RPC receipts use `rsrs runtime result --context <original-context>`.
+
+### Send plugin data without command-line arguments
+
+For a new plugin, discover the local Runtime endpoint and call
+`GET /v1/health`. Choose transport by capability, not by Runtime version.
+When `openapi.v1` is advertised, use the [generated SDKs](../../packages)
+and send memory content as UTF-8 JSON in the request body. For example,
+`POST /v1/memories` with `{"title":"Migration note","content":"The note body"}`
+returns the ID used by `GET /v1/memories/{id}`. Use the existing local bearer
+as an authorization header. Do not put it in a URL, log, or command line.
+If discovery returns 404 or does not advertise the capability, keep the
+supported legacy transport; do not retry a write over a different transport
+after an ambiguous response.
+
+For an MCP client, start `rsrs mcp` with fixed startup arguments and send
+JSON-RPC frames on stdin, including all tool arguments in `params.arguments`.
+Read results from stdout. Clients already configured for Runtime MCP over
+loopback can use `POST /mcp` with existing authentication instead. Neither
+method requires passing note or query content as process arguments, avoiding
+Windows command-line size and quoting limits. For the complete compatibility
+rules, see the [Runtime migration playbook](https://github.com/risense-ai/respire-resources/blob/main/contracts/OPENAPI_MIGRATION_PLAYBOOK.md).
