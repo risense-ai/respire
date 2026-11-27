@@ -44,7 +44,7 @@ for (const scenario of scenarios) {
       const target = models ? settledSwitchTarget(runtime) :
         scenario.target === 'cli' ? cliTarget(cli,runtime) : runtime.target;
       await runScenario(scenario,target,inputs);
-      if (scenario.id === 'E2E-007') await verifyPluginTransport(runtime.target);
+      if (scenario.id === 'E2E-007') await verifyPluginTransport(runtime);
     },{deviceLocal:models || scenario.id === 'E2E-005'});
     console.log('PASS '+label);
     passed++;
