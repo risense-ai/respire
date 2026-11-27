@@ -113,7 +113,7 @@ pub fn evaluate(
     authority_checks: &[AuthorityCheck],
     unavailable_ids: &[String],
 ) -> Result<Vec<EvidenceEvaluation>, MetadataError> {
-    request.validate()?;
+    validate_request_scope(request)?;
     validate_timestamp(now)?;
     if request.at != now {
         return Err(invalid("request scope time must equal now"));

@@ -1,9 +1,11 @@
 //! Deterministic metadata checks. The host supplies plaintext, time and verified events.
 
+mod validation;
+pub use validation::*;
+
 use respire_protocol::metadata::{
-    validate_extra_fields, validate_full_id, validate_revision, validate_timestamp, AuthorityCheck,
-    AuthorityOutcome, Evidence, EvidenceEvaluation, EvidenceState, ExtraFields, MemoryMeta,
-    MetadataError, MetadataValidation, RequestScope, ReviewClaim, ReviewIntent, RootOutcome, Scope,
+    AuthorityCheck, AuthorityOutcome, Evidence, EvidenceEvaluation, EvidenceState, ExtraFields,
+    MemoryMeta, MetadataValidation, RequestScope, ReviewClaim, ReviewIntent, RootOutcome, Scope,
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -63,7 +65,7 @@ fn evidence_parts(evidence: &Evidence) -> (&str, &str, &str) {
 
 fn validate_body(record: &MetadataRecord<'_>) -> Result<(), MetadataError> {
     validate_extra_fields(record.unknown_fields)?;
-    record.metadata.validate()?;
+    validate_metadata(record.metadata)?;
     match record.kind {
         "context" | "decision" | "preference" | "task" | "emotion" | "time" | "skill"
         | "knowledge" => {}
@@ -142,10 +144,10 @@ fn validate_claim(
     if claim.trim().is_empty() || method.trim().is_empty() || evidence.is_empty() {
         return Err(invalid("review requires claim, method and evidence"));
     }
-    scope.validate()?;
+    validate_scope(scope)?;
     let mut unique = BTreeSet::new();
     for item in evidence {
-        item.validate()?;
+        validate_evidence(item)?;
         if !unique.insert(evidence_parts(item)) {
             return Err(invalid("duplicate evidence"));
         }

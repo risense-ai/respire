@@ -125,7 +125,7 @@ pub(super) fn align_query_time(input: &mut Value) -> Result<()> {
         .and_then(Value::as_str)
         .context("missing evidence context time")?
         .to_owned();
-    respire_protocol::validate_timestamp(&now)?;
+    metadata::validate_timestamp(&now)?;
     let input = input
         .as_object_mut()
         .context("query input must be an object")?;

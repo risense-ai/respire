@@ -60,7 +60,7 @@ impl BriefRenderBudget {
         );
         for item in &self.items {
             anyhow::ensure!(!item.id.is_empty(), "render item ID must not be empty");
-            respire_protocol::metadata::validate_revision(&item.record_revision)?;
+            crate::metadata::validate_revision(&item.record_revision)?;
         }
         Ok(())
     }
