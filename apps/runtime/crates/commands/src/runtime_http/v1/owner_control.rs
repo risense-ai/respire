@@ -5,6 +5,7 @@ use axum::{
 };
 use respire_app::{lock::LibraryLock, transport::local::LocalStore};
 use std::{
+    collections::VecDeque,
     sync::{mpsc, Mutex, OnceLock},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -22,6 +23,7 @@ pub(super) mod model_work;
 static ACTIVE: Mutex<Option<NativeOwner>> = Mutex::new(None);
 static QUEUE: OnceLock<mpsc::SyncSender<DispatchWork>> = OnceLock::new();
 static DISPATCH_LIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static LOCAL_BUDGET: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(WORK_LIMIT);
 static AUTH_BUDGET: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(16);
 const WORK_LIMIT: usize = 16;
 const WORK_DEADLINE: Duration = Duration::from_secs(2);
@@ -30,9 +32,11 @@ const REFRESH_INTERVAL: Duration = Duration::from_millis(250);
 enum DispatchWork {
     SoftLogout(SoftLogout),
     Scoped(Work),
-    Local(super::rest_dispatch::Work),
+    Local(PendingLocal),
     ModelSwitch(Box<super::operations::model_switch::PendingSwitch>),
 }
+
+type PendingLocal = (super::rest_dispatch::Work, tokio::sync::SemaphorePermit<'static>);
 
 /// Internal queue entry. Only a purpose-authorized host request may construct one.
 pub(crate) struct SoftLogout {
@@ -83,6 +87,7 @@ struct Work {
 pub(crate) struct OwnerDispatch {
     receiver: mpsc::Receiver<DispatchWork>,
     model_receiver: mpsc::Receiver<model_work::Work>,
+    pending_local: VecDeque<PendingLocal>,
     last_refresh: Option<Instant>,
     switching: Option<super::operations::model_switch::RunningSwitch>,
     startup_swept: bool,
@@ -96,6 +101,7 @@ pub(crate) fn start_dispatch() -> Option<OwnerDispatch> {
     Some(OwnerDispatch {
         receiver,
         model_receiver: model_work::start()?,
+        pending_local: VecDeque::new(),
         last_refresh: None,
         switching: None,
         startup_swept: false,
@@ -128,11 +134,18 @@ impl OwnerDispatch {
                 if work.begin_drain(ownership) { return Some(work); }
             }
             Ok(DispatchWork::Scoped(work)) => service_work(work, store, ownership),
-            Ok(DispatchWork::Local(work)) => super::rest_dispatch::service(work, store, ownership),
+            Ok(DispatchWork::Local(work)) => self.pending_local.push_back(work),
             Ok(DispatchWork::ModelSwitch(work)) if self.switching.is_none() => {
                 self.switching = work.launch(store, ownership);
             }
             Ok(DispatchWork::ModelSwitch(_)) | Err(_) => {}
+        }
+        // Check control work before retrying one local request. The permit
+        // bounds queued plus deferred work, and a retry never waits on the gate.
+        if let Some((work, permit)) = self.pending_local.pop_front() {
+            if let Some(pending) = super::rest_dispatch::service(work, store, ownership) {
+                self.pending_local.push_front((pending, permit));
+            }
         }
         if self.switching.as_mut().is_some_and(|switch| switch.tick(store, ownership)) {
             self.switching = None;
@@ -284,7 +297,8 @@ pub(super) async fn bounded_blocking<T: Send + 'static>(
 
 pub(super) fn enqueue_rest(work: super::rest_dispatch::Work) -> V1Result<()> {
     let sender = QUEUE.get().ok_or_else(super::transport::unavailable)?;
-    sender.try_send(DispatchWork::Local(work)).map_err(|_| busy())
+    let permit = LOCAL_BUDGET.try_acquire().map_err(|_| busy())?;
+    sender.try_send(DispatchWork::Local((work, permit))).map_err(|_| busy())
 }
 
 pub(super) fn enqueue_model_switch(work: super::operations::model_switch::PendingSwitch) -> V1Result<()> {

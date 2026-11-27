@@ -302,7 +302,7 @@ impl LocalStore {
                 memory.local_meta.verification.as_ref().map(serde_json::to_string).transpose()?,
             ],
         )?;
-        self.store_artifact(memory, &self.retrieval_model()?)?;
+        self.store_artifact(memory)?;
         Ok(true)
     }
 
