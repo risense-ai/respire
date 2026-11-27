@@ -104,7 +104,7 @@ function smokeEvidence(report, lane, tag, provenance, names) {
 // This verifies the resulting evidence and bytes, not the transport or supplier.
 async function verifyRuntime({tag, provenance, evidenceRoot, payloadRoot, output}) {
   assert.equal(parseComponentTag(tag).component, "runtime", "Expected a Runtime component tag");
-  assert.equal(provenance.event, "workflow_dispatch", "Runtime payload assembly is restricted to main dispatch");
+  assert(["workflow_dispatch", "push"].includes(provenance.event), "Unexpected Runtime payload event");
   for (const key of ["run_id", "run_attempt"]) assert(/^[1-9][0-9]*$(?![\s\S])/.test(provenance[key] ?? ""));
   const lanes = Object.keys(profiles);
   const expected = expectedReleaseAssets(tag).github;
@@ -170,7 +170,7 @@ async function run() {
   const [tag, evidenceRoot, payloadRoot, output] = process.argv.slice(2);
   const env = process.env;
   assert(isAbsolute(env.GITHUB_EVENT_PATH ?? ""), "Missing GitHub event path");
-  const provenance = workflowIdentity(env, await readWorkflowEvent(env.GITHUB_EVENT_PATH));
+  const provenance = workflowIdentity(env, await readWorkflowEvent(env.GITHUB_EVENT_PATH), tag);
   const root = await directory(env.GITHUB_WORKSPACE ?? "");
   assert.equal(await directory(resolve(dirname(process.argv[1]), "..")), root, "Assembler checkout mismatch");
   const git = (...args)=>execFileSync("git",args,{cwd:root,encoding:"utf8",stdio:"pipe"}).trim();
