@@ -317,12 +317,14 @@ pub static INDEX_RUNNING: AtomicBool = AtomicBool::new(false);
 pub static INDEX_CV: Condvar = Condvar::new();
 pub static INDEX_WORK: Mutex<IndexWork> = Mutex::new(IndexWork {
     requested: false,
+    create_batch: None,
     state: "idle",
     error: None,
 });
 
 pub struct IndexWork {
     pub(crate) requested: bool,
+    create_batch: Option<(Instant, Instant)>,
     pub(crate) state: &'static str,
     pub(crate) error: Option<String>,
 }
@@ -541,6 +543,14 @@ pub fn index_status() -> Value {
 }
 
 pub fn kick_index() {
+    schedule_index(false);
+}
+
+pub(crate) fn kick_index_after_create() {
+    schedule_index(true);
+}
+
+fn schedule_index(batched: bool) {
     if STOPPING.load(Ordering::Acquire) {
         return;
     }
@@ -552,7 +562,7 @@ pub fn kick_index() {
                 return;
             }
         };
-        work.requested = true;
+        work.schedule(Instant::now(), batched);
         if !INDEX_RUNNING.load(Ordering::Acquire) && work.error.is_none() {
             work.state = "scheduled";
         }
@@ -561,4 +571,6 @@ pub fn kick_index() {
 }
 
 
+#[path = "rpc_worker/index_schedule.rs"]
+mod index_schedule;
 include!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/rpc_worker/parts/index_yield_to_foreground.rs"));

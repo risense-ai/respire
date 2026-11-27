@@ -15,6 +15,10 @@ use respire_app::{memory::Kind, service, MemoryEntry};
 use serde::Deserialize;
 use std::net::SocketAddr;
 
+#[cfg(test)]
+#[path = "writes/create_test_admission.rs"]
+pub(super) mod create_test_admission;
+
 pub(super) fn routes(bound: SocketAddr) -> Router {
     let router = bind(Router::new(), RouteSpec::new(Verb::Post, "/v1/host/transactions/login", "executeLoginTransaction"), login);
     let router = bind(router, RouteSpec::new(Verb::Post, "/v1/spaces/{spaceId}/members", "inviteSpaceMember"), invite);
@@ -120,7 +124,7 @@ async fn create(
     if matches!(kind, Kind::Hypothesis | Kind::Reflection | Kind::SelfNote) {
         return Err(transport::invalid());
     }
-    let entry = rest_dispatch::submit_memory_write(scope, move |ctx, admission| {
+    let entry = rest_dispatch::submit_memory_create(scope, move |ctx, admission| {
         super::reads::with_memory_store(ctx, input.space_id, |store, device_local| {
             if let Some(parent) = input.parent_id.as_deref() {
                 if store
@@ -139,19 +143,20 @@ async fn create(
             entry.parent_id = input.parent_id.unwrap_or_default();
             entry.kind = kind;
             entry.tags = input.tags;
-            if device_local {
-                ctx.library.create_device_space_memory(store, &entry, || {
-                    admit_device_write(ctx, admission)
-                }).map_err(|error| {
-                    if ctx.scope.bearer_is_current() {
-                        write_failure(error)
-                    } else {
-                        transport::unauthorized()
-                    }
-                })?;
-            } else {
-                ctx.library.create_memory(store, &entry).map_err(write_failure)?;
-                notify();
+            ctx.library.create_memory_with_admission(store, &entry, || {
+                #[cfg(test)]
+                create_test_admission::wait();
+                ctx.may_commit() && admission.admit()
+            }).map_err(|error| {
+                if ctx.scope.bearer_is_current() {
+                    write_failure(error)
+                } else {
+                    transport::unauthorized()
+                }
+            })?;
+            if !device_local {
+                crate::rpc_worker::kick_index_after_create();
+                service::notify_autosync();
             }
             Ok(entry)
         })

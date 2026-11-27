@@ -23,7 +23,7 @@ impl RuntimeLibrary<'_> {
     pub fn create_memory(&self, store: &crate::transport::local::LocalStore, entry: &crate::MemoryEntry)
         -> Result<()>
     {
-        self.commit_memory(store, entry, &entry.user, None)
+        self.create_memory_with_admission(store, entry, || true)
     }
 
     pub fn update_memory_exact(
@@ -47,17 +47,11 @@ impl RuntimeLibrary<'_> {
         Ok(Some(entry))
     }
 
-    pub fn create_device_space_memory(
+    pub fn create_memory_with_admission(
         &self, store: &crate::transport::local::LocalStore, entry: &crate::MemoryEntry,
         admit: impl FnOnce() -> bool,
     ) -> Result<()> {
         self.commit_memory_if(store, entry, &entry.user, None, admit)
-    }
-
-    fn commit_memory(&self, store: &crate::transport::local::LocalStore,
-        entry: &crate::MemoryEntry, storage_user: &str, previous: Option<&str>) -> Result<()>
-    {
-        self.commit_memory_if(store, entry, storage_user, previous, || true)
     }
 
     fn commit_memory_if(&self, store: &crate::transport::local::LocalStore,

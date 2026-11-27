@@ -1,0 +1,21 @@
+//! Coordinate one paused create in an isolated Router fixture.
+use std::{sync::{mpsc, Mutex}, time::Duration};
+
+type Pause = (mpsc::SyncSender<()>, mpsc::Receiver<()>);
+static PAUSE: Mutex<Option<Pause>> = Mutex::new(None);
+
+pub(in crate::runtime_http::v1) fn install(pause: Pause) -> anyhow::Result<()> {
+    let mut slot = PAUSE.lock().map_err(|_| anyhow::anyhow!("fixture pause poisoned"))?;
+    anyhow::ensure!(slot.is_none(), "fixture pause already installed");
+    *slot = Some(pause);
+    Ok(())
+}
+
+pub(super) fn wait() {
+    let pause = PAUSE.lock().ok().and_then(|mut slot| slot.take());
+    if let Some((entered, resume)) = pause {
+        if entered.send(()).is_ok() {
+            let _ = resume.recv_timeout(Duration::from_secs(5));
+        }
+    }
+}
