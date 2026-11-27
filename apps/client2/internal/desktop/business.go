@@ -20,6 +20,9 @@ import (
 )
 
 func (d *desktop) businessRoute(w http.ResponseWriter, r *http.Request) bool {
+	if d.runtimeOperationRoute(w, r) {
+		return true
+	}
 	var result any
 	var err error
 	switch {
@@ -104,8 +107,7 @@ func (d *desktop) businessRoute(w http.ResponseWriter, r *http.Request) bool {
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 		defer cancel()
-		err = d.m.ModelSwitch(ctx, body.Model, body.Engine, body.Variant)
-		result = i18n.Message279479aa5f62c1e8
+		result, err = d.m.StartModelSwitch(ctx, body.Model, body.Engine, body.Variant)
 	case r.URL.Path == "/api/model-download":
 		if r.Method != "POST" || r.Header.Get("X-Respire-Client") != "1" {
 			w.WriteHeader(http.StatusForbidden)
@@ -122,6 +124,17 @@ func (d *desktop) businessRoute(w http.ResponseWriter, r *http.Request) bool {
 		}
 		if body.Model == "" {
 			body.Model = "m3"
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+		defer cancel()
+		receipt, managed, startErr := d.m.StartRuntimeModelDownload(ctx, body.Model, body.Variant, body.Mirror)
+		if startErr != nil {
+			err = startErr
+			break
+		}
+		if managed {
+			result = map[string]any{"id": receipt.OperationId, "runtime": true, "stream": receipt.Stream}
+			break
 		}
 		model := body.Model
 		variant := body.Variant

@@ -140,7 +140,11 @@ export function createModelsView(view, { root, ctx, live }) {
     if (view.switchInFlight && view.switchingVariant === variant.name) {
       if (!isProfileModel(view.modelID))
         return `${i18nMessages.m1e9762ef816d3fbb}`;
-      const { operation } = readProfileState(view.profileState);
+      const operation = view.runtimeProgress ? {
+        phase: view.runtimeProgress.message || view.runtimeProgress.state,
+        done: view.runtimeProgress.progress_percent, total: 100,
+      } : ctx.status?.summary?.model_operation?.active
+        ? ctx.status.summary.model_operation : readProfileState(view.profileState).operation;
       const phase =
         SWITCH_PHASES[operation.phase] || operation.phase || i18nMessages.mdc9591e56d502b43;
       const pct = operation.total
