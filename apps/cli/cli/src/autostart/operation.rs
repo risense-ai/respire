@@ -96,15 +96,20 @@ async fn bounded_json<T: serde::de::DeserializeOwned>(
     Ok(serde_json::from_slice(&bytes)?)
 }
 
-async fn instance(http: &reqwest::Client, base: &str) -> Result<String> {
+async fn instance(http: &reqwest::Client, base: &str, follow: bool) -> Result<String> {
     let health: HealthResponse = bounded_json(http, &format!("{base}/v1/health"), true).await?;
-    ensure!(
-        health
-            .capabilities
-            .iter()
-            .any(|cap| cap == "sse.operations.v1"),
-        "Runtime does not advertise sse.operations.v1"
-    );
+    let has_sse = health
+        .capabilities
+        .iter()
+        .any(|cap| cap == "sse.operations.v1");
+    if follow {
+        ensure!(has_sse, "Runtime does not advertise sse.operations.v1");
+    } else {
+        ensure!(
+            has_sse || health.capabilities.iter().any(|cap| cap == "openapi.v1"),
+            "Runtime does not advertise OpenAPI operation snapshots"
+        );
+    }
     ensure!(
         !health.instance_id.trim().is_empty(),
         "Runtime instance ID missing"
@@ -115,12 +120,12 @@ async fn instance(http: &reqwest::Client, base: &str) -> Result<String> {
 async fn observe(http: reqwest::Client, id: &str, follow: bool) -> Result<OperationStatus> {
     let base = crate::net_rpc::rpc_base_url();
     let sdk = Client::new_with_client(&base, http.clone());
-    let original = instance(&http, &base).await?;
+    let original = instance(&http, &base, follow).await?;
     let url = format!("{base}/v1/operations/{id}");
     for attempt in 0..=1 {
         if attempt > 0 {
             ensure!(
-                instance(&http, &base).await? == original,
+                instance(&http, &base, follow).await? == original,
                 "Runtime instance changed"
             );
         }
@@ -130,7 +135,7 @@ async fn observe(http: reqwest::Client, id: &str, follow: bool) -> Result<Operat
             "Runtime returned a different operation"
         );
         ensure!(
-            instance(&http, &base).await? == original,
+            instance(&http, &base, follow).await? == original,
             "Runtime instance changed"
         );
         if !follow || terminal(snapshot.state) {
@@ -138,7 +143,7 @@ async fn observe(http: reqwest::Client, id: &str, follow: bool) -> Result<Operat
         }
         if let Some(end) = follow_events(&sdk, id).await? {
             ensure!(
-                instance(&http, &base).await? == original,
+                instance(&http, &base, follow).await? == original,
                 "Runtime instance changed"
             );
             return Ok(end);

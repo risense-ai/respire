@@ -9,6 +9,10 @@ type Reply = (&'static str, &'static str, &'static str, String);
 const ID: &str = "eb20bd22-8aa3-4e5d-bb36-c8db4d91dcea";
 
 fn invoke(script: Vec<Reply>) -> Result<std::process::Output> {
+    invoke_operation(script, true)
+}
+
+fn invoke_operation(script: Vec<Reply>, follow: bool) -> Result<std::process::Output> {
     let dir = tempfile::tempdir()?;
     let server = loopback_http::Server::bind()?;
     let port = server.addr().port();
@@ -54,9 +58,11 @@ fn invoke(script: Vec<Reply>) -> Result<std::process::Output> {
         .env("RSRS_DATA_DIR", dir.path())
         .env("RSRS_RPC_PORT", port.to_string())
         .env("RSRS_RPC_TOKEN", "fixture");
-    let output = cmd
-        .args(["runtime", "operation", ID, "--follow"])
-        .output()?;
+    cmd.args(["runtime", "operation", ID]);
+    if follow {
+        cmd.arg("--follow");
+    }
+    let output = cmd.output()?;
     worker
         .join()
         .map_err(|_| anyhow::anyhow!("fixture panicked"))??;
@@ -75,6 +81,54 @@ fn health() -> String {
 
 fn snapshot(id: &str, state: &str) -> Value {
     json!({"operation_id":id,"kind":"model_switch","state":state})
+}
+
+fn snapshot_only_health() -> Reply {
+    (
+        HEALTH,
+        "200 OK",
+        JSON,
+        json!({"status":"ready","instance_id":"fixture","capabilities":["openapi.v1"]}).to_string(),
+    )
+}
+
+#[test]
+fn snapshots_can_use_openapi_without_sse() -> Result<()> {
+    let output = invoke_operation(
+        vec![
+            snapshot_only_health(),
+            running_snapshot(),
+            snapshot_only_health(),
+        ],
+        false,
+    )?;
+    assert!(output.status.success(), "{output:?}");
+    let envelope: Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(envelope["command"], "runtime.operation");
+    assert_eq!(envelope["summary"], snapshot(ID, "running"));
+    Ok(())
+}
+
+#[test]
+fn following_requires_an_advertised_event_stream() -> Result<()> {
+    failed_diagnostic(
+        vec![snapshot_only_health()],
+        "Runtime does not advertise sse.operations.v1",
+    )
+}
+
+#[test]
+fn unrelated_capabilities_do_not_enable_operation_snapshots() -> Result<()> {
+    let health = json!({"status":"ready","instance_id":"fixture","capabilities":["backups.v1"]});
+    let output = invoke_operation(vec![(HEALTH, "200 OK", JSON, health.to_string())], false)?;
+    assert!(!output.status.success(), "{output:?}");
+    let diagnostic = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(diagnostic.contains("Runtime does not advertise OpenAPI operation snapshots"));
+    Ok(())
 }
 
 #[test]
