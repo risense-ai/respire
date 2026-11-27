@@ -13,7 +13,15 @@ const graph = Buffer.from(
   '0a0208010a081206746f6b656e73621b0a09656d62656464696e67120e0a0c080112080a0208010a0208044202100d', 'hex');
 const vocabulary = Buffer.from('{"version":"1.0","model":{"type":"WordLevel","vocab":{"[UNK]":0},"unk_token":"[UNK]"}}');
 
-export async function prepareSwitch(runtime, rollback) {
+export function prepareSwitch(runtime, rollback) {
+  return prepareModel(runtime, rollback, !rollback);
+}
+
+export function prepareRecall(runtime) {
+  return prepareModel(runtime, false, false);
+}
+
+async function prepareModel(runtime, rollback, seed) {
   const root = runtime.env.RSRS_DATA_DIR;
   const assets = join(root, 'qualification-models');
   await mkdir(assets, {mode: 0o700});
@@ -36,7 +44,7 @@ export async function prepareSwitch(runtime, rollback) {
   }
   await writeFile(join(root,'embedding-profiles-v1.json'), JSON.stringify({models,backends:{}}), {flag:'wx',mode:0o600});
   const request = spec => runtime.target.request(spec);
-  if (!rollback) {
+  if (seed) {
     // Populate the disposable library before starting either switch worker.
     for (let n=0;n<128;n++) {
       const started = performance.now();
