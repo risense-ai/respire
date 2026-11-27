@@ -68,10 +68,23 @@ where
     T: Send + 'static,
     F: for<'a> FnOnce(&LibraryContext<'a>, &Admission) -> V1Result<T> + Send + 'static,
 {
-    submit_publication(scope, run, || Problem::new(
-        StatusCode::CONFLICT, "memory_write_outcome_unknown",
+    submit_publication(scope, run, memory_write_unknown, true).await
+}
+
+pub(super) async fn submit_memory_create<T, F>(scope: RestScope, run: F) -> V1Result<T>
+where
+    T: Send + 'static,
+    F: for<'a> FnOnce(&LibraryContext<'a>, &Admission) -> V1Result<T> + Send + 'static,
+{
+    submit_publication(scope, run, memory_write_unknown, false).await
+}
+
+fn memory_write_unknown() -> Problem {
+    Problem::new(
+        StatusCode::CONFLICT,
+        "memory_write_outcome_unknown",
         "Memory write outcome is unknown; do not retry automatically",
-    ), true).await
+    )
 }
 
 pub(super) async fn submit_publication<T, F>(
