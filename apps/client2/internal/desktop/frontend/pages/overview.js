@@ -38,11 +38,23 @@ export const phase = (value) => phases[value] || value || "—";
 export function heading(title, description, actions = "") {
   return `<div class="page-heading"><div><div class="eyebrow">RESPIRE / LOCAL WORKSPACE</div><h1>${h(title)}</h1><p>${h(description)}</p></div><div class="heading-actions">${actions}</div></div>`;
 }
+export function updateConnectionIndicator(indicator, connected) {
+  const label = t(connected ? i18nMessages.m3053ee2f4c18204a : i18nMessages.mcef1537a814bdc68);
+  if (indicator.textContent !== label) indicator.textContent = label;
+  indicator.classList.toggle("good", Boolean(connected));
+}
 const ENGINE_NAMES = { cpu: "CPU", gpu: "GPU", npu: "NPU" };
 export function overview(root, ctx) {
   // Polls update status around these controls without replacing focused buttons.
   root.innerHTML =
-    '<div data-overview-summary></div>' +
+    '<div data-overview-summary>' +
+    heading(
+      t(i18nMessages.me8705434968b58fd),
+      i18nMessages.md4138a10d95dbb7a,
+      '<span class="badge" role="status" data-runtime-connection></span>' +
+        i18nMessages.mdea3a195d4b5e4d1,
+    ) +
+    '<div class="metrics" data-overview-metrics></div></div>' +
     '<section class="section-gap" data-overview-stats></section>' +
     '<div class="section-gap" data-overview-details></div>' +
     panel(
@@ -50,7 +62,8 @@ export function overview(root, ctx) {
       i18nMessages.m5fa416eee7f98137,
     ) +
     '<div data-overview-onboarding></div>';
-  const summaryRoot = $("[data-overview-summary]", root);
+  const connection = $("[data-runtime-connection]", root);
+  const metricsRoot = $("[data-overview-metrics]", root);
   const statsView = stats($("[data-overview-stats]", root), ctx);
   const detailsRoot = $("[data-overview-details]", root);
   const runtimeStatus = $("[data-runtime-status]", root);
@@ -111,13 +124,8 @@ export function overview(root, ctx) {
     const variant = selection?.variant || snapshot.variant || "quantized";
     const file = selection?.variant ? null : snapshot.file;
     const note = selection ? "" : snapshot.note || "";
-    summaryRoot.innerHTML =
-      heading(
-        t(i18nMessages.me8705434968b58fd),
-        i18nMessages.md4138a10d95dbb7a,
-        `${i18nMessages.mdea3a195d4b5e4d1}`,
-      ) +
-      `<div class="metrics">${metric(i18nMessages.m1dcb520e9408dad5, number(s.local_alive), `${i18nMessages.mdf1c26055f9f39f5}${number(s.local_total)}${i18nMessages.m32aca0663f5c881e}`)}${metric(i18nMessages.me25115d1d25e3421, number(sync.remote_alive), s.remote_configured ? i18nMessages.m2616c6d1ebc7614a : i18nMessages.m9183a87f3a6c526e)}${metric(i18nMessages.me09cbaccf1dd8bf8, number(sync.pending), `${number(sync.conflicts)}${i18nMessages.m0cc6b0935f0e15b9}`)}${metric(i18nMessages.m11676e8ace776256, phase(index.state), index.error || "")}</div>`;
+    updateConnectionIndicator(connection, state.connected);
+    metricsRoot.innerHTML = `${metric(i18nMessages.m1dcb520e9408dad5, number(s.local_alive), `${i18nMessages.mdf1c26055f9f39f5}${number(s.local_total)}${i18nMessages.m32aca0663f5c881e}`)}${metric(i18nMessages.me25115d1d25e3421, number(sync.remote_alive), s.remote_configured ? i18nMessages.m2616c6d1ebc7614a : i18nMessages.m9183a87f3a6c526e)}${metric(i18nMessages.me09cbaccf1dd8bf8, number(sync.pending), `${number(sync.conflicts)}${i18nMessages.m0cc6b0935f0e15b9}`)}${metric(i18nMessages.m11676e8ace776256, phase(index.state), index.error || "")}`;
     detailsRoot.innerHTML = `<div class="grid">${panel(
         i18nMessages.mdcfe516d1114e14f,
         pairs([
