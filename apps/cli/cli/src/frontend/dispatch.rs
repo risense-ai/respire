@@ -1,5 +1,9 @@
 use super::*;
 
+pub(crate) fn capture_run(args: Vec<String>) -> Captured {
+    respire_commands::capture::capture_exec(args, run)
+}
+
 fn run_classify_config(
     backend: Option<&str>,
     api_base: Option<&str>,

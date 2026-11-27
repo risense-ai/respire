@@ -23,7 +23,6 @@ use serde_json::Value;
 
 use crate::i18n::{self, Lang};
 
-mod model_task;
 mod model_weights;
 mod recall_api;
 mod recall_fusion;
@@ -75,7 +74,6 @@ enum Overlay {
     SavingWeights,
     HostModel,
     RecallTest(recall_test::Form),
-    ModelTask(model_task::Task),
     Confirm {
         text: String,
         cursor: usize,
@@ -173,4 +171,5 @@ include!("shell/model_and_settings_views.rs");
 
 include!("shell/model_menu_tests.rs");
 
-include!("shell/terminal.rs");
+mod terminal;
+use terminal::{choice, fail_line, line, ok_line, overlay_lines, restore, setup, warn_line, workspace_label};

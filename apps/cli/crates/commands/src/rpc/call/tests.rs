@@ -1,15 +1,15 @@
 use super::*;
 use crate::loopback_http;
 
-fn valid_timeout_args(args: &[&str]) -> Vec<String> {
+fn valid_timeout_args(args: &[&str]) -> Result<Vec<String>> {
     use clap::Parser;
     crate::cli_def::Cli::try_parse_from(std::iter::once("rsrs").chain(args.iter().copied()))
-        .expect("timeout regression must exercise valid CLI argv");
-    args.iter().map(|arg| (*arg).to_owned()).collect()
+        .context("timeout regression must exercise valid CLI argv")?;
+    Ok(args.iter().map(|arg| (*arg).to_owned()).collect())
 }
 
 #[test]
-fn rpc_timeout_recognizes_commands_after_global_values_and_equals_forms() {
+fn rpc_timeout_recognizes_commands_after_global_values_and_equals_forms() -> Result<()> {
     for args in [
         vec!["sync"],
         vec!["--json", "--progress-id", "request-one", "sync"],
@@ -21,31 +21,32 @@ fn rpc_timeout_recognizes_commands_after_global_values_and_equals_forms() {
         vec!["--json", "--progress-id", "model", "model", "install-m3"],
         vec!["model", "--model-task-id", "install", "activate", "m3"],
     ] {
-        let parsed = valid_timeout_args(&args);
+        let parsed = valid_timeout_args(&args)?;
         assert_eq!(
             rpc_timeout("cli.exec", &parsed, None),
             Duration::from_secs(30 * 60),
             "{args:?}"
         );
     }
+    Ok(())
 }
 
 #[test]
-fn rpc_timeout_does_not_treat_tracking_values_or_other_methods_as_commands() {
+fn rpc_timeout_does_not_treat_tracking_values_or_other_methods_as_commands() -> Result<()> {
     for args in [
         vec!["--progress-id", "sync", "list"],
         vec!["--model-task-id", "import", "status"],
         vec!["model", "--progress-id", "install", "engine"],
         vec!["show", "synthetic-id"],
     ] {
-        let parsed = valid_timeout_args(&args);
+        let parsed = valid_timeout_args(&args)?;
         assert_eq!(
             rpc_timeout("cli.exec", &parsed, None),
             HTTP_TIMEOUT,
             "{args:?}"
         );
     }
-    let long = valid_timeout_args(&["--progress-id", "request-one", "sync"]);
+    let long = valid_timeout_args(&["--progress-id", "request-one", "sync"])?;
     assert_eq!(
         rpc_timeout("cli.progress", &long, None),
         Duration::from_secs(1)
@@ -62,6 +63,7 @@ fn rpc_timeout_does_not_treat_tracking_values_or_other_methods_as_commands() {
         rpc_timeout("model.control", &long, Some(Duration::from_millis(7))),
         Duration::from_millis(7)
     );
+    Ok(())
 }
 
 #[test]

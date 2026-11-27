@@ -6,6 +6,10 @@ use respire_protocol::config_control::*;
 use respire_protocol::metadata_control::metadata_identity;
 use respire_protocol::RpcRequest;
 
+#[path = "agent_config_control/online.rs"]
+mod online;
+use online::{AgentConfigJournal, OnlineAgentConfig};
+
 fn host_config_preflight(root: &std::path::Path, profile: &std::path::Path) -> anyhow::Result<()> {
     use serde_json::Value;
     let read = |path: std::path::PathBuf| -> anyhow::Result<Option<Value>> {
@@ -310,20 +314,20 @@ pub(crate) fn apply_startup_core_config(owner: &crate::net_rpc::Health,
     Ok(())
 }
 
-fn save_core_receipt(record: &mut AgentConfigMaintenance, maintenance: &mut super::lifecycle::Maintenance,
+fn save_core_receipt(record: &mut AgentConfigMaintenance, journal: &mut AgentConfigJournal,
     control: &CoreConfigTransaction, output: ResultEnvelope, outcome: AgentConfigOutcome) -> Result<()> {
     record.receipt = Some(AgentConfigReceipt { review: record.review.clone(), outcome,
         result: serde_json::json!({"output":output,"core_control":control}) });
-    maintenance.save_agent_config(record)
+    journal.save(record)
 }
 
-fn control_core_setting(record: &mut AgentConfigMaintenance, maintenance: &mut super::lifecycle::Maintenance,
+fn control_core_setting(record: &mut AgentConfigMaintenance, journal: &mut AgentConfigJournal,
     owner: Option<&crate::net_rpc::Health>, query_only: bool) -> Result<ResultEnvelope> {
     anyhow::ensure!(!query_only || record.sent, "core configuration query cannot publish an unsent operation");
     use respire_client_host::lock::LibraryLock;
     let review = record.review.clone();
     // A verified live Runtime owns the profile's database lock for its lifetime.
-    // Host publication uses takeover + Paused admission + occupancy + config CAS;
+    // Host publication uses takeover and config CAS;
     // only the offline path excludes a concurrent database/startup owner here.
     let _root = if owner.is_none() {
         Some(LibraryLock::acquire(&review.installation_root, Duration::from_secs(15))?)
@@ -335,7 +339,7 @@ fn control_core_setting(record: &mut AgentConfigMaintenance, maintenance: &mut s
     anyhow::ensure!(!record.sent || record.receipt.is_some(),
         "agent_config_outcome_unknown operation_id={}; no publication receipt; do not replay", review.operation_id);
     if !record.sent {
-        if let Some(owner) = owner { wait_core_queries(owner)?; }
+        if let (Some(owner), Some(_)) = (owner, journal.maintenance()) { wait_core_queries(owner)?; }
         validate_host_agent_config(&review.intent, &review.profile)?;
         let original: serde_json::Value = review.original_config.as_deref().map(serde_json::from_str)
             .transpose()?.unwrap_or_else(|| serde_json::json!({}));
@@ -343,11 +347,11 @@ fn control_core_setting(record: &mut AgentConfigMaintenance, maintenance: &mut s
         let mut control = CoreConfigTransaction { scope: owner.map(crate::net_rpc::request_scope).transpose()?,
             revision: 0, candidate, validated: None, apply_sent: false, rollback_sent: false, response: None };
         if let Some(scope) = control.scope.as_ref() {
-            let current = core_exchange(Some(maintenance), &review.profile, scope, "core_config.read",
+            let current = core_exchange(journal.maintenance(), &review.profile, scope, "core_config.read",
                 &uuid::Uuid::new_v4().to_string(), None, None)?;
             let current = core_state(&current, "current", None, None)?;
             control.revision = current["revision"].as_u64().context("core revision missing")?;
-            let validated = core_exchange(Some(maintenance), &review.profile, scope, "core_config.validate",
+            let validated = core_exchange(journal.maintenance(), &review.profile, scope, "core_config.validate",
                 &uuid::Uuid::new_v4().to_string(), Some(&control.candidate), None)?;
             control.validated = Some(core_state(&validated, "validated", Some(&control.candidate), Some(control.revision))?);
         }
@@ -359,11 +363,11 @@ fn control_core_setting(record: &mut AgentConfigMaintenance, maintenance: &mut s
         preview.sent = true;
         preview.receipt = Some(AgentConfigReceipt { review: review.clone(), outcome: AgentConfigOutcome::Committed,
             result: serde_json::json!({"output":output,"core_control":control}) });
-        maintenance.check_agent_config_record(&preview)?;
+        journal.check(&preview)?;
         record.sent = true;
-        save_core_receipt(record, maintenance, &control, output.clone(), AgentConfigOutcome::Unknown)?;
+        save_core_receipt(record, journal, &control, output.clone(), AgentConfigOutcome::Unknown)?;
         crate::client_config::publish_agent_config(&review, ||
-            save_core_receipt(record, maintenance, &control, output.clone(), AgentConfigOutcome::Committed))?;
+            save_core_receipt(record, journal, &control, output.clone(), AgentConfigOutcome::Committed))?;
     }
     let receipt = record.receipt.as_ref().context("core host publication receipt missing")?;
     anyhow::ensure!(receipt.review == review, "core receipt changed original intent");
@@ -387,8 +391,8 @@ fn control_core_setting(record: &mut AgentConfigMaintenance, maintenance: &mut s
         } else {
             anyhow::ensure!(!query_only, "core configuration query cannot send an apply");
             control.apply_sent = true;
-            save_core_receipt(record, maintenance, &control, output.clone(), AgentConfigOutcome::Committed)?;
-            core_exchange(Some(maintenance), &review.profile, &scope, "core_config.apply", &review.operation_id,
+            save_core_receipt(record, journal, &control, output.clone(), AgentConfigOutcome::Committed)?;
+            core_exchange(journal.maintenance(), &review.profile, &scope, "core_config.apply", &review.operation_id,
                 Some(&control.candidate), Some(control.revision)).context(
                     "agent_config_outcome_unknown; query original core operation; do not replay")?
         };
@@ -400,30 +404,30 @@ fn control_core_setting(record: &mut AgentConfigMaintenance, maintenance: &mut s
         anyhow::ensure!(response.ok || response.code.as_deref() == Some("core_config_rejected"),
             "agent_config_outcome_unknown; core response does not prove application or rejection; do not replay");
         control.response = Some(response);
-        save_core_receipt(record, maintenance, &control, output.clone(), AgentConfigOutcome::Committed)?;
+        save_core_receipt(record, journal, &control, output.clone(), AgentConfigOutcome::Committed)?;
     }
     let response = control.response.clone().context("core application response missing")?;
     if !response.ok {
         control.rollback_sent = true;
-        save_core_receipt(record, maintenance, &control, output.clone(), AgentConfigOutcome::Committed)?;
+        save_core_receipt(record, journal, &control, output.clone(), AgentConfigOutcome::Committed)?;
         output.status = Status::Fail;
         output.summary = serde_json::json!({"action":"rolled_back","core_application":{"state":"rejected"}});
         output.items.clear();
         output.errors = vec![response.error.clone().context("core rejection reason missing")?];
         crate::client_config::rollback_agent_config(&review, ||
-            save_core_receipt(record, maintenance, &control, output.clone(), AgentConfigOutcome::RolledBack))?;
+            save_core_receipt(record, journal, &control, output.clone(), AgentConfigOutcome::RolledBack))?;
     } else {
         let revision = control.revision.checked_add(1).context("core revision overflow")?;
         let applied = core_state(&response, "applied", Some(&control.candidate), Some(revision))?;
         let validated = control.validated.as_ref().context("core validation receipt missing")?;
         anyhow::ensure!(applied["effective"] == validated["effective"], "core effective state differs from validation");
-        let current = core_exchange(Some(maintenance), &review.profile, &scope, "core_config.read",
+        let current = core_exchange(journal.maintenance(), &review.profile, &scope, "core_config.read",
             &uuid::Uuid::new_v4().to_string(), None, None)?;
         let current = core_state(&current, "current", Some(&control.candidate), Some(revision))?;
         anyhow::ensure!(current["effective"] == applied["effective"], "core state changed after application");
         output.summary["core_application"] = serde_json::json!({"state":"applied","applies":"next_query",
             "scope":scope,"revision":revision,"effective":applied["effective"]});
-        save_core_receipt(record, maintenance, &control, output.clone(), AgentConfigOutcome::Committed)?;
+        save_core_receipt(record, journal, &control, output.clone(), AgentConfigOutcome::Committed)?;
     }
     crate::client_config::verify_agent_config_receipt(record.receipt.as_ref().context("core terminal receipt missing")?)?;
     Ok(output)

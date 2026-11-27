@@ -61,6 +61,9 @@ pub(super) fn owner_scope_id(profile: &Path, account_id: Option<&str>) -> Result
 /// Host entry point. Only a previously serving owner is restarted on success.
 pub(crate) fn control_prepare_model(intent: &ModelInstallIntent) -> Result<(AssetsStatus, bool)> {
     crate::runtime_policy::require_host("model preparation")?;
+    if let Some(mirror) = intent.mirror.as_deref().filter(|mirror| mirror.trim() != "auto") {
+        model_mirror_origin(mirror)?;
+    }
     anyhow::ensure!(super::lifecycle::current_boot_token().is_none(),
         "model preparation must own its host maintenance transaction");
     let takeover = crate::runtime_policy::takeover_lock()?;

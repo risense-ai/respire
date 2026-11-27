@@ -2,9 +2,7 @@
 // Business, database, credential and inference work stays in the independent
 // Runtime. Host code prepares its assets, configuration and private controls.
 
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::Ordering;
 
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
@@ -33,9 +31,9 @@ pub use respire_commands::classify;
 use respire_commands::cli_def::{
     Cli, Command, ModelAction, PluginCommand, SessionCommand, SnapshotCmd,
 };
-use respire_commands::gates::{
-    is_off_allowed, is_readonly_switch_off, is_write_command, is_write_command_fine,
-};
+use respire_commands::gates::is_off_allowed;
+#[cfg(test)]
+use respire_commands::gates::{is_write_command, is_write_command_fine};
 pub use respire_commands::i18n;
 pub use respire_commands::metadata;
 pub use respire_commands::model_progress;
@@ -46,8 +44,8 @@ pub use respire_commands::output::{
 use respire_commands::output_emit::{emit_details, emit_result};
 use respire_commands::output_state::DIRECT_MODE;
 use respire_commands::output_state::{
-    exit_code, json_mode, mark_emitted, output_emitted, parse_failure, progress_enabled,
-    set_exit_code, set_json_mode, status_exit_code, Captured,
+    exit_code, json_mode, mark_emitted, output_emitted, parse_failure, set_exit_code,
+    set_json_mode, Captured,
 };
 use respire_commands::progress;
 pub use respire_commands::runtime_error;
@@ -63,17 +61,13 @@ use bootstrap::{command_failure, install_cli_host_hooks, install_error_logging, 
 #[path = "frontend/dispatch.rs"]
 mod dispatch;
 use dispatch::run;
+pub(crate) use dispatch::capture_run;
 #[path = "frontend/host_commands.rs"]
 mod host_commands;
 use host_commands::{host_command, run_agent_config_read, run_extract_tui, run_super_reset};
 #[path = "frontend/host_actions.rs"]
 mod host_actions;
 use host_actions::*;
-
-pub(crate) fn capture_run(args: Vec<String>) -> Captured {
-    // Host capture parses and collects output once; Runtime owns business retries.
-    respire_commands::capture::capture_exec(args, run)
-}
 
 #[cfg(test)]
 #[path = "frontend/capture_tests.rs"]

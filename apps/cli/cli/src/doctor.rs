@@ -8,9 +8,12 @@ pub(crate) fn run(remote: bool, check_update: bool, fix: bool) -> Result<()> {
     if check_update || fix {
         runtime_policy::require_host("doctor repair and CLI update checks")?;
     }
-    if fix {
+    let cleared_pause = if fix {
         respire_client_host::settings::ensure_writable()?;
-    }
+        crate::autostart::cleanup_paused()?
+    } else {
+        false
+    };
     if client_only {
         return crate::emit_result(runtime_doctor(remote)?);
     }
@@ -18,6 +21,9 @@ pub(crate) fn run(remote: bool, check_update: bool, fix: bool) -> Result<()> {
     crate::prepare_command_runtime()?;
     crate::autostart::check_managed_request()?;
     let mut host = host_rows(check_update);
+    if cleared_pause {
+        host.push(Item::new("Runtime maintenance", Status::Ok, "Cleared an orphaned Paused marker"));
+    }
     let mut result = runtime_doctor(remote)?;
     if fix {
         let repair = repair(&result)?;

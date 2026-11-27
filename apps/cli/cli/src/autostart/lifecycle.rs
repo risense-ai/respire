@@ -19,6 +19,8 @@ use std::time::{Duration, Instant};
 
 mod snapshot_control;
 pub(crate) use snapshot_control::{snapshot_recover_control, snapshot_restore_control};
+mod paused_cleanup;
+pub(crate) use paused_cleanup::cleanup_paused;
 // Runtime snapshot authority must use this limit; its generic reader caps at 64 KiB.
 pub(super) const MAINTENANCE_MARKER_MAX_BYTES: usize = 16 * 1024;
 
@@ -29,63 +31,9 @@ thread_local! {
     static RECOVERY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub(super) enum Phase {
-    Paused,
-    Starting,
-    Verified,
-}
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct Marker {
-    schema: u32,
-    id: String,
-    token: String,
-    phase: Phase,
-    expected_profile: Option<PathBuf>,
-    expected_version: String,
-    owner_pid: u32,
-    owner_birth: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    snapshot: Option<snapshot_control::SnapshotMarkerBinding>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    agent_config: Option<Value>,
-}
-
-fn marker_path(root: &Path) -> PathBuf {
-    control_path(root).with_file_name("maintenance.json")
-}
-fn marker_bytes(root: &Path) -> Result<Option<Vec<u8>>> {
-    let path = marker_path(root);
-    let meta = match fs::symlink_metadata(&path) {
-        Ok(v) => v,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(e.into()),
-    };
-    anyhow::ensure!(
-        meta.is_file() && !meta.file_type().is_symlink()
-            && meta.len() <= MAINTENANCE_MARKER_MAX_BYTES as u64,
-        "invalid runtime maintenance marker"
-    );
-    use std::io::Read;
-    let mut bytes = Vec::new();
-    fs::File::open(path)?.take(MAINTENANCE_MARKER_MAX_BYTES as u64 + 1).read_to_end(&mut bytes)?;
-    anyhow::ensure!(bytes.len() <= MAINTENANCE_MARKER_MAX_BYTES, "runtime maintenance marker too large");
-    Ok(Some(bytes))
-}
-fn marker(root: &Path) -> Result<Option<Marker>> {
-    let Some(bytes) = marker_bytes(root)? else { return Ok(None); };
-    let value: Marker = serde_json::from_slice(&bytes)?;
-    anyhow::ensure!(
-        value.schema == 1 && uuid::Uuid::parse_str(&value.token).is_ok(),
-        "invalid runtime maintenance marker"
-    );
-    Ok(Some(value))
-}
-
-fn controller_alive(value: &Marker) -> Result<bool> {
-    Ok(manager::process_birth(value.owner_pid)?.as_deref() == Some(value.owner_birth.as_str()))
-}
+mod marker;
+pub(super) use marker::Phase;
+use marker::{controller_alive, marker, marker_bytes, marker_path, parse_marker, Marker};
 
 pub(super) fn save(config: &mut Registration) -> Result<()> {
     let path = control_path(&config.installation);

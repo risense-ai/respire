@@ -3,16 +3,13 @@ use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
 use respire_runtime_sdk::{types::HealthResponse, Client, Error};
 
 /// Keep legacy ownership evidence: V1 health does not include executable or profile identity.
-pub(super) fn health() -> Result<crate::net_rpc::Health> {
-    crate::net_rpc::check_connection_to(std::net::SocketAddr::from((
+fn negotiated_health() -> Result<Health> {
+    check_connection_to(std::net::SocketAddr::from((
         [127, 0, 0, 1],
-        crate::net_rpc::rpc_port(),
+        rpc_port(),
     )))?;
-    let advertised = discover(
-        &crate::net_rpc::rpc_base_url(),
-        crate::net_rpc::read_token()?,
-    )?;
-    let owner = crate::net_rpc::health()?;
+    let advertised = discover(&rpc_base_url(), read_token()?)?;
+    let owner = health()?;
     if let Some(advertised) = advertised.filter(supports_v1) {
         anyhow::ensure!(
             !advertised.instance_id.trim().is_empty()
@@ -21,6 +18,42 @@ pub(super) fn health() -> Result<crate::net_rpc::Health> {
         );
     }
     Ok(owner)
+}
+
+pub fn command_roundtrip(method: &str, args: &[String], cli_version: &str) -> Result<respire_protocol::RpcResponse<crate::output::ResultEnvelope>> {
+    let (id, version, health) = match method {
+        "runtime.status" => {
+            let health = negotiated_health()?;
+            ("health", health.bin.clone(), Some(health))
+        }
+        "runtime.stop" => {
+            request_stop()?;
+            ("stop", cli_version.to_owned(), None)
+        }
+        "cli.exec" | "cli.progress" | "model.control" | "model.prepare" | "index.prepare"
+        | "model.catalog" | "model.configure" | "model.switch" | "model.resume"
+        | "model.progress" => {
+            let response = rpc_method(method, args.to_vec())?;
+            return serde_json::from_value(response).context("runtime rpc response shape mismatch");
+        }
+        other => bail!("unknown runtime method {other}"),
+    };
+    Ok(respire_protocol::RpcResponse {
+        v: health.as_ref().map_or(crate::rpc_client::PROTOCOL_V, |health| health.v),
+        id: id.into(),
+        operation_id: None,
+        scope: None,
+        idempotency_key: None,
+        ok: true,
+        exit: 0,
+        bin: version,
+        envelope: None,
+        error: None,
+        code: None,
+        web_url: health.as_ref().map(|health| health.url.clone()),
+        pid: health.as_ref().map(|health| health.pid),
+        data_dir: health.map(|health| health.data_dir),
+    })
 }
 
 fn supports_v1(health: &HealthResponse) -> bool {
@@ -47,14 +80,11 @@ fn discover(base: &str, token: Option<String>) -> Result<Option<HealthResponse>>
         let client = Client::new_with_client(base, http);
         match client.get_health().await {
             Ok(response) => Ok(Some(response.into_inner())),
-            // Only an absent endpoint permits the legacy health fallback.
             Err(Error::ErrorResponse(response)) if response.status().as_u16() == 404 => Ok(None),
-            Err(Error::ErrorResponse(response))
-                if matches!(response.status().as_u16(), 401 | 403) =>
-            {
-                Err(crate::runtime_error::RuntimeError::Unauthorized.into())
+            Err(Error::ErrorResponse(response)) if matches!(response.status().as_u16(), 401 | 403) => {
+                Err(RuntimeError::Unauthorized.into())
             }
-            Err(error) => Err(crate::runtime_error::RuntimeError::Transport(format!(
+            Err(error) => Err(RuntimeError::Transport(format!(
                 "Runtime capability discovery failed: {error}"
             ))
             .into()),

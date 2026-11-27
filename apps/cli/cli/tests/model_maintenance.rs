@@ -377,3 +377,4 @@ impl OwnedRuntime {
 
 include!("model_maintenance/offline.rs");
 include!("model_maintenance/serving.rs");
+include!("model_maintenance/online_agent_config.rs");

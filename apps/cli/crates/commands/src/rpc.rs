@@ -6,13 +6,16 @@
 use std::fs;
 use std::io::Write;
 use std::net::{SocketAddr, TcpStream};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::runtime_error::{OperationContext, RuntimeError};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+
+mod api;
+pub use api::command_roundtrip;
 
 pub const DEFAULT_RPC_HOST: &str = "127.0.0.1";
 pub const DEFAULT_RPC_PORT: u16 = 15169;

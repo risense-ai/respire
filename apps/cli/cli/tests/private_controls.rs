@@ -136,7 +136,7 @@ impl Fixture {
 }
 
 #[test]
-fn absent_secret_uses_real_private_read_and_finishes_maintenance() -> Result<()> {
+fn absent_secret_reads_without_starting_maintenance() -> Result<()> {
     let fixture = Fixture::new()?;
     for _ in 0..2 {
         let (output, result) = fixture.run(&["secret"])?;
@@ -153,10 +153,9 @@ fn absent_secret_uses_real_private_read_and_finishes_maintenance() -> Result<()>
 }
 
 #[test]
-fn absent_session_reads_reject_without_credentials_and_retain_fencing() -> Result<()> {
+fn absent_session_reads_keep_export_outside_maintenance() -> Result<()> {
     for args in [vec!["session", "list"], vec!["keys-export"]] {
         let fixture = Fixture::new()?;
-        // Prove the same installed Runtime and private exchange work before the negative.
         let (baseline, baseline_result) = fixture.run(&["secret"])?;
         anyhow::ensure!(
             baseline.status.success(),
@@ -170,6 +169,12 @@ fn absent_session_reads_reject_without_credentials_and_retain_fencing() -> Resul
         let error = result["errors"][0]
             .as_str()
             .context("read rejection missing")?;
+        if args == ["keys-export"] {
+            assert_eq!(error, "key export session is unavailable");
+            assert!(!fixture.marker().exists());
+            fixture.assert_unchanged()?;
+            continue;
+        }
         assert!(
             error.contains("private Runtime secret read was rejected"),
             "{result}"
