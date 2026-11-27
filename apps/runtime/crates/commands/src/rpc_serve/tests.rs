@@ -115,6 +115,20 @@ fn business_scope_rejects_missing_empty_and_stale_identity() {
 }
 
 #[test]
+fn disabled_automatic_sync_does_not_wait_for_the_foreground_writer() {
+    let gate = shared_exclusive();
+    let foreground = gate.acquire(true);
+    let (result, receipt) = mpsc::channel();
+    let attempt = std::thread::spawn(move || {
+        let _ = result.send(automatic_sync_boundary(0, false));
+    });
+    let disabled = receipt.recv_timeout(Duration::from_secs(1));
+    drop(foreground);
+    attempt.join().expect("automatic sync preflight did not panic");
+    assert!(matches!(disabled, Ok(Ok(None))));
+}
+
+#[test]
 fn completed_sync_preserves_pending_work_after_host_observer_failure() {
     for due in [None, Some(Instant::now())] {
         let mut schedule = SyncSchedule {
