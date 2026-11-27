@@ -2,22 +2,22 @@
 name = "respire_app"
 version = "1.0.0"
 edition = "2021"
-rust-version = "1.88"
-description = "respire app layer: auth, service, sync, inject, and transport"
+rust-version = "1.89"
+description = "Respire application services, account transactions, sync, and transport"
 license-file = "../../LICENSE"
 repository.workspace = true
 publish = false
 
 [features]
 default = ["cpu-owned-ort-experiment"]
+test-support = ["dep:keyring"]
+native-credential-fixtures = ["test-support"]
 native-fault-tests = ["respire_core_sdk/native-fault-tests"]
 cpu-owned-ort-experiment = ["respire_core_sdk/cpu-owned-ort-experiment"]
 
 [dependencies]
 respire_spawn = { path = "../../spawn" }
-respire_app_domain = { path = "../app-domain" }
-crossterm = "0.28"
-rpassword = "7"
+keyring = { version = "3", optional = true, features = ["linux-native", "sync-secret-service", "vendored", "windows-native", "apple-native"] }
 base64 = "0.22"
 flate2 = "1.1"
 respire_protocol = { path = "../protocol" }
@@ -42,7 +42,7 @@ winsafe = { version = "=0.0.28", features = ["advapi"] }
 
 [dev-dependencies]
 keyring = { version = "3", features = ["linux-native", "sync-secret-service", "vendored", "windows-native", "apple-native"] }
-respire_app_domain = { path = "../app-domain", features = ["test-support"] }
+respire_spawn = { path = "../../spawn", features = ["test-private-space-root"] }
 tempfile = "3.15"
 tiny_http = "0.12"
 

@@ -210,7 +210,7 @@ fn budget(
         // JSON escaping can require more space than the raw text.
         out.items.push(hit);
         while serde_json::to_string(&out)?.chars().count() > max_chars {
-            let last = out.items.last_mut().unwrap();
+            let last = out.items.last_mut().context("missing diary result item")?;
             if last.text.pop().is_none() {
                 out.items.pop();
                 break;

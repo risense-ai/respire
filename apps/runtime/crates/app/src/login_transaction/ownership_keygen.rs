@@ -292,9 +292,10 @@ fn control_keygen_with_fingerprint(
         && material.keyring_account.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'),
         "invalid host keygen credential account");
     require_persistent_auth_backend(&material.keyring_backend)?;
-    #[cfg(all(target_os = "linux", any(feature = "native-credential-fixtures", not(any(test, feature = "test-support")))))]
+    // Workspace dev-dependency feature unification can enable test-support, but Linux binaries still require secret_service.
+    #[cfg(all(target_os = "linux", any(feature = "native-credential-fixtures", not(test))))]
     ensure!(material.keyring_backend == "secret_service", "unsupported host keygen credential backend");
-    #[cfg(any(not(target_os = "linux"), all(any(test, feature = "test-support"), not(feature = "native-credential-fixtures"))))]
+    #[cfg(any(not(target_os = "linux"), all(test, not(feature = "native-credential-fixtures"))))]
     ensure!(material.keyring_backend == "native", "unsupported host keygen credential backend");
     ensure!(!material.keyring_backend.is_empty() && !material.super_password.is_empty(),
         "host keygen credential metadata or key is missing");

@@ -463,4 +463,6 @@ include!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/engine/parts/run_tree_float.r
 
 include!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/engine/parts/run_share_import.rs"));
 
+include!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/engine/parts/dispatch_light.rs"));
+
 include!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/engine/parts/run_local_inner.rs"));

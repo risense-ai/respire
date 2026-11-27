@@ -1,6 +1,6 @@
 //! One lock for tests that touch process environment or client.json.
 //!
-//! auth, service, inject, and sync used to take different mutexes, or none.
+//! Auth, service, and sync used to take different mutexes, or none.
 //! Parallel tests then wrote the real ~/.rsrs/client.json.
 
 use std::path::Path;

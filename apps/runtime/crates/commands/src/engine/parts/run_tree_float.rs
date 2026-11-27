@@ -269,7 +269,7 @@ pub fn run_passport() -> Result<()> {
             "" => "local".to_owned(),
             user => user.to_owned(),
         };
-        let alive = store.all(false)?.len();
+        let alive = store.count()?;
         let devices = store.devices_count()?;
         let items = vec![
             OutputItem::new("user", OutputStatus::Ok, user.clone()),
@@ -301,13 +301,6 @@ pub fn run_passport() -> Result<()> {
     let devices = respire_app::service::open_store()
         .and_then(|s| s.devices_count())
         .unwrap_or(0);
-    let agents = respire_app::inject::targets()
-        .map(|ts| {
-            ts.iter()
-                .filter(|t| t.state == "fresh" || t.state == "stale")
-                .count()
-        })
-        .unwrap_or(0);
     let user = {
         let u = si.user.trim();
         if u.is_empty() {
@@ -319,7 +312,7 @@ pub fn run_passport() -> Result<()> {
     let items = vec![
         OutputItem::new("user", OutputStatus::Ok, user.clone()),
         OutputItem::new("memories", OutputStatus::Ok, alive.to_string()),
-        OutputItem::new("agents", OutputStatus::Ok, agents.to_string()),
+        OutputItem::new("agents", OutputStatus::Skip, "host_owned"),
         OutputItem::new("devices", OutputStatus::Ok, devices.to_string()),
     ];
     let mut result = ResultEnvelope::new(
@@ -328,7 +321,7 @@ pub fn run_passport() -> Result<()> {
         serde_json::json!({
             "user": user,
             "memories": alive,
-            "agents": agents,
+            "agents": null,
             "devices": devices,
         }),
         items,

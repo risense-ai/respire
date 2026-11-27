@@ -16,7 +16,7 @@ native-fault-tests = []
 e2e-loopback-mirror = []
 
 [dependencies]
-respire_app = { package = "respire_app", path = "../app", default-features = false }
+respire_app = { path = "../app" }
 respire_protocol = { path = "../protocol" }
 respire_spawn = { path = "../../spawn" }
 respire_logging = { path = "../logging" }
@@ -46,7 +46,7 @@ signal-hook = "0.3"
 [dev-dependencies]
 respire_spawn = { path = "../../spawn", features = ["test-private-space-root"] }
 # Native business fixtures act as synthetic hosts; serving Runtime keeps this disabled.
-respire_app_domain = { path = "../app-domain", features = ["test-support"] }
+respire_app = { path = "../app", features = ["test-support"] }
 tiny_http = "0.12"
 rusqlite = { version = "0.32", features = ["bundled"] }
 tower = { version = "0.5", features = ["util"] }

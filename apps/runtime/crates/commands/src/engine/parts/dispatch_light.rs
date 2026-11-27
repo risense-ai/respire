@@ -1,5 +1,6 @@
-{
-    match args.command.as_ref() {
+macro_rules! dispatch_light {
+    ($args:ident) => {{
+    match $args.command.as_ref() {
         Some(Command::Metadata { command: metadata::Command::Status }) => return run_metadata_status(),
         Some(Command::Metadata { .. }) => anyhow::bail!("metadata enable/disable must run in the host CLI"),
         Some(Command::Review { args }) => return review::run(args),
@@ -179,7 +180,7 @@
             threshold,
         }) => return run_resort(*go, spec.as_deref(), *status, *reset, *threshold),
         Some(Command::Prompt) => {
-            let text = respire_app::inject::INSTRUCTIONS_MD;
+            let text = include_str!("../../../../../docs/i18n/respire.md");
             return emit_result(ResultEnvelope::new(
                 "prompt",
                 OutputStatus::Ok,
@@ -432,4 +433,5 @@
         }) => return run_root_create(title, content.as_deref(), *yes),
         _ => {}
     }
+    }};
 }

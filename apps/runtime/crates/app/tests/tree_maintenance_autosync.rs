@@ -4,9 +4,9 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use anyhow::Result;
-use respire_app_domain::memory::{MemoryEngine, SessionKeys};
-use respire_app_domain::service::{self, DeepenPlan, DeepenSubRoot, SplitOp, SplitSpec};
-use respire_app_domain::transport::local::LocalStore;
+use respire_app::memory::{MemoryEngine, SessionKeys};
+use respire_app::service::{self, DeepenPlan, DeepenSubRoot, SplitOp, SplitSpec};
+use respire_app::transport::local::LocalStore;
 use respire_protocol::MemoryEntry;
 use serde_json::json;
 
@@ -77,7 +77,7 @@ fn tree_edits_return_after_local_commit_and_only_hint_the_existing_worker() -> R
         }).collect(),
     };
     assert!(service::autosync_active());
-    assert!(respire_app_domain::sync::remote_configured());
+    assert!(respire_app::sync::remote_configured());
 
     // Standalone library invocation has no resident notifier: local receipt
     // and durable outgoing versions still succeed without starting a worker.
@@ -131,7 +131,7 @@ fn tree_edits_return_after_local_commit_and_only_hint_the_existing_worker() -> R
     assert_eq!(disabled.len(), 9);
     std::env::set_var("RSRS_NO_AUTOSYNC", "0");
     std::env::set_var("RSRS_ADDR", "");
-    assert!(!respire_app_domain::sync::remote_configured());
+    assert!(!respire_app::sync::remote_configured());
     assert_eq!(service::split_exec(&keys, &provider, &store, &root, &spec)?, 2);
     let unconfigured = pending_ids(&path)?;
     assert_eq!(unconfigured.len(), 11);

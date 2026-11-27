@@ -12,9 +12,7 @@ pub fn password_authorization_with_totp(addr: &str, user: &str, pass: &str, totp
 
 /// Private control cannot prompt on its framed input channel.
 pub fn password_authorization_noninteractive(addr: &str, user: &str, pass: &str, totp: Option<&str>) -> Result<serde_json::Value> {
-    let mut authorization = serde_json::json!({});
-    authenticate_session_inner(&mut authorization, addr, user, pass, totp, false)?;
-    Ok(authorization)
+    password_authorization_with_totp(addr, user, pass, totp)
 }
 
 fn server_authentication_salt(addr: &str, user: &str) -> Result<String> {
@@ -34,18 +32,11 @@ fn authenticate_session(data: &mut serde_json::Value, addr: &str, user: &str, pa
 }
 
 fn authenticate_session_with_totp(data: &mut serde_json::Value, addr: &str, user: &str, pass: &str, totp:Option<&str>) -> Result<()> {
-    authenticate_session_inner(data, addr, user, pass, totp, true)
-}
-
-fn authenticate_session_inner(data: &mut serde_json::Value, addr: &str, user: &str, pass: &str, totp: Option<&str>, allow_prompt: bool) -> Result<()> {
     let authorization = match begin_password_authorization(addr, user, pass)? {
         PasswordAuthorizationStep::Authorized(authorization) => authorization,
         PasswordAuthorizationStep::TotpRequired(challenge) => {
-            if totp.is_none() && (!allow_prompt || !crate::prompt::interactive()) {
-                anyhow::bail!("TOTP verification requires an interactive terminal or browser authorization");
-            }
-            let code = match totp { Some(code) => code.to_owned(), None => crate::prompt::ask_secret("TOTP code (6 digits): ")? };
-            continue_password_authorization(addr, user, &challenge, &code)?
+            let code = totp.context("TOTP verification requires an interactive terminal or browser authorization")?;
+            continue_password_authorization(addr, user, &challenge, code)?
         }
     };
     for (field, value) in authorization.as_object().context("authorization must be an object")? {
