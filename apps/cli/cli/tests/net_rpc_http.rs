@@ -334,3 +334,5 @@ mod native_modes;
 mod protocol;
 #[path = "net_rpc_http/client_transport.rs"]
 mod client_transport;
+#[path = "net_rpc_http/v1_discovery.rs"]
+mod v1_discovery;

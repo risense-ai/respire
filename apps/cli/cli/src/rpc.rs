@@ -13,6 +13,8 @@ use serde_json::{json, Value};
 
 use crate::output::{ResultEnvelope, Status as OutputStatus};
 
+mod api;
+
 const START_POLLS: usize = 100;
 const START_WAIT: Duration = Duration::from_millis(150);
 
@@ -422,7 +424,7 @@ pub(crate) fn profile_request(method: &str, args: Vec<String>) -> Result<Value> 
 fn http_roundtrip(method: &str, args: &[String]) -> Result<RpcResponse> {
     match method {
         "runtime.status" => {
-            let health = crate::net_rpc::health()?;
+            let health = api::health()?;
             Ok(RpcResponse {
                 v: health.v,
                 id: "health".into(),
