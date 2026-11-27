@@ -91,16 +91,13 @@ export function createModelsView(view, { root, ctx, live }) {
     : null;
   const currentVariant = (variant, engine) =>
     marksActiveVariant(activeSelection(), view.modelID, variant, engine);
-  // Engine availability mirrors the old form: GPU is off on Linux, NPU only
-  // on Windows; a running download or apply disables switching. Shared with
-  // the wizard via model-kit; the OS check is an entry gate, not hardware
-  // detection.
+  // A running download or apply disables switching.
   function engineEnabled(engine, opActive) {
     if (opActive) return false;
     return engineAvailable(ctx.desktop?.platform, engine);
   }
   function engineChips(variant, opActive) {
-    return ["cpu", "gpu", "npu"]
+    return ["cpu", "gpu"]
       .map((engine) => {
         const active = currentVariant(variant.name, engine);
         return `<button class="engine-chip${active ? " active" : ""}" data-apply data-engine="${engine}" data-variant="${h(
@@ -120,7 +117,6 @@ export function createModelsView(view, { root, ctx, live }) {
     const entries = [
       `${i18nMessages.m7df3ba5a96cc5427}`,
       `GPU${engineAvailable(platform, "gpu") ? i18nMessages.m537352400c495fb8 : i18nMessages.m30b4456e2243ce0e}`,
-      `NPU${engineAvailable(platform, "npu") ? i18nMessages.m537352400c495fb8 : i18nMessages.mde7c72a5f1da4274}`,
     ];
     const active = activeSelection();
     const label = MODEL_OPTIONS.find(([id]) => id === active?.model)?.[1] || active?.model || "-";
@@ -198,10 +194,6 @@ export function createModelsView(view, { root, ctx, live }) {
     if (cancelBtn)
       cancelBtn.disabled =
         !op.active || !ctx.status?.summary?.model_operation?.id;
-    const providersBtn = $("[data-model=providers]", root);
-    if (providersBtn)
-      providersBtn.disabled =
-        !ctx.desktop?.platform?.startsWith("windows");
     renderBaseline();
   }
   function renderBaseline() {

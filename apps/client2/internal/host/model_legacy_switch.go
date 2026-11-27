@@ -26,13 +26,13 @@ func parseEngineArgs(args []string) (engine, model string, err error) {
 	return engine, model, nil
 }
 
-// applyEngine saves the inference engine + weight choice in the runtime
+// applyLegacyEngine saves the inference engine + weight choice in the runtime
 // service and immediately reloads the model through a real inference probe.
 // When the selected engine fails verification, the previous selection is
 // restored and the failure is reported with its cause — never silently
 // downgraded to CPU (the runtime removed cross-engine fallback in
 // 1.0.20-dev.15; the client must not reintroduce it).
-func applyEngine(ctx context.Context, m *Manager, args []string, id string) (json.RawMessage, error) {
+func (m *Manager) applyLegacyEngine(ctx context.Context, args []string, id string) (json.RawMessage, error) {
 	engine, model, err := parseEngineArgs(args)
 	if err != nil {
 		return nil, err
