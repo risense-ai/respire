@@ -101,3 +101,33 @@ fn diary_conflict_rolls_back_without_deleting_duplicates() -> anyhow::Result<()>
     assert!(rows.iter().any(|row| row.id == "duplicate" && !row.deleted));
     Ok(())
 }
+
+#[test]
+fn source_only_write_invalidates_old_locators_without_resolving_model() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let store = LocalStore::open(&dir.path().join("source-only.db"))?;
+    // Unusable selection makes a model lookup fail deterministically. Source
+    // publication must still succeed; no embedding artifact is being installed.
+    store.meta_set(respire_core_sdk::profiles::ACTIVE_SELECTION_KEY, "{invalid")?;
+    assert!(store.retrieval_model().is_err());
+    let original = super::super::tests::sample("source-only");
+    assert!(store.put_checked(&original, None)?);
+    for generation in ["current", "previous"] {
+        store.connection.execute(
+            "INSERT INTO core_artifacts(memory_id,model,source,artifact) VALUES (?1,?2,?3,X'01')",
+            params![original.id, generation, original.ciphertext],
+        )?;
+    }
+    let count = || store.connection.query_row(
+        "SELECT count(*) FROM core_artifacts WHERE memory_id=?1", [&original.id], |row| row.get::<_, i64>(0),
+    );
+    let mut latest = original.clone();
+    latest.updated_at = store.edit_stamp(&original.id)?;
+    assert!(store.put_checked(&latest, Some(&original.ciphertext))?);
+    assert_eq!(count()?, 2, "unchanged source must keep both generation locators");
+    latest.ciphertext = "fresh-source".into();
+    latest.updated_at = store.edit_stamp(&original.id)?;
+    assert!(store.put_checked(&latest, Some(&original.ciphertext))?);
+    assert_eq!(count()?, 0, "replaced source must retire both stale locators");
+    Ok(())
+}

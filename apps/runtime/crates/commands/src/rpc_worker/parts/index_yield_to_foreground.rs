@@ -66,10 +66,16 @@ pub fn index_loop_inner() -> Result<()> {
             let mut work = INDEX_WORK
                 .lock()
                 .map_err(|_| anyhow::anyhow!("index work lock poisoned"))?;
-            while !work.requested && !STOPPING.load(Ordering::Acquire) {
-                work = INDEX_CV
-                    .wait(work)
-                    .map_err(|_| anyhow::anyhow!("index work lock poisoned"))?;
+            while !STOPPING.load(Ordering::Acquire) {
+                if !work.requested {
+                    work = INDEX_CV.wait(work)
+                        .map_err(|_| anyhow::anyhow!("index work lock poisoned"))?;
+                } else if let Some(delay) = work.create_delay(Instant::now()) {
+                    work = INDEX_CV.wait_timeout(work, delay)
+                        .map_err(|_| anyhow::anyhow!("index work lock poisoned"))?.0;
+                } else {
+                    break;
+                }
             }
             if STOPPING.load(Ordering::Acquire) {
                 work.state = "stopped";
@@ -77,6 +83,7 @@ pub fn index_loop_inner() -> Result<()> {
                 return Ok(());
             }
             work.requested = false;
+            work.create_batch = None;
             work.state = "running";
         }
         INDEX_RUNNING.store(true, Ordering::Release);

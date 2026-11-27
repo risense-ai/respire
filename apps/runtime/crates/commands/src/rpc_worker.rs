@@ -317,12 +317,14 @@ pub static INDEX_RUNNING: AtomicBool = AtomicBool::new(false);
 pub static INDEX_CV: Condvar = Condvar::new();
 pub static INDEX_WORK: Mutex<IndexWork> = Mutex::new(IndexWork {
     requested: false,
+    create_batch: None,
     state: "idle",
     error: None,
 });
 
 pub struct IndexWork {
     pub(crate) requested: bool,
+    create_batch: Option<(Instant, Instant)>,
     pub(crate) state: &'static str,
     pub(crate) error: Option<String>,
 }
@@ -360,13 +362,17 @@ impl WriteGate {
     }
     // Scoped HTTP never waits behind an existing writer from the dispatch
     // loop. Preserve the priority of every previously reserved legacy writer.
-    pub(crate) fn try_owner_foreground(&self) -> Option<WriteGuard<'_>> {
-        let mut state = self.state.try_lock().ok()?;
+    pub(crate) fn try_owner_foreground(&self) -> Result<Option<WriteGuard<'_>>, ()> {
+        let mut state = match self.state.try_lock() {
+            Ok(state) => state,
+            Err(std::sync::TryLockError::WouldBlock) => return Err(()),
+            Err(std::sync::TryLockError::Poisoned(_)) => return Ok(None),
+        };
         if state.held || state.foreground != 0 {
-            return None;
+            return Err(());
         }
         state.held = true;
-        Some(WriteGuard(self))
+        Ok(Some(WriteGuard(self)))
     }
 
     pub(crate) fn acquire_foreground_unless(&self, cancelled: impl Fn() -> bool) -> Option<WriteGuard<'_>> {
@@ -541,6 +547,14 @@ pub fn index_status() -> Value {
 }
 
 pub fn kick_index() {
+    schedule_index(false);
+}
+
+pub(crate) fn kick_index_after_create() {
+    schedule_index(true);
+}
+
+fn schedule_index(batched: bool) {
     if STOPPING.load(Ordering::Acquire) {
         return;
     }
@@ -552,7 +566,7 @@ pub fn kick_index() {
                 return;
             }
         };
-        work.requested = true;
+        work.schedule(Instant::now(), batched);
         if !INDEX_RUNNING.load(Ordering::Acquire) && work.error.is_none() {
             work.state = "scheduled";
         }
@@ -561,4 +575,6 @@ pub fn kick_index() {
 }
 
 
+#[path = "rpc_worker/index_schedule.rs"]
+mod index_schedule;
 include!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/rpc_worker/parts/index_yield_to_foreground.rs"));

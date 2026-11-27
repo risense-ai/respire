@@ -68,10 +68,23 @@ where
     T: Send + 'static,
     F: for<'a> FnOnce(&LibraryContext<'a>, &Admission) -> V1Result<T> + Send + 'static,
 {
-    submit_publication(scope, run, || Problem::new(
-        StatusCode::CONFLICT, "memory_write_outcome_unknown",
+    submit_publication(scope, run, memory_write_unknown, true).await
+}
+
+pub(super) async fn submit_memory_create<T, F>(scope: RestScope, run: F) -> V1Result<T>
+where
+    T: Send + 'static,
+    F: for<'a> FnOnce(&LibraryContext<'a>, &Admission) -> V1Result<T> + Send + 'static,
+{
+    submit_publication(scope, run, memory_write_unknown, false).await
+}
+
+fn memory_write_unknown() -> Problem {
+    Problem::new(
+        StatusCode::CONFLICT,
+        "memory_write_outcome_unknown",
         "Memory write outcome is unknown; do not retry automatically",
-    ), true).await
+    )
 }
 
 pub(super) async fn submit_publication<T, F>(
@@ -249,7 +262,7 @@ where
     Ok(receiver)
 }
 
-pub(super) fn service(work: Work, store: Option<&LocalStore>, ownership: &LibraryLock) {
+pub(super) fn service(work: Work, store: Option<&LocalStore>, ownership: &LibraryLock) -> Option<Work> {
     let Work {
         scope,
         access,
@@ -260,7 +273,7 @@ pub(super) fn service(work: Work, store: Option<&LocalStore>, ownership: &Librar
     let mut complete = Some(complete);
     let expired = || cancelled.load(Ordering::Acquire) || Instant::now() >= deadline;
     if !expired() {
-        let _ = crate::rpc_serve::with_verified_owner_store_scope(
+        let attempt = crate::rpc_serve::try_verified_owner_store_scope(
             |account, profile, instance, generation, vault_epoch, library| {
                 let result = (|| {
                     if expired() {
@@ -298,8 +311,14 @@ pub(super) fn service(work: Work, store: Option<&LocalStore>, ownership: &Librar
                 }
             },
         );
+        if attempt.is_err() && !expired() {
+            #[cfg(test)]
+            super::writes::create_test_admission::note_deferred();
+            return complete.map(|complete| Work { scope, access, deadline, cancelled, complete });
+        }
     }
     if let Some(done) = complete {
         done(Err(transport::unavailable()));
     }
+    None
 }
