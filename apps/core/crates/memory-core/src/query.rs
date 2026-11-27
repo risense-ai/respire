@@ -201,7 +201,7 @@ mod query_now {
         deserializer: D,
     ) -> std::result::Result<Option<chrono::DateTime<chrono::Utc>>, D::Error> {
         let value = String::deserialize(deserializer)?;
-        respire_protocol::metadata::validate_timestamp(&value).map_err(serde::de::Error::custom)?;
+        crate::metadata::validate_timestamp(&value).map_err(serde::de::Error::custom)?;
         chrono::DateTime::parse_from_rfc3339(&value)
             .map(|now| Some(now.with_timezone(&chrono::Utc)))
             .map_err(serde::de::Error::custom)
