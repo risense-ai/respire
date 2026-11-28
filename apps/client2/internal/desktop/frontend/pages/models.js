@@ -1,6 +1,7 @@
 import { messages as i18nMessages } from "../ui/i18n/messages.js";
-import { $, action, api, confirm, execute, h, input, notify, number, pairs, panel, raw, select, summary } from "../ui/core.js";
-import { heading, phase } from "./overview.js";
+import { $, action, api, confirm, execute, h, input, notify, panel, raw, select, summary } from "../ui/core.js";
+import { t } from "../ui/i18n.js";
+import { heading } from "./overview.js";
 import { recallChecks } from "./recall.js";
 import {
   activeDownloadSession, activeModelScope, activeVariantSelection, CURATED_MODELS, DEFAULT_MODEL,
@@ -9,9 +10,12 @@ import {
 } from "./model-kit.js";
 import { bindDownloadMirror, catalogMarkup, curatedModel, downloadedVariant, renderCatalog } from "./models-catalog-view.js";
 import { openModelProbeModal } from "./model-probe-modal.js";
-import { downloadTaskProgress, indexTaskProgress, liveModelOperation, modelOperationProgress, modelTaskBusy, nextSwitchStallState, syncModelCancel } from "./models-view.js";
+import { liveModelOperation, modelActivityTimeline, modelTaskBusy, modelTaskState, nextSwitchStallState, syncModelCancel } from "./models-view.js";
+import { renderLiveInference, servingModel } from "./models-status.js";
 import { bindModelActions, followRebuild } from "./models-actions.js";
 import { bindModelSettings, FUSION_MODES, FUSION_NUMERIC } from "./models-settings.js";
+
+const activityByContext = new WeakMap();
 
 export function models(root, ctx) {
   const savedModel = curatedModel(localStorage.getItem("respire-model"));
@@ -32,15 +36,19 @@ export function models(root, ctx) {
   const activeSelection = () => view.activeKnown() ? activeVariantSelection(view.runtimeActive, view.legacyEngineState) : null;
   const busy = () => view.mutating || view.switchInFlight || view.indexInFlight || liveModelOperation(view, ctx.status).active ||
     activeDownloadSession() || modelTaskBusy(ctx.desktop?.task);
+  let snapshot, downloadCancel;
 
-  root.innerHTML = heading(i18nMessages.mc243416c93c07db7, "") + catalogMarkup() +
-    `<div data-live class="grid section-gap"><div data-inference-status></div>${panel(
-      i18nMessages.m281dccfa29c6c9fb,
-      `<div class="panel-body"><div data-model-task-progress><div data-model-task-content></div><div class="actions">
+  root.innerHTML = heading(i18nMessages.mc243416c93c07db7, "") +
+    `<div data-live class="grid section-gap"><div data-inference-status></div><section class="panel model-status-card" data-models-tasks-card>
+      <header class="panel-heading"><h2>${h(i18nMessages.modelTasksPipeline)}</h2>
+        <button type="button" class="secondary" data-copy-snapshot>${h(i18nMessages.modelCopySnapshot)}</button>
+      </header>
+      <div class="model-status-body" data-model-task-progress><div data-model-task-content></div><div class="actions">
         <button type="button" data-model="reopen-download" hidden>${h(i18nMessages.mDownloadShowProgress)}</button>
         <button type="button" data-model="cancel" hidden>${h(i18nMessages.modelCancelTask)}</button>
-      </div></div><p class="form-error section-gap" data-model-task-error hidden></p>${i18nMessages.m31f6729bd220085e}</pre></details>`,
-    )}</div>` + panel(
+      </div><p class="form-error" data-model-task-error hidden></p></div>
+      <footer class="model-status-footer" data-recent-activity><h3>${h(i18nMessages.modelRecentActivity)}</h3><div data-activity-entries></div></footer>
+    </section></div>` + catalogMarkup() + panel(
       i18nMessages.m53ebb8d00517a375,
       `<form data-recall class="panel-body stack">${select("mode", i18nMessages.m62526c9ea059f75d, [
         ["fast", i18nMessages.m14391b39f3fb9682], ["quality", i18nMessages.mc7915d37c4e567a3],
@@ -56,7 +64,18 @@ export function models(root, ctx) {
     ) + `<div data-result class="section-gap"></div>`;
 
   const live = $("[data-live]", root);
+  const cancel = $('[data-model="cancel"]', live);
+  const copy = $("[data-copy-snapshot]", live);
   const mirror = bindDownloadMirror(root, ctx);
+  copy.addEventListener("click", () => action(copy, async () => {
+    await navigator.clipboard.writeText(raw(snapshot));
+    notify(t(i18nMessages.modelSnapshotCopied));
+  }));
+  cancel.addEventListener("click", (event) => {
+    if (!downloadCancel) return;
+    event.stopPropagation();
+    return action(cancel, downloadCancel);
+  });
 
   function selectModel(id) {
     const active = activeSelection();
@@ -68,33 +87,53 @@ export function models(root, ctx) {
   function update() {
     if (disposed) return;
     const status = ctx.status?.summary || {};
-    const inference = ctx.desktop?.health?.inference || {};
-    const index = status.retrieval_index || {};
+    const health = ctx.desktop?.connected ? ctx.desktop.health : undefined;
+    const inference = health?.inference || {};
+    const index = status.retrieval_index || health?.retrieval_index || {};
     const op = liveModelOperation(view, ctx.status);
-    $("[data-inference-status]", live).innerHTML = panel(i18nMessages.me46b0272bd641090, pairs([
-      [i18nMessages.m8168e2d3bbb44b32, phase(inference.phase)],
-      [i18nMessages.m33ceb11047a0786a, inference.worker_active === undefined ? "—" :
-        inference.worker_active ? i18nMessages.mab27f80d046f3d7f : i18nMessages.me6fc5eb8c3b83c01],
-      [i18nMessages.m01ee528ff519b884, `${number(inference.foreground?.active ?? inference.active)} / ${number(inference.queued)}`],
-      [i18nMessages.m11676e8ace776256, phase(index.state)],
-      [i18nMessages.m70dee7f8303c7d74, index.running ? i18nMessages.m0a53c8de45a1ed4a :
-        index.scheduled ? i18nMessages.m2fcab8f67ceeae3e : i18nMessages.mdae661d17c2dd8f0],
-      [i18nMessages.mIndexCounts, `${number(status.indexed_count)} / ${number(status.local_alive)}`],
-    ]));
-    const task = ctx.desktop?.task;
-    $("[data-model-task-content]", live).innerHTML = op.active ? modelOperationProgress(op)
-      : modelTaskBusy(task) ? downloadTaskProgress(task)
-      : index.running || index.scheduled || view.indexInFlight
-        ? indexTaskProgress(index.scheduled && !index.running ? i18nMessages.m2fcab8f67ceeae3e : i18nMessages.m0a53c8de45a1ed4a, status)
-        : `<p>${h(i18nMessages.m707bd8db0c65b214)}</p>`;
-    $('[data-model="reopen-download"]', live).hidden = !activeDownloadSession();
+    const active = activeSelection();
+    const model = servingModel(active, active && ctx.modelInventory.get(active.model));
+    const servingIndex = Boolean(active) && index.state !== "failed";
+    const session = activeDownloadSession();
+    const desktopTask = ctx.desktop?.task;
+    const task = modelTaskBusy(desktopTask) && (!session || !session.id || desktopTask.id === session.id) ? desktopTask : null;
+    const downloadModel = session?.model || op.downloadModel;
+    const variant = downloadModel && ctx.modelInventory.get(downloadModel)?.variants.find(
+      ({ name }) => name === (session?.variant || op.downloadVariant));
+    const state = modelTaskState({ op, session, task, index, view, status, servingIndex, variant,
+      workerReady: inference.worker_active ?? (inference.worker_pid ? true : undefined), weightsReady: model.installed,
+      mirror: ctx.desktop?.preferences?.modelMirror || "auto" });
+    const shadow = state.kind === "switch" ? op : null;
+    $("[data-inference-status]", live).innerHTML = renderLiveInference({ active, model, health, status, shadow, servingIndex,
+      buildingShadow: state.step === 2 });
+    $("[data-model-task-content]", live).innerHTML = state.markup;
+    const owner = scope();
+    let activity = activityByContext.get(ctx);
+    if (owner && owner !== activity?.owner) {
+      activity = { owner, render: modelActivityTimeline() };
+      activityByContext.set(ctx, activity);
+    }
+    $("[data-activity-entries]", live).innerHTML = owner && activity?.render(state, session?.id || task?.id || op.id)
+      || `<p>${h(i18nMessages.modelNoRecentActivity)}</p>`;
+    $('[data-model="reopen-download"]', live).hidden = !session;
     const error = $("[data-model-task-error]", live);
     error.hidden = !index.error;
     error.textContent = index.error || "";
-    $("details pre", live).textContent = raw({ inference, index, model: op });
+    snapshot = { inference, index, model: op };
+    cancel.textContent = t(state.cancelLabel || i18nMessages.modelCancelTask);
     syncModelCancel(live, view, op);
-    syncProfilePolling(op);
-    renderCatalog(root, ctx, view, activeSelection(), busy());
+    downloadCancel = null;
+    if (state.kind === "download" && (session || task)) {
+      const modalCancel = session?.element.querySelector('[data-dl="cancel"]');
+      if (session?.id && modalCancel && !modalCancel.hidden) downloadCancel = () => modalCancel.click();
+      else if (!session && task?.id) downloadCancel = async () => {
+        await api("model-download-cancel", { id: task.id, pause: false });
+        await ctx.refresh();
+      };
+      cancel.hidden = cancel.disabled = !downloadCancel;
+    }
+    syncProfilePolling();
+    renderCatalog(root, ctx, view, active, busy());
   }
 
   async function loadInventory(model, owner) {
@@ -187,13 +226,17 @@ export function models(root, ctx) {
     }
   }
 
-  function syncProfilePolling(op) {
-    const polling = !disposed && (view.profileSwitchPending || view.switchInFlight || view.indexInFlight || op.active);
+  function syncProfilePolling() {
+    const operationActive = () => view.profileSwitchPending || view.switchInFlight || view.indexInFlight ||
+      liveModelOperation(view, ctx.status).active;
+    const inferenceActive = () => Boolean(ctx.desktop?.health?.inference?.foreground?.active);
+    const polling = !disposed && (operationActive() || inferenceActive());
     if (polling && !switchTimer) {
       switchTimer = setInterval(async () => {
         try {
-          if (view.indexInFlight) await ctx.refresh();
-          await refreshProfileState();
+          if (view.indexInFlight || activeDownloadSession() || inferenceActive()) await ctx.refresh();
+          if (operationActive()) await refreshProfileState();
+          else syncProfilePolling();
         } catch (error) {
           notify(error.message, true);
         }
@@ -340,7 +383,7 @@ export function models(root, ctx) {
   return {
     dispose() {
       disposed = true;
-      syncProfilePolling({});
+      syncProfilePolling();
       disposeRecall();
     },
     update() {

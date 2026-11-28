@@ -208,15 +208,19 @@ for (const [width, height, colorScheme] of [[1180, 800, "light"], [800, 600, "da
 
     await navigate("models", '[data-catalog-model="granite-311m-r2"]');
     await page.locator('[data-model-dock] [data-catalog-action]').first().waitFor();
-    assert.ok(await page.locator("[data-live] details > summary").evaluate(summary =>
-      summary.getBoundingClientRect().bottom <= summary.closest(".panel").getBoundingClientRect().bottom));
-    const modelsSlots = ["[data-catalog-models]", "[data-variants]", "[data-model-dock]", "[data-inference-status]", "[data-recall]"];
-    await stable(page, [...modelsSlots, "[data-live] details > summary"], async () => {
+    assert.equal(await page.locator("[data-live] details, [data-live] pre").count(), 0);
+    const twinHeights = await page.evaluate(() => [
+      document.querySelector("[data-models-live-card]").getBoundingClientRect().height,
+      document.querySelector("[data-models-tasks-card]").getBoundingClientRect().height,
+    ]);
+    assert.equal(twinHeights[0], twinHeights[1]);
+    const modelsSlots = ["[data-catalog-models]", "[data-variants]", "[data-model-dock]", "[data-models-live-card]", "[data-models-tasks-card]", "[data-recall]"];
+    await stable(page, modelsSlots, async () => {
       scenario.status.retrieval_index = { state: "error", error: longText };
       await page.clock.fastForward(30000);
       await contains(page, "[data-model-task-error]", longText);
     });
-    await stable(page, [...modelsSlots, "[data-live] details > summary"], async () => {
+    await stable(page, modelsSlots, async () => {
       delete scenario.status.retrieval_index;
       await page.clock.fastForward(30000);
       await page.locator("[data-model-task-error]").waitFor({ state: "hidden" });

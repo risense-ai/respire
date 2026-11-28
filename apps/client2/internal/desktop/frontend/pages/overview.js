@@ -2,7 +2,6 @@ import { messages as i18nMessages } from "../ui/i18n/messages.js";
 import { t } from "../ui/i18n.js";
 import {
   $,
-  all,
   h,
   number,
   date,
@@ -16,10 +15,11 @@ import {
   notify,
 } from "../ui/core.js";
 import {
-  MODEL_OPTIONS,
+  activeModelScope,
   fetchProfileState,
   readProfileState,
 } from "./model-kit.js";
+import { overviewModelsPanel, overviewModelStatus } from "./overview-models.js";
 import { modelOperationProgress, runtimeDownloadOperation } from "./models-view.js";
 
 import { stats } from "./stats.js";
@@ -44,7 +44,6 @@ export function updateConnectionIndicator(indicator, connected) {
   if (indicator.textContent !== label) indicator.textContent = label;
   indicator.classList.toggle("good", Boolean(connected));
 }
-const ENGINE_NAMES = { cpu: "CPU", gpu: "GPU", npu: "NPU" };
 export function overview(root, ctx) {
   // Polls update status around these controls without replacing focused buttons.
   root.innerHTML =
@@ -58,7 +57,9 @@ export function overview(root, ctx) {
     '<div class="metrics" data-overview-metrics></div>' +
     '<div data-overview-status-error></div></div>' +
     '<section class="section-gap" data-overview-stats></section>' +
-    '<div class="section-gap" data-overview-details></div>' +
+    `<div class="section-gap" data-overview-details><div class="grid">${panel(
+      i18nMessages.mdcfe516d1114e14f, '<div data-overview-sync></div>',
+    )}${overviewModelsPanel()}</div></div>` +
     panel(
       "Runtime",
       i18nMessages.m5fa416eee7f98137,
@@ -69,6 +70,8 @@ export function overview(root, ctx) {
   const statusErrorBanner = $("[data-overview-status-error]", root);
   const statsView = stats($("[data-overview-stats]", root), ctx);
   const detailsRoot = $("[data-overview-details]", root);
+  const syncRoot = $("[data-overview-sync]", detailsRoot);
+  const modelRoot = $("[data-overview-model-content]", detailsRoot);
   const runtimeStatus = $("[data-runtime-status]", root);
   const runtimeError = $("[data-runtime-error]", root);
   const startButton = $('[data-host="start"]', root);
@@ -77,18 +80,33 @@ export function overview(root, ctx) {
   runtimeStatus.closest(".panel").classList.add("section-gap");
   // Onboarding: prompt/plugin readiness is checked once per page visit.
   let promptsReady = null;
-  // Runtime active selection (profile models); refreshed with the page.
-  let profileSelection = null;
+  let profileSelection;
+  let profileRequest;
   let hostPending = false;
-  async function loadProfileSelection() {
-    if (!ctx.desktop?.connected) return;
-    try {
-      const { active } = readProfileState(await fetchProfileState());
-      profileSelection = active;
-    } catch {
-      profileSelection = null;
+  async function loadProfileSelection(state, operation, force = false) {
+    if (!state.connected) {
+      profileRequest = undefined;
+      profileSelection = undefined;
+      return;
     }
-    if (root.isConnected) update();
+    const scope = activeModelScope(state.health) ?? ctx.statusScope;
+    const snapshot = state.engine;
+    const switching = Boolean(operation?.active);
+    const key = JSON.stringify([scope, snapshot?.model_profile, snapshot?.variant, snapshot?.engine,
+      operation?.id, switching]);
+    if (!force && profileRequest?.key === key && !profileRequest.retry) return;
+    if (profileRequest?.scope !== scope || (profileRequest?.switching && !switching)) profileSelection = undefined;
+    const pending = { scope, key, switching };
+    profileRequest = pending;
+    const profile = await fetchProfileState();
+    if (!root.isConnected || profileRequest !== pending) return;
+    const { active, activeKnown } = readProfileState(profile);
+    if (!activeKnown && state.health?.capabilities?.includes("model.catalog.v2")) {
+      pending.retry = true;
+      return;
+    }
+    if (activeKnown || profileSelection === undefined) profileSelection = active;
+    update();
   }
   function update() {
     statsView.update();
@@ -99,8 +117,6 @@ export function overview(root, ctx) {
       s = ctx.status?.summary || {},
       health = state.health || {},
       sync = s.sync_live || {},
-      index = s.retrieval_index || {},
-      inference = health.inference || {},
       op = runtimeDownloadOperation() || s.model_operation || {},
       session = s.session || {};
     const nowTask = state.task || {};
@@ -116,75 +132,33 @@ export function overview(root, ctx) {
         .catch(() => {
           promptsReady = false;
         });
-    // What inference runs on right now: profile models override the legacy
-    // inference.json snapshot the client reads locally.
-    const selection = profileSelection;
-    const snapshot = state.engine || {};
-    const engine = String(
-      selection?.engine || snapshot.engine || "cpu",
-    ).toLowerCase();
-    const engineName = ENGINE_NAMES[engine] || engine.toUpperCase();
-    const modelID = selection?.model || snapshot.model_profile || "m3";
-    const modelName =
-      MODEL_OPTIONS.find(([id]) => id === modelID)?.[1] || modelID;
-    const variant = selection?.variant || snapshot.variant || "quantized";
-    const file = selection?.variant ? null : snapshot.file;
-    const note = selection ? "" : snapshot.note || "";
+    loadProfileSelection(state, s.model_operation);
+    const operationProgress = op.active ? modelOperationProgress(op) : "";
+    const modelStatus = overviewModelStatus(state, s, profileSelection, op, operationProgress);
     updateConnectionIndicator(connection, state.connected);
-    metricsRoot.innerHTML = `${metric(i18nMessages.m1dcb520e9408dad5, number(s.local_alive), `${i18nMessages.mdf1c26055f9f39f5}${number(s.local_total)}${i18nMessages.m32aca0663f5c881e}`)}${metric(i18nMessages.me25115d1d25e3421, number(sync.remote_alive), s.remote_configured ? i18nMessages.m2616c6d1ebc7614a : i18nMessages.m9183a87f3a6c526e)}${metric(i18nMessages.me09cbaccf1dd8bf8, number(sync.pending), `${number(sync.conflicts)}${i18nMessages.m0cc6b0935f0e15b9}`)}${metric(i18nMessages.m11676e8ace776256, phase(index.state), index.error || "")}`;
-    detailsRoot.innerHTML = `<div class="grid">${panel(
-        i18nMessages.mdcfe516d1114e14f,
-        pairs([
-          [i18nMessages.m6320b4a8722a851f, phase(sync.phase)],
-          [
-            i18nMessages.m6e9adb42a28942eb,
-            s.autosync === undefined ? "—" : s.autosync ? i18nMessages.m8a4ef3e48e4e8a5a : i18nMessages.m6744b4c6a9aa0038,
-          ],
-          [
-            i18nMessages.mf2be833267a9befd,
-            `${number(sync.pulled)} / ${number(sync.pushed)}`,
-          ],
-          [
-            i18nMessages.m81e60238bae4e54b,
-            s.sync_scheduler?.last_success_unix
-              ? date(s.sync_scheduler.last_success_unix * 1000)
-              : i18nMessages.m25280b57b647e36e,
-          ],
-          [i18nMessages.m061246bd31e084a7, session.user || i18nMessages.m54392fa24b359913],
-          [i18nMessages.m02739d1bae8bd996, s.server_addr],
-        ]) +
-          `<div class="panel-body"><button data-command="sync" ${isPending("sync") ? "disabled" : ""}>${isPending("sync") ? i18nMessages.m4e2238b74ec75987 : i18nMessages.m36e7a43a1c674e50}</button>${sync.error ? `<p class="form-error section-gap">${h(sync.error)}</p>` : ""}</div>`,
-      )}
-      ${panel(
-        i18nMessages.mc243416c93c07db7,
-        pairs([
-          [i18nMessages.m52f79fed15ec2723, `${modelName} · ${variant}`],
-          [i18nMessages.mdce2964c63735772, engineName],
-          [
-            i18nMessages.mae6a774ff968b21e,
-            selection
-              ? i18nMessages.me40e70a00da921fd
-              : file
-                ? file
-                : `${variant}${i18nMessages.mda047c04c9b5e27e}${engineName}${i18nMessages.md193b359a0da2d6d}`,
-          ],
-          [i18nMessages.m8168e2d3bbb44b32, phase(inference.phase)],
-          [i18nMessages.m07ae2c46b85c3d54, number(inference.queued)],
-          [
-            i18nMessages.md5a7af1c407f935f,
-            index.running
-              ? i18nMessages.m0a53c8de45a1ed4a
-              : index.scheduled
-                ? i18nMessages.m4f021f59121c6827
-                : phase(index.state),
-          ],
-          [
-            i18nMessages.m281dccfa29c6c9fb,
-            op.active ? `${phase(op.phase)} · ${op.item || ""}` : i18nMessages.mac3f9d75f986bef6,
-          ],
-        ]) +
-          `<div class="model-progress">${note ? `<p class="hint">${h(note)}</p>` : ""}${op.active ? modelOperationProgress(op) : ""}${i18nMessages.m5974f611004cf8f8}`,
-      )}</div>`;
+    metricsRoot.innerHTML = `${metric(i18nMessages.m1dcb520e9408dad5, number(s.local_alive), `${i18nMessages.mdf1c26055f9f39f5}${number(s.local_total)}${i18nMessages.m32aca0663f5c881e}`)}${metric(i18nMessages.me25115d1d25e3421, number(sync.remote_alive), s.remote_configured ? i18nMessages.m2616c6d1ebc7614a : i18nMessages.m9183a87f3a6c526e)}${metric(i18nMessages.me09cbaccf1dd8bf8, number(sync.pending), `${number(sync.conflicts)}${i18nMessages.m0cc6b0935f0e15b9}`)}${modelStatus.metric}`;
+    modelRoot.innerHTML = modelStatus.details;
+    syncRoot.innerHTML =
+      pairs([
+        [i18nMessages.m6320b4a8722a851f, phase(sync.phase)],
+        [
+          i18nMessages.m6e9adb42a28942eb,
+          s.autosync === undefined ? "—" : s.autosync ? i18nMessages.m8a4ef3e48e4e8a5a : i18nMessages.m6744b4c6a9aa0038,
+        ],
+        [
+          i18nMessages.mf2be833267a9befd,
+          `${number(sync.pulled)} / ${number(sync.pushed)}`,
+        ],
+        [
+          i18nMessages.m81e60238bae4e54b,
+          s.sync_scheduler?.last_success_unix
+            ? date(s.sync_scheduler.last_success_unix * 1000)
+            : i18nMessages.m25280b57b647e36e,
+        ],
+        [i18nMessages.m061246bd31e084a7, session.user || i18nMessages.m54392fa24b359913],
+        [i18nMessages.m02739d1bae8bd996, s.server_addr],
+      ]) +
+        `<div class="panel-body"><button data-command="sync" ${isPending("sync") ? "disabled" : ""}>${isPending("sync") ? i18nMessages.m4e2238b74ec75987 : i18nMessages.m36e7a43a1c674e50}</button>${sync.error ? `<p class="form-error section-gap">${h(sync.error)}</p>` : ""}</div>`;
     runtimeStatus.innerHTML =
       pairs([
         [i18nMessages.ma5574109f0208e89, state.connected ? i18nMessages.m5be0323e8adcaeae : i18nMessages.m3d52574ce1500561],
@@ -285,12 +259,13 @@ export function overview(root, ctx) {
       });
   });
   update();
-  loadProfileSelection();
   return {
     update,
     refresh() {
-      update();
-      return statsView.refresh();
+      return Promise.all([
+        statsView.refresh(),
+        loadProfileSelection(ctx.desktop || {}, ctx.status?.summary?.model_operation, true),
+      ]);
     },
   };
 }

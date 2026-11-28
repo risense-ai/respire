@@ -324,25 +324,134 @@ body[data-layout="compact"] .view-scroll {
   overflow: auto;
 }
 
-/* Models reserve space for details, progress and the expanded editor. */
-[data-live] > .grid > .panel,
-[data-inference-status] > .panel {
+/* Both Models cards reserve the same height as their contents change. */
+[data-live] .model-status-card {
+  box-sizing: border-box;
   block-size: 22rem;
+  min-inline-size: 0;
+  display: grid;
+  grid-template-rows: 4.25rem minmax(0, 1fr) 6rem;
+}
+.model-status-card .panel-heading {
+  padding: 0.625rem 0.875rem;
   overflow: auto;
+}
+.model-status-card button {
+  font-size: 0.75rem;
+  min-height: 1.75rem;
+  padding: 0.25rem 0.5rem;
+  white-space: normal;
+}
+.model-status-body,
+.model-status-footer {
+  min-inline-size: 0;
+  padding: 0.5rem 0.875rem;
+  overflow: auto;
+  overflow-wrap: anywhere;
+  font-size: 0.8125rem;
+  scrollbar-gutter: stable;
+}
+.model-status-footer {
+  border-top: 1px solid var(--line);
+}
+.model-status-card p,
+.model-status-card .progress-label {
+  margin: 0.25rem 0;
+}
+.model-status-card .progress-label {
+  gap: 0.5rem;
+}
+.model-status-card p,
+.model-status-cells dt,
+.model-status-footer time {
+  color: var(--muted);
+}
+.model-status-identity {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem 0.5rem;
+}
+.model-status-identity strong {
+  font-size: 1rem;
+}
+.model-status-cells {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.25rem;
+  margin: 0.375rem 0;
+}
+.model-status-cells > div {
+  padding: 0.25rem 0.375rem;
+  border-radius: 0.25rem;
+  background: var(--soft);
+  line-height: 1.25;
+}
+.model-status-cells dt {
+  font-size: 0.75rem;
+}
+.model-status-cells dd {
+  margin: 0;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.model-readiness > div {
+  padding-block: 0.625rem;
+}
+.model-latency-sparkline {
+  display: block;
+  inline-size: 100%;
+  block-size: 1.25rem;
+  fill: none;
+  stroke: var(--green);
+  stroke-width: 1.5;
 }
 [data-model-task-content] {
-  block-size: 5.25rem;
+  block-size: 7.5rem;
   overflow: auto;
 }
-[data-model-task-progress] .actions,
-[data-model-task-error] {
-  block-size: 3.5rem;
-  align-content: start;
-  overflow: auto;
+[data-model-task-progress] .actions {
+  margin-top: 0.375rem;
 }
-[data-model-task-error][hidden] {
-  display: block !important;
-  visibility: hidden;
+.model-status-card [data-model-task-error] {
+  color: var(--danger);
+}
+.model-task-pipeline,
+[data-recent-activity] ol {
+  list-style: none;
+  padding: 0;
+  margin: 0.25rem 0;
+}
+.model-task-pipeline {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.25rem;
+}
+.model-task-pipeline li {
+  padding: 0.25rem;
+  border: 1px solid var(--line);
+  border-radius: 0.25rem;
+  color: var(--muted);
+  line-height: 1.25;
+}
+.model-task-pipeline [aria-current="step"] {
+  border-color: var(--green);
+  color: var(--green);
+  font-weight: 600;
+}
+[data-recent-activity] h3 {
+  margin: 0;
+  font-size: 0.875rem;
+}
+[data-recent-activity] li {
+  display: flex;
+  align-items: baseline;
+  gap: 0.625rem;
+  line-height: 1.25;
+}
+[data-recent-activity] time {
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
 }
 [data-status-card] {
   block-size: 8.5rem;

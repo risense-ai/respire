@@ -415,3 +415,63 @@ button.success {
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
+
+[data-overview-metrics] .index-kpi {
+  padding: 0.625rem 0.75rem;
+}
+.index-kpi > .row {
+  flex-wrap: wrap;
+  gap: 0.25rem;
+}
+.index-kpi strong {
+  font: 1rem/1.25 var(--font-sans);
+  margin: 0.375rem 0;
+}
+.index-kpi-bar {
+  height: 0.25rem;
+  margin-bottom: 0.375rem;
+}
+[data-overview-details] .panel:has(> .overview-model-content),
+.overview-model-content {
+  display: flex;
+  flex-direction: column;
+}
+.overview-model-content {
+  flex: 1;
+  overflow-wrap: anywhere;
+}
+[data-overview-details] .panel-heading {
+  flex-wrap: wrap;
+}
+.overview-serving-model,
+.overview-model-telemetry > div {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0.625rem;
+}
+.overview-serving-model {
+  display: grid;
+  gap: 0.25rem;
+  background: var(--soft);
+}
+.overview-model-telemetry {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.375rem;
+  margin: 0.75rem 0 0;
+  font-size: 0.8125rem;
+}
+.overview-model-telemetry dt {
+  color: var(--muted);
+}
+.overview-model-telemetry dd {
+  margin: 0.25rem 0 0;
+  font-weight: 600;
+}
+.overview-model-strip {
+  margin-top: auto;
+}
+.overview-model-strip .progress-label {
+  flex-wrap: wrap;
+  gap: 0.25rem;
+}
