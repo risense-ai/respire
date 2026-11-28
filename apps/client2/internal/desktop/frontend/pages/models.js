@@ -16,11 +16,12 @@ import {
   activeModelScope,
   profileStateSettled,
   applyEngineChoice,
+  activeDownloadSession,
   openDownloadModal,
 } from "./model-kit.js";
 
-import { createModelsView, liveModelOperation, modelCancelButton, modelOperationProgress, nextSwitchStallState, PAGE_STATES } from "./models-view.js";
-import { bindModelActions } from "./models-actions.js";
+import { createModelsView, downloadTaskProgress, indexTaskProgress, liveModelOperation, modelCancelButton, modelOperationProgress, nextSwitchStallState, PAGE_STATES } from "./models-view.js";
+import { bindModelActions, followRebuild } from "./models-actions.js";
 import { bindModelSettings, FUSION_MODES, FUSION_NUMERIC } from "./models-settings.js";
 
 export function models(root, ctx) {
@@ -47,6 +48,8 @@ export function models(root, ctx) {
     switchProgressKey: "",
     profileSwitchPending: false,
     lastProbe: null,
+    rebuildJobID: null,
+    indexInFlight: false,
   };
   let agent = {},
     backend = {},
@@ -111,7 +114,7 @@ export function models(root, ctx) {
   const live = $("[data-live]", root);
   live.innerHTML = `<div class="grid"><div data-inference-status></div>${panel(
     i18nMessages.m281dccfa29c6c9fb,
-    `<div class="panel-body"><div data-model-task-progress></div>${modelCancelButton(root)}<p class="form-error section-gap" data-model-task-error hidden></p>${i18nMessages.m31f6729bd220085e}</pre></details>`,
+    `<div class="panel-body"><div data-model-task-progress><div data-model-task-content></div><button type="button" data-model="reopen-download" hidden>${h(i18nMessages.mDownloadShowProgress)}</button></div>${modelCancelButton(root)}<p class="form-error section-gap" data-model-task-error hidden></p>${i18nMessages.m31f6729bd220085e}</pre></details>`,
   )}</div>`;
   let profileRefreshing = false;
   let disposed = false;
@@ -148,43 +151,33 @@ export function models(root, ctx) {
   }
   async function handlePrimaryAction() {
     const mode = currentMode();
+    const model = view.modelID;
+    const scope = activeModelScope(ctx.desktop?.health);
     const engine =
       mode.engine === "auto"
         ? detectBestEngine(ctx.desktop?.platform)
         : mode.engine;
-    const cpuBaseline = view.modelID === "m3" && engine === "cpu" && mode.variant === "quantized";
-    if (!cpuBaseline && !isProfileModel(view.modelID) && !view.inventory?.tokenizer_installed) {
-      const completed = await openDownloadModal({
-        model: view.modelID,
-        variant: "tokenizer",
-        label: mode.title,
-        getMirror: currentMirror,
-      }).done;
-      if (!completed || !root.isConnected) return;
-      await ctx.modelInventory.load(view.modelID);
+    const cpuBaseline = model === "m3" && engine === "cpu" && mode.variant === "quantized";
+    const mirror = currentMirror();
+    let inventory = view.inventory;
+    const ready = () => inventory?.tokenizer_installed &&
+      inventory.variants.some((variant) => variant.name === mode.variant && variant.installed) &&
+      (!cpuBaseline || inventory.cpu_container_ready);
+    const downloads = [];
+    if (!cpuBaseline && !isProfileModel(model) && !inventory?.tokenizer_installed) downloads.push("tokenizer");
+    if (!modeVariant(mode)?.installed || (isProfileModel(model) && !inventory?.tokenizer_installed) ||
+        (cpuBaseline && !ready())) downloads.push(cpuBaseline ? "baseline" : mode.variant);
+    for (const [index, variant] of downloads.entries()) {
+      const modal = openDownloadModal({ model, variant, label: mode.title, getMirror: () => mirror });
+      if (!await modal.done || scope !== activeModelScope(ctx.desktop?.health)) {
+        await ctx.refresh();
+        return;
+      }
+      if (index + 1 < downloads.length && modal.element.open) modal.element.close();
+      inventory = await ctx.modelInventory.load(model);
     }
-    const variant = modeVariant(mode);
-    if (!variant?.installed || !view.inventory?.tokenizer_installed ||
-        (cpuBaseline && !view.inventory?.cpu_container_ready)) {
-      view.stateOverride = null;
-      renderDynamic(true);
-      // The modal resolves `done` true only when the download completed;
-      // closing or cancelling never enables the mode on its own.
-      await openDownloadModal({
-        model: view.modelID,
-        variant: cpuBaseline ? "baseline" : mode.variant,
-        label: mode.title,
-        getMirror: currentMirror,
-      }).done;
-      await ctx.modelInventory.load(view.modelID);
-      if (!root.isConnected) return;
-      if (view.inventory?.tokenizer_installed && modeVariant(mode)?.installed &&
-          (!cpuBaseline || view.inventory.cpu_container_ready))
-        await applyEngineAfterDownload(mode, engine);
-      else renderDynamic(true);
-      return;
-    }
-    await applyEngineAfterDownload(mode, engine);
+    if (ready()) await applyEngineAfterDownload(mode, engine, model);
+    else if (!disposed) update();
   }
   function acceptRuntimeActive(details, scope) {
     if (details?.activeKnown && scope && scope === activeModelScope(ctx.desktop?.health)) {
@@ -192,13 +185,12 @@ export function models(root, ctx) {
       view.runtimeActiveScope = scope;
     }
   }
-  async function applyEngineAfterDownload(mode, engine) {
+  async function applyEngineAfterDownload(mode, engine, model) {
     const scope = activeModelScope(ctx.desktop?.health);
-    const model = view.modelID;
     try {
       view.switchInFlight = true;
       view.stateOverride = null;
-      update();
+      if (!disposed) update();
       const result = await applyEngineChoice({
         model,
         engine,
@@ -235,8 +227,10 @@ export function models(root, ctx) {
       notify(error.message, true);
     } finally {
       view.switchInFlight = false;
-      renderDynamic(true);
-      renderVariants();
+      if (!disposed) {
+        renderDynamic(true);
+        renderVariants();
+      }
       await ctx.refresh();
     }
   }
@@ -267,9 +261,18 @@ export function models(root, ctx) {
           i18nMessages.m70dee7f8303c7d74,
           index.running ? i18nMessages.m0a53c8de45a1ed4a : index.scheduled ? i18nMessages.m2fcab8f67ceeae3e : i18nMessages.mdae661d17c2dd8f0,
         ],
+        [i18nMessages.mIndexCounts, `${number(s.indexed_count)} / ${number(s.local_alive)}`],
       ]),
     );
-    $("[data-model-task-progress]", live).innerHTML = op.active ? modelOperationProgress(op) : `<p>${h(i18nMessages.m707bd8db0c65b214)}</p>`;
+    const task = ctx.desktop?.task;
+    const session = activeDownloadSession();
+    const progress = op.active ? modelOperationProgress(op)
+      : modelTaskBusy(task) ? downloadTaskProgress(task)
+      : index.running || index.scheduled || view.indexInFlight
+        ? indexTaskProgress(index.scheduled && !index.running ? i18nMessages.m2fcab8f67ceeae3e : i18nMessages.m0a53c8de45a1ed4a, s)
+        : `<p>${h(i18nMessages.m707bd8db0c65b214)}</p>`;
+    $("[data-model-task-content]", live).innerHTML = progress;
+    $('[data-model="reopen-download"]', live).hidden = !session;
     const error = $("[data-model-task-error]", live);
     error.hidden = !index.error;
     error.textContent = index.error || "";
@@ -283,7 +286,7 @@ export function models(root, ctx) {
       const baselineReady = view.inventory.tokenizer_installed && view.inventory.cpu_container_ready &&
         view.inventory.variants.some((variant) => variant.name === "quantized" && variant.installed);
       if (!baselineReady) view.sawMissingBaseline = true;
-      else if (view.sawMissingBaseline && !view.baselinePrepared) {
+      else if (view.sawMissingBaseline && !view.baselinePrepared && !view.switchInFlight) {
         view.baselinePrepared = true;
         const mirror = currentMirror();
         runIndexedAction("model_prepare", {
@@ -311,6 +314,18 @@ export function models(root, ctx) {
       $("[name=mirror-custom]", root).value = customMirror ? mirror : "";
       $("[data-mirror-state]", root).textContent = i18nMessages.m1f45e225299def52 + mirror;
       const jobs = await api("operations");
+      const activeRebuild = jobs.find((job) => job.name === "index_rebuild" && job.state === "running");
+      if (activeRebuild && !disposed && view.rebuildJobID !== activeRebuild.id) {
+        view.rebuildJobID = activeRebuild.id;
+        view.indexInFlight = true;
+        syncProfilePolling(liveModelOperation(view, ctx.status));
+        followRebuild(activeRebuild, root, ctx, () => !disposed && scope === activeModelScope(ctx.desktop?.health), () => {
+          if (view.rebuildJobID !== activeRebuild.id) return;
+          view.rebuildJobID = null;
+          view.indexInFlight = false;
+          if (!disposed) update();
+        }).catch((error) => notify(error.message, true));
+      }
       fusion.requestId = jobs.find((job) => job.name === "agent_set" &&
         job.state === "unconfirmed" && (!job.transaction || job.transaction.kind === "core_config"))?.id || null;
       const values = await Promise.allSettled([
@@ -439,7 +454,14 @@ export function models(root, ctx) {
   function syncProfilePolling(op) {
     const polling = view.profileSwitchPending || (!disposed && (view.switchInFlight || view.indexInFlight || op.active));
     if (polling && !view.switchTimer) {
-      view.switchTimer = setInterval(() => refreshProfileState().catch(error => notify(error.message, true)), 3000);
+      view.switchTimer = setInterval(async () => {
+        try {
+          if (view.indexInFlight) await ctx.refresh();
+          await refreshProfileState();
+        } catch (error) {
+          notify(error.message, true);
+        }
+      }, 3000);
     } else if (!polling && view.switchTimer) {
       clearInterval(view.switchTimer);
       view.switchTimer = null;
@@ -451,7 +473,7 @@ export function models(root, ctx) {
     try {
       return await execute(name, args);
     } finally {
-      view.indexInFlight = false;
+      view.indexInFlight = Boolean(view.rebuildJobID);
       await refreshProfileState();
     }
   }

@@ -2,10 +2,69 @@ package desktop
 
 import (
 	"encoding/json"
+	"reflect"
+	"strings"
 	"testing"
 
 	"respire-client2/internal/host"
 )
+
+func TestPreferencesContractReflection(t *testing.T) {
+	intentionallyNonPatchable := map[string]string{}
+	var prefs host.Preferences
+	prefType := reflect.TypeOf(prefs)
+	fields := make(map[string]reflect.StructField)
+	for _, field := range reflect.VisibleFields(prefType) {
+		key, _, _ := strings.Cut(field.Tag.Get("json"), ",")
+		if field.IsExported() && key != "" && key != "-" {
+			fields[key] = field
+		}
+	}
+	for key := range intentionallyNonPatchable {
+		if _, ok := fields[key]; !ok {
+			t.Errorf("non-patchable key %q has no Preferences field", key)
+		}
+	}
+	inputs := make(map[string]reflect.Kind)
+	for _, field := range reflect.VisibleFields(reflect.TypeOf(actionInput{})) {
+		key, _, _ := strings.Cut(field.Tag.Get("json"), ",")
+		if field.IsExported() {
+			inputs[key] = field.Type.Kind()
+		}
+	}
+	keys := make(map[string]bool)
+	targets := preferencePatchTargets(&prefs)
+	for _, key := range preferencePatchKeys {
+		if _, ok := fields[key]; !ok || keys[key] {
+			t.Errorf("unbacked or duplicate allowlist key %q", key)
+		}
+		keys[key] = true
+	}
+	for key := range targets {
+		if _, ok := fields[key]; !ok {
+			t.Errorf("unbacked patch target %q", key)
+		}
+	}
+	for key, field := range fields {
+		if _, excluded := intentionallyNonPatchable[key]; excluded {
+			if _, hasTarget := targets[key]; keys[key] || hasTarget {
+				t.Errorf("excluded field %q is patchable", key)
+			}
+			continue
+		}
+		if !keys[key] {
+			t.Errorf("missing allowlist key %q", key)
+		}
+		wantTarget := reflect.ValueOf(&prefs).Elem().FieldByIndex(field.Index).Addr().Interface()
+		if targets[key] != wantTarget {
+			t.Errorf("patch target %q must point to Preferences.%s", key, field.Name)
+		}
+		kind := field.Type.Kind()
+		if (kind != reflect.Bool && kind != reflect.Int && kind != reflect.String) || inputs[key] != kind {
+			t.Errorf("actionInput field %q has kind %v, want %v", key, inputs[key], kind)
+		}
+	}
+}
 
 // The POST /api/* shape check must carry one JSON field per patchable
 // preference key: the completion step of the onboarding wizard posts only
@@ -47,6 +106,9 @@ func TestDecodeActionBodyAcceptsWizardCompletionPatch(t *testing.T) {
 }
 
 func TestDecodeActionBodyStillRejectsUnknownAndTrailing(t *testing.T) {
+	if _, err := decodeActionBody([]byte(`{"modelMirror":42}`)); err == nil {
+		t.Fatal("invalid field types must stay rejected")
+	}
 	if _, err := decodeActionBody([]byte(`{"noSuchField":1}`)); err == nil {
 		t.Fatal("unknown fields must stay rejected")
 	}

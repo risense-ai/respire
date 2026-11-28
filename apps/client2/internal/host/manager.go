@@ -9,9 +9,11 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -62,6 +64,33 @@ var onboardingSteps = map[string]bool{
 // wizard; empty means the step has not been answered yet.
 var onboardingSyncChoices = map[string]bool{
 	"": true, "cloud": true, "offline": true,
+}
+
+func NormalizeModelMirror(raw string) (string, error) {
+	mirror := strings.TrimSpace(raw)
+	if mirror == "" || mirror == "auto" {
+		return "auto", nil
+	}
+	mirror = strings.TrimRight(mirror, "/")
+	for _, origin := range modelMirrors {
+		_, host, _ := strings.Cut(origin, "://")
+		if strings.EqualFold(mirror, host) {
+			return origin, nil
+		}
+	}
+	parsed, err := url.Parse(mirror)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Hostname() == "" ||
+		parsed.User != nil || parsed.ForceQuery || parsed.RawQuery != "" || strings.Contains(mirror, "#") ||
+		(parsed.Path != "" && parsed.Path != "/") {
+		return "", errors.New("model mirror must be auto or an HTTP(S) origin")
+	}
+	for _, origin := range modelMirrors {
+		_, host, _ := strings.Cut(origin, "://")
+		if strings.EqualFold(parsed.Host, host) {
+			return origin, nil
+		}
+	}
+	return strings.ToLower(parsed.Scheme) + "://" + parsed.Host, nil
 }
 
 // defaultPreferences is the state of a brand-new installation: the wizard
@@ -138,6 +167,11 @@ func MigratePreferences(p Preferences, stored map[string]json.RawMessage) Prefer
 	if p.ProxyMode == "" {
 		p.ProxyMode = ProxyModeSystem
 	}
+	mirror, err := NormalizeModelMirror(p.ModelMirror)
+	if err != nil {
+		mirror = "auto"
+	}
+	p.ModelMirror = mirror
 	if p.SidebarWidth < 0 {
 		p.SidebarWidth = 0
 	}
@@ -159,6 +193,9 @@ func (p Preferences) validate() error {
 	}
 	if !proxyModes[p.ProxyMode] {
 		return errors.New(i18n.Message845bac57ec2916e1)
+	}
+	if _, err := NormalizeModelMirror(p.ModelMirror); err != nil {
+		return err
 	}
 	for _, channel := range []string{p.RuntimeChannel, p.ClientChannel} {
 		if channel != "stable" && channel != "dev" {
@@ -391,6 +428,11 @@ func writeJSON(path string, value any) error {
 func (m *Manager) Preferences() Preferences { m.mu.Lock(); defer m.mu.Unlock(); return m.prefs }
 
 func (m *Manager) SavePreferences(p Preferences) error {
+	mirror, err := NormalizeModelMirror(p.ModelMirror)
+	if err != nil {
+		return err
+	}
+	p.ModelMirror = mirror
 	if err := p.validate(); err != nil {
 		return err
 	}

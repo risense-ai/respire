@@ -1,5 +1,5 @@
 import { messages as i18nMessages } from "../ui/i18n/messages.js";
-import { $, bytes, summary, execute, action, confirm, notify, resultView, api } from "../ui/core.js";
+import { $, bytes, summary, execute, action, confirm, notify, resultView, api, waitForOperation } from "../ui/core.js";
 import { cancellableModelID, liveModelOperation, syncModelCancel } from "./models-view.js";
 import {
   MODEL_OPTIONS,
@@ -10,7 +10,20 @@ import {
   activeModelScope,
   managedM3ApplySelection,
   openDownloadModal,
+  reopenActiveDownloadModal,
 } from "./model-kit.js";
+
+export async function followRebuild(job, root, ctx, isCurrent, onSettled) {
+  try {
+    const result = await waitForOperation(job);
+    if (isCurrent()) $("[data-result]", root).innerHTML = resultView(i18nMessages.m4347dbc9b646e415, result);
+  } catch (error) {
+    if (isCurrent()) notify(error.message, true);
+  } finally {
+    onSettled();
+    if (isCurrent()) await ctx.refresh();
+  }
+}
 
 export function bindModelActions(view, {
   root,
@@ -124,6 +137,10 @@ export function bindModelActions(view, {
     }
     const button = event.target.closest("[data-model]");
     if (!button) return;
+    if (button.dataset.model === "reopen-download") {
+      action(button, reopenActiveDownloadModal);
+      return;
+    }
     if (button.dataset.model === "cancel") {
       const id = cancellableModelID(liveModelOperation(view, ctx.status));
       if (!id || view.cancelPending) return;
@@ -155,14 +172,15 @@ export function bindModelActions(view, {
         )
           return;
         view.sawMissingBaseline = true;
-        openDownloadModal({
+        await openDownloadModal({
           model: view.modelID,
           variant: "baseline",
           label: i18nMessages.m801867119ecff472,
           getMirror: currentMirror,
-          onDone: () => load(),
-        });
+        }).done;
+        if (root.isConnected) await load();
         await ctx.refresh();
+        return;
       } else if (operation === "download") {
         const variant = button.dataset.variant;
         const size = view.inventory?.variants?.find(
@@ -178,14 +196,15 @@ export function bindModelActions(view, {
           ))
         )
           return;
-        openDownloadModal({
+        await openDownloadModal({
           model: view.modelID,
           variant,
           label,
           getMirror: currentMirror,
-          onDone: () => load(),
-        });
+        }).done;
+        if (root.isConnected) await load();
         await ctx.refresh();
+        return;
       } else if (operation === "uninstall") {
         if (
           !(await confirm(

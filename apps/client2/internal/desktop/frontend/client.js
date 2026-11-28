@@ -381,13 +381,14 @@ window.addEventListener("hashchange", () => {
   }
   route();
 });
-document.addEventListener("respire-operation", () => refresh());
+document.addEventListener("respire-operation", () => poll());
 document.addEventListener("respire-runtime-progress", ({ detail: operation }) => {
-  if (!ctx.status?.summary || !["model_switch", "model_download"].includes(operation.kind)) return;
-  ctx.status.summary.model_operation = {
-    id: operation.operation_id, active: ["pending", "running"].includes(operation.state),
-    phase: operation.message || operation.state, done: operation.progress_percent, total: 100,
-  };
+  if (operation.kind === "model_switch" && ctx.status?.summary) {
+    ctx.status.summary.model_operation = {
+      id: operation.operation_id, active: ["pending", "running"].includes(operation.state),
+      phase: operation.message || operation.state, done: operation.progress_percent, total: 100,
+    };
+  } else if (operation.kind !== "model_download") return;
   view?.update?.();
 });
 let translationScheduled = false;
@@ -405,10 +406,19 @@ new MutationObserver(() => {
   attributes: true,
   attributeFilter: ["title", "placeholder", "aria-label"],
 });
-async function poll() {
-  await refresh();
+export function pollIntervalMs(ctx, hidden) {
+  const status = ctx.status?.summary;
+  if (!hidden && (ctx.desktop?.task?.busy || status?.retrieval_index?.running ||
+      status?.retrieval_index?.scheduled || status?.model_operation?.active)) return 3000;
   const streaming = ctx.desktop?.health?.capabilities?.includes("sse.operations.v1");
-  setTimeout(poll, streaming ? 30000 : document.hidden ? 15000 : 3000);
+  return streaming ? 30000 : hidden ? 15000 : 3000;
+}
+let pollTimer;
+async function poll() {
+  clearTimeout(pollTimer);
+  await refresh();
+  clearTimeout(pollTimer);
+  pollTimer = setTimeout(poll, pollIntervalMs(ctx, document.hidden));
 }
 (async () => {
   try {

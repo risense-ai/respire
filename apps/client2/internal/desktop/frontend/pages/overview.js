@@ -20,7 +20,7 @@ import {
   fetchProfileState,
   readProfileState,
 } from "./model-kit.js";
-import { modelOperationProgress } from "./models-view.js";
+import { modelOperationProgress, runtimeDownloadOperation } from "./models-view.js";
 
 import { stats } from "./stats.js";
 
@@ -101,7 +101,7 @@ export function overview(root, ctx) {
       sync = s.sync_live || {},
       index = s.retrieval_index || {},
       inference = health.inference || {},
-      op = s.model_operation || {},
+      op = runtimeDownloadOperation() || s.model_operation || {},
       session = s.session || {};
     const nowTask = state.task || {};
     if (promptsReady === null && state.connected)

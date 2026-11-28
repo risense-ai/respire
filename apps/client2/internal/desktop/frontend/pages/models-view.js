@@ -8,6 +8,7 @@ import {
   MODEL_MODES,
   isProfileModel,
   variantFromItem,
+  taskMatchesVariant,
   engineAvailable,
   modeForVariant,
   performanceAvailable,
@@ -15,6 +16,7 @@ import {
   activeVariantSelection,
   activeModelScope,
   marksActiveVariant,
+  activeDownloadSession,
 } from "./model-kit.js";
 
 // Scenario-mode states: the page speaks in "can I use it now" terms instead of
@@ -83,9 +85,23 @@ const SWITCH_PHASES = {
   "switch-load": i18nMessages.m836ebd4436a27d05,
   "switch-index": i18nMessages.m3e4ab1850f35cc47,
   "switch-diary": i18nMessages.m3f110122999a31c4,
+  index: i18nMessages.m3e4ab1850f35cc47,
+  "index-load": i18nMessages.m836ebd4436a27d05,
 };
 
+export function runtimeDownloadOperation() {
+  const transfer = activeDownloadSession();
+  const progress = transfer?.progress;
+  if (progress && ["pending", "running"].includes(progress.state)) {
+    return { id: transfer.id, active: true, phase: "download", cancellable: false,
+      downloadModel: transfer.model, downloadVariant: transfer.variant,
+      item: progress.message, progress_percent: progress.progress_percent };
+  }
+}
+
 export function liveModelOperation(view, status) {
+  const download = runtimeDownloadOperation();
+  if (download) return download;
   const profile = readProfileState(view.profileState).operation;
   const snapshot = status?.summary?.model_operation;
   const observed = currentRuntimeSwitch();
@@ -126,7 +142,19 @@ export function modelOperationProgress(op) {
   const count = total ? `${format(op.done)} / ${format(op.total)} (${percent})`
     : op.done != null ? format(op.done) : op.progress_percent == null ? "" : `${op.progress_percent}%`;
   const elapsed = op.elapsed ?? op.elapsed_secs;
-  return `<div class="progress-label"><span>${h(modelPhase(op))}${op.item ? ` · ${h(op.item)}` : ""}</span><span>${h(count)}</span><span>${elapsed == null ? "" : h(elapsed + i18nMessages.m00fe8dda1fd70f64)}</span></div><progress ${total ? `value="${h(op.done)}" max="${h(op.total)}"` : op.progress_percent == null ? "" : `value="${h(op.progress_percent)}" max="100"`}></progress>`;
+  return `<div class="progress-label"><span>${h(modelPhase(op))}${op.item ? `<span> · ${h(op.item)}</span>` : ""}</span><span>${h(count)}</span><span>${elapsed == null ? "" : h(elapsed + i18nMessages.m00fe8dda1fd70f64)}</span></div><progress ${total ? `value="${h(op.done)}" max="${h(op.total)}"` : op.progress_percent == null ? "" : `value="${h(op.progress_percent)}" max="100"`}></progress>`;
+}
+
+export function downloadTaskProgress(task) {
+  const total = task.total > 0;
+  const count = total ? `${bytes(task.done)} / ${bytes(task.total)}` : task.done > 0 ? bytes(task.done) : "";
+  return `<div class="progress-label"><span>${h(task.stage)}</span><span>${h(count)}</span></div><progress ${total ? `value="${h(task.done)}" max="${h(task.total)}"` : ""}></progress>`;
+}
+
+export function indexTaskProgress(state, status) {
+  const count = `${number(status.indexed_count)} / ${number(status.local_alive)}`;
+  const measured = typeof status.indexed_count === "number" && status.local_alive > 0;
+  return `<div class="progress-label"><span>${h(state)}</span><span>${h(count)}</span></div><progress ${measured ? `value="${h(status.indexed_count)}" max="${h(status.local_alive)}"` : ""}></progress>`;
 }
 
 export function nextSwitchStallState(prevKey, prevTicks, op, limit = 600) {
@@ -157,6 +185,15 @@ export function createModelsView(view, { root, ctx, live }) {
     : null;
   const currentVariant = (variant, engine) =>
     marksActiveVariant(activeSelection(), view.modelID, variant, engine);
+  const downloadingVariant = (op) => !op.active ? "" : op.downloadModel
+    ? (op.downloadModel === view.modelID ? op.downloadVariant : "")
+    : variantFromItem(op.item, view.inventory);
+  function hostTaskMatches(task, variant) {
+    if (taskMatchesVariant(task, variant)) return true;
+    const transfer = activeDownloadSession();
+    return Boolean(transfer?.id && transfer.id === task?.id && transfer.model === view.modelID &&
+      transfer.variant === variant.name && taskMatchesVariant(task, { path: "tokenizer.json" }));
+  }
   // A running download or apply disables switching.
   function engineEnabled(engine, opActive) {
     if (opActive) return false;
@@ -204,20 +241,18 @@ export function createModelsView(view, { root, ctx, live }) {
         return `${i18nMessages.m1e9762ef816d3fbb}`;
       return op.active ? modelOperationProgress(op) : h(i18nMessages.mdc9591e56d502b43);
     }
-    const pct = op.total
-      ? Math.min(100, Math.round((op.done / op.total) * 100))
-      : 0;
-    if (
-      task?.busy &&
-      String(task.stage || "").includes("model_" + variant.name + ".onnx")
-    ) {
+    if (hostTaskMatches(task, variant)) {
       const tPct = task.total
         ? Math.min(100, Math.round((task.done / task.total) * 100))
         : 0;
       return `${i18nMessages.m1b72aba0ad0d0039}${tPct}%</strong><progress ${task.total ? `value="${h(task.done)}" max="${h(task.total)}"` : ""}></progress>`;
     }
-    if (busy)
-      return `<strong>${op.phase === "verify" ? i18nMessages.m784f9b54ae2ba27b : i18nMessages.me2fc571a4cf00ceb} ${pct}%</strong><progress ${op.total ? `value="${h(op.done)}" max="${h(op.total)}"` : ""}></progress>`;
+    if (busy) {
+      const percent = op.total ? Math.min(100, Math.round(op.done / op.total * 100)) : op.progress_percent;
+      const measurement = op.total ? `value="${h(op.done)}" max="${h(op.total)}"`
+        : percent == null ? "" : `value="${h(percent)}" max="100"`;
+      return `<strong>${op.phase === "verify" ? i18nMessages.m784f9b54ae2ba27b : i18nMessages.me2fc571a4cf00ceb}${percent == null ? "" : ` ${h(percent)}%`}</strong><progress ${measurement}></progress>`;
+    }
     if (variant.installed)
       return `<span class="variant-status"><strong>${current ? i18nMessages.m3bef61e2898bcd2d : i18nMessages.me2f12da7faa68217}</strong><span class="hint">${h(bytes(variant.bytes))}${i18nMessages.mde9f2b736c831935}`;
     return i18nMessages.mdccec95b65e15ff0;
@@ -227,7 +262,8 @@ export function createModelsView(view, { root, ctx, live }) {
     syncModelCancel(root, view, op);
     const node = $("[data-variants]", root);
     if (!node || !view.inventory) return;
-    const downloading = op.active ? variantFromItem(op.item) : "";
+    const downloading = downloadingVariant(op);
+    const task = ctx.desktop?.task;
     const hint = $("[data-model-hint]", root);
     if (hint) hint.textContent = MODEL_HINTS[view.modelID] || MODEL_HINTS.m3;
     node.innerHTML = `${i18nMessages.m96cac5f992733c0b}${view.inventory.variants
@@ -241,10 +277,11 @@ export function createModelsView(view, { root, ctx, live }) {
                 ? i18nMessages.m8ad5ce2b50a7ece5
                 : "";
         const activeHere = currentVariant(variant.name);
+        const disabled = op.active || downloading === variant.name || hostTaskMatches(task, variant) ? " disabled" : "";
         const ops = variant.installed
-          ? `<div class="variant-ops">${engineChips(variant, Boolean(op.active) || view.switchInFlight)}</div><button data-model="download" data-variant="${h(variant.name)}"${downloading === variant.name ? " disabled" : ""}>${activeHere ? i18nMessages.mff8d2afbf63e1811 : i18nMessages.m4673a23061656125}</button>`
-          : `<button data-model="download" data-variant="${h(variant.name)}"${downloading === variant.name ? " disabled" : ""}${i18nMessages.m95de3b8faabce594}`;
-        return `<tr><td><span class="variant-name"><strong>${h(variant.name)}</strong>${badge ? `<span class="hint">${badge}${variant.name === "fp16" ? i18nMessages.m52b8ee376f013c8e : ""}</span>` : ""}</span></td><td>${h(bytes(variant.size))}</td><td data-status="${h(variant.name)}">${variantStatus(variant, op, downloading, ctx.desktop?.task)}</td><td><span class="path-cell"><code title="${h(variant.path)}">${h(variant.path)}</code><button class="link-btn" data-open-dir="${h(variant.path)}${i18nMessages.m57c846016182bd26}${ops}</td></tr>`;
+          ? `<div class="variant-ops">${engineChips(variant, Boolean(op.active) || view.switchInFlight)}</div><button data-model="download" data-variant="${h(variant.name)}"${disabled}>${activeHere ? i18nMessages.mff8d2afbf63e1811 : i18nMessages.m4673a23061656125}</button>`
+          : `<button data-model="download" data-variant="${h(variant.name)}"${disabled}${i18nMessages.m95de3b8faabce594}`;
+        return `<tr><td><span class="variant-name"><strong>${h(variant.name)}</strong>${badge ? `<span class="hint">${badge}${variant.name === "fp16" ? i18nMessages.m52b8ee376f013c8e : ""}</span>` : ""}</span></td><td>${h(bytes(variant.size))}</td><td data-status="${h(variant.name)}">${variantStatus(variant, op, downloading, task)}</td><td><span class="path-cell"><code title="${h(variant.path)}">${h(variant.path)}</code><button class="link-btn" data-open-dir="${h(variant.path)}${i18nMessages.m57c846016182bd26}${ops}</td></tr>`;
       })
       .join("")}</tbody></table>`;
     renderBaseline();
@@ -278,7 +315,7 @@ export function createModelsView(view, { root, ctx, live }) {
   function modelTaskBusy(task) {
     return (
       Boolean(task?.busy) &&
-      /model(?:_[a-z0-9_]+)?\.onnx|tokenizer\.json/.test(String(task.stage || ""))
+      /(?:^|[^a-zA-Z0-9_.-])(?:[a-z0-9_.-]+\.(?:onnx|ort)|tokenizer\.json)(?:$|[^a-zA-Z0-9_.-])/i.test(String(task.stage || ""))
     );
   }
   function currentMode() {
@@ -305,7 +342,8 @@ export function createModelsView(view, { root, ctx, live }) {
     if (!variant?.installed || !view.inventory?.tokenizer_installed) return PAGE_STATES.EMPTY;
     if (!currentVariant(currentMode().variant)) return PAGE_STATES.EMPTY;
     if (currentMode().requiresGPU && activeSelection()?.engine === 'cpu') return PAGE_STATES.EMPTY;
-    if (!view.lastVerifiedAt && ctx.desktop?.health?.inference?.phase !== 'ready') return PAGE_STATES.EMPTY;
+    if (["failed", "unavailable", "error", "loading"].includes(ctx.desktop?.health?.inference?.phase))
+      return PAGE_STATES.EMPTY;
     return PAGE_STATES.READY;
   }
   function effectivePageState() {
@@ -325,10 +363,12 @@ export function createModelsView(view, { root, ctx, live }) {
     if (!node) return;
     const state = effectivePageState();
     const config = STATE_CONFIG[state];
+    const active = activeSelection();
     const activeMode = MODEL_MODES.find(
-      (mode) => mode.id === modeForVariant(view.engineState.model),
+      (mode) => mode.id === modeForVariant(active ? active.variant : view.engineState.model),
     );
-    node.innerHTML = `<div class="status-card ${state}"><div class="status-icon">${config.icon}</div><div class="status-body"><strong>${h(config.title)}</strong><span class="hint">${h(config.description)}</span></div><div class="status-meta"><span class="mode-tag">${h(activeMode?.title || "—")} · ${h(view.engineState.engine.toUpperCase())}</span>${view.lastVerifiedAt ? `<span class="hint">${h(i18nMessages.m29a1264657999b1c + date(view.lastVerifiedAt.toISOString()))}</span>` : ""}</div></div>`;
+    const engine = ((active ? active.engine : view.engineState.engine) || "—").toUpperCase();
+    node.innerHTML = `<div class="status-card ${state}"><div class="status-icon">${config.icon}</div><div class="status-body"><strong>${h(config.title)}</strong><span class="hint">${h(config.description)}</span></div><div class="status-meta"><span class="mode-tag">${h(activeMode?.title || "—")} · ${h(engine)}</span>${view.lastVerifiedAt ? `<span class="hint">${h(i18nMessages.m29a1264657999b1c + date(view.lastVerifiedAt.toISOString()))}</span>` : ""}</div></div>`;
   }
   function renderModeSelector() {
     const node = $("[data-mode-selector]", root);
@@ -363,11 +403,8 @@ export function createModelsView(view, { root, ctx, live }) {
       node.hidden = false;
       content.innerHTML = modelOperationProgress(op);
     } else if (modelTaskBusy(task)) {
-      const pct = task.total
-        ? Math.min(100, Math.round((task.done / task.total) * 100))
-        : 0;
       node.hidden = false;
-      content.innerHTML = `<div class="progress-label"><span>${h(String(task.stage || ""))}</span><span>${pct}%</span></div><progress ${task.total ? `value="${h(task.done)}" max="${h(task.total)}"` : ""}></progress>`;
+      content.innerHTML = downloadTaskProgress(task);
     } else {
       node.hidden = true;
       content.innerHTML = "";
@@ -385,11 +422,15 @@ export function createModelsView(view, { root, ctx, live }) {
   // mid-click.
   function renderDynamic(force = false) {
     const variant = modeVariant(currentMode());
+    const active = activeSelection();
     const key = [
       effectivePageState(),
       view.selectedMode,
       view.engineState.engine,
       view.engineState.model,
+      active?.model,
+      active?.variant,
+      active?.engine,
       variant ? `${variant.installed ? 1 : 0}:${variant.size}` : "none",
       view.lastVerifiedAt ? view.lastVerifiedAt.getTime() : 0,
       performanceAvailable(ctx.desktop?.platform) ? 1 : 0,
@@ -409,23 +450,20 @@ export function createModelsView(view, { root, ctx, live }) {
     if (!view.inventory) return;
     const op = liveModelOperation(view, ctx.status);
     const task = ctx.desktop?.task || {};
-    const downloading = op.active ? variantFromItem(op.item) : "";
+    const downloading = downloadingVariant(op);
     for (const variant of view.inventory.variants) {
       const cell = $(`[data-status="${CSS.escape(variant.name)}"]`, root);
       if (!cell) continue;
       const html = variantStatus(variant, op, downloading, task);
       if (cell.innerHTML !== html) cell.innerHTML = html;
       const button = $(
-        `[data-variant="${CSS.escape(variant.name)}"]`,
+        `[data-model="download"][data-variant="${CSS.escape(variant.name)}"]`,
         root,
       );
-      const clientBusy =
-        task.busy &&
-        String(task.stage || "").includes("model_" + variant.name + ".onnx");
       if (button)
         button.disabled =
-          downloading === variant.name || Boolean(op.active) || clientBusy;
-      for (const chip of document.querySelectorAll(
+          downloading === variant.name || Boolean(op.active) || hostTaskMatches(task, variant);
+      for (const chip of root.querySelectorAll(
         `[data-apply][data-variant="${CSS.escape(variant.name)}"]`,
       )) {
         const active = currentVariant(variant.name, chip.dataset.engine);

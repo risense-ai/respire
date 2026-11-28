@@ -4,12 +4,12 @@ const assert = require("node:assert/strict");
 const { i18nMessages, readFrontend } = require("./frontend-source.cjs");
 
 const core = readFrontend("ui/core.js").replace(/^export /gm, "");
-const page = readFrontend("pages/model-kit.js")
-  .replace(/^import \{[\s\S]*?\} from "\.\.\/ui\/core\.js";\r?\n/m, "")
+const modal = readFrontend("pages/model-download-modal.js")
+  .replace(/^import .*;\r?\n/gm, "")
   .replace(/^export /gm, "");
 const build = new Function(
   "document", "fetch", "EventSource", "performance", "setTimeout", "clearTimeout", "i18nMessages",
-  core + "\n" + page + "\nreturn openDownloadModal;",
+  core + "\n" + modal + "\nreturn { openDownloadModal, activeDownloadSession, reopenActiveDownloadModal };",
 );
 const flush = () => new Promise(resolve => setImmediate(resolve));
 const ok = result => Response.json({ ok: true, result });
@@ -33,7 +33,7 @@ function fixture({ starts = initial, snapshot = () => ok(busy), sse = false } = 
       return nodes.get(selector);
     },
   };
-  const open = build(
+  const { openDownloadModal, activeDownloadSession, reopenActiveDownloadModal } = build(
     { createElement: () => dialog, body: { append() {} }, dispatchEvent() {} },
     async (url, opts) => {
       requests.push({ url, opts });
@@ -62,9 +62,13 @@ function fixture({ starts = initial, snapshot = () => ok(busy), sse = false } = 
     id => timers.delete(id),
     i18nMessages,
   );
-  const { done } = open({ model: "m3", variant: "quantized", label: "Test" });
+  let finished = 0;
+  const { done } = openDownloadModal({ model: "m3", variant: "quantized", label: "Test", onDone: () => finished++ });
   return {
     done, dialog, timers, requests, streams,
+    activeDownloadSession, reopenActiveDownloadModal,
+    finished: () => finished,
+    progressText: () => nodes.get("[data-dl-bytes]").textContent,
     error: () => nodes.get("[data-dl-error]"),
     click(name) {
       const target = nodes.get(button(name));
@@ -83,6 +87,38 @@ function fixture({ starts = initial, snapshot = () => ok(busy), sse = false } = 
     },
   };
 }
+
+test("backgrounded host download keeps its observer and can reopen until completion", async () => {
+  const f = fixture({ sse: true });
+  await flush();
+  f.click("background");
+  assert.equal(f.dialog.open, false);
+  assert.equal(f.finished(), 0);
+  assert.equal(f.activeDownloadSession().done, f.done);
+  f.streams[0].frame({ ...busy, done: 1024, total: 2048 });
+  assert.equal(f.progressText(), "1.0 KiB / 2.0 KiB");
+  f.reopenActiveDownloadModal();
+  assert.equal(f.dialog.open, true);
+  f.click("background");
+  f.streams[0].frame(completed);
+  assert.equal(await f.done, true);
+  assert.equal(f.finished(), 1);
+  assert.equal(f.activeDownloadSession(), null);
+  assert.equal(f.streams[0].closed, true);
+});
+
+test("backgrounded Runtime download shows percentage and settles on failure", async () => {
+  const f = fixture({ sse: true, starts: () => ok({ id: "fixture", runtime: true, stream: true }) });
+  await flush();
+  f.click("background");
+  f.streams[0].runtimeFrame("progress", "running");
+  assert.equal(f.progressText(), "40%");
+  assert.equal(f.finished(), 0);
+  f.streams[0].runtimeFrame("failed");
+  assert.equal(await f.done, false);
+  assert.equal(f.finished(), 1);
+  assert.equal(f.activeDownloadSession(), null);
+});
 
 test("managed download consumes Runtime SSE without the host watchdog or snapshots", async () => {
   const f = fixture({ sse: true, starts: () => ok({ id: "fixture", runtime: true, stream: true }) });

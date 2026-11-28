@@ -1,4 +1,9 @@
 export const messages04 = {
+  mDownloadBackground: "转到后台",
+  mDownloadShowProgress: "显示进度",
+  mDownloadAlreadyRunning: "已有模型下载正在进行。",
+  mIndexCounts: "已索引 / 本机记忆",
+  mNoticeDismiss: "关闭通知",
   recallElapsedCount: "耗时 {elapsed} ms · 返回 {count} 条",
   statsResultPercentage: "{count}% 有结果",
   statsEmptyCandidates: "空结果 {count}",
