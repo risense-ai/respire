@@ -1,5 +1,7 @@
 # Client2 Models and Layout Design
 
+The design spans the monorepo's [Runtime API contract](../../../contracts/runtime-api/openapi.yaml), [Runtime](../../../apps/runtime/), [Client2](../../../apps/client2/), and [prototypes](../../../prototypes/).
+
 ## Desktop Geometry (`CARD-022`, #128)
 
 All 16 desktop views use fixed container and card geometry. Switching options changes only the contents of bounded regions, with internal scrolling where needed. The page and window scroll height stay constant. The `#notice` toast uses `position: fixed` outside document flow, so showing or dismissing it causes no vertical layout shift.

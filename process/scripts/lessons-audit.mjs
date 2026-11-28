@@ -5,7 +5,7 @@ import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import { FIX_OR_REVERT } from "./lib/lessons-audit.mjs";
 
-const TARGET = "risense-ai/respire-resources";
+const TARGET = "risense-ai/respire";
 const STRIKES = 3;
 const SHA = /^[0-9a-f]{40}$/i;
 const categories = [
@@ -214,9 +214,12 @@ function run() {
   const { values } = parseArgs({ options: {
     input: { type: "string" }, repos: { type: "string" }, since: { type: "string" },
     "lessons-file": { type: "string", default: "LESSONS.md" },
+    "target-repo": { type: "string", default: TARGET },
     "dry-run": { type: "boolean" }, apply: { type: "boolean" },
     "output-json": { type: "string" }, "output-md": { type: "string" },
   } });
+  const target = values["target-repo"];
+  if (!/^[\w.-]+\/[\w.-]+$/.test(target)) throw new Error("--target-repo requires owner/repo");
   if (values.apply && (values["dry-run"] || values.input !== undefined)) {
     throw new Error("--apply requires live history and cannot be combined with --dry-run or --input");
   }
@@ -259,8 +262,8 @@ function run() {
   if (jsonPath !== undefined || markdownPath !== undefined) writeReports();
   try {
     fileGuardrails(report.guardrails,
-      () => issueApi(["--paginate", "--slurp", `repos/${TARGET}/issues?state=all&per_page=100`]).flat(),
-      (issue) => issueApi(["--method", "POST", `repos/${TARGET}/issues`, "--input", "-"], issue));
+      () => issueApi(["--paginate", "--slurp", `repos/${target}/issues?state=all&per_page=100`]).flat(),
+      (issue) => issueApi(["--method", "POST", `repos/${target}/issues`, "--input", "-"], issue));
   } finally {
     writeReports();
   }

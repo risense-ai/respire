@@ -1,16 +1,15 @@
 schema: openspec-v1
 project: respire
-ssot_repo: risense-ai/respire-resources
+ssot_repo: risense-ai/respire
 
 repositories:
-  resources:
-    name: risense-ai/respire-resources
-    visibility: public
-    role: OpenSpec specs, OpenAPI 3.1 + Core ABI contracts, HTML prototypes, E2E suites, governance
   monorepo:
     name: risense-ai/respire
     visibility: public
-    role: Open-source Monorepo hosting apps/core, apps/runtime, apps/cli, apps/client2, and packages/runtime-sdk-*
+    role: Product apps, generated SDKs, OpenSpec, OpenAPI and Core ABI contracts, prototypes, acceptance tests, and governance
+  historical_governance:
+    name: risense-ai/respire-resources
+    role: Read-only archive for M1-M6 and Change 007 origin (PR 56)
   legacy_migration_sources:
     - risense-ai/respire-core
     - risense-ai/respire-runtime

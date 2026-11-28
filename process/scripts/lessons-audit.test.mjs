@@ -121,6 +121,7 @@ test("offline dry-run writes both reports without changing the ledger", (t) => {
   assert.equal(fs.readFileSync(ledger, "utf8"), LEDGER);
   assert.throws(() => auditCli(cwd, ...args, "--apply"), /--apply requires live history/);
   assert.throws(() => auditCli(cwd, ...args, "--output-md", ledger), /paths must be distinct/);
+  assert.throws(() => auditCli(cwd, ...args, "--target-repo", "respire"), /--target-repo requires owner\/repo/);
 });
 
 test("live dry-run reads merged main commits and their trailers", (t) => {
@@ -139,4 +140,31 @@ test("live dry-run reads merged main commits and their trailers", (t) => {
   assert.deepEqual(report.snapshots, [{ repository: path.basename(cwd), head }]);
   assert.deepEqual(report.findings.map(({ category, count, lesson }) => [category, count, lesson]),
     [["windows-argument-transport", 1, "L-004"]]);
+
+  for (const title of TITLES.slice(1)) git("commit", "--allow-empty", "-qm", title);
+  git("update-ref", "refs/remotes/origin/main", "HEAD");
+  const fixture = path.join(cwd, "github.cjs");
+  fs.writeFileSync(fixture, `
+    const assert = require("node:assert/strict");
+    const child = require("node:child_process");
+    const exec = child.execFileSync;
+    const endpoint = "repos/" + process.env.TEST_TARGET_REPO + "/issues";
+    child.execFileSync = (file, args, options) => {
+      if (file !== "gh") return exec(file, args, options);
+      if (args.includes("--paginate")) {
+        assert.equal(args.at(-1), endpoint + "?state=all&per_page=100");
+        return "[[]]";
+      }
+      assert.ok(args.includes(endpoint));
+      assert.deepEqual(JSON.parse(options.input).labels, ["guardrail"]);
+      return '{"number": 42}';
+    };
+    require("node:module").syncBuiltinESMExports();
+  `);
+  for (const [target, flags] of [["risense-ai/respire", []], ["other/respire", ["--target-repo", "other/respire"]]]) {
+    const result = execFileSync(process.execPath, ["--require", fixture, SCRIPT, "--apply", ...flags], {
+      cwd, env: { ...process.env, TEST_TARGET_REPO: target }, encoding: "utf8", stdio: "pipe",
+    });
+    assert.deepEqual(JSON.parse(result).guardrails[0].issue, { number: 42, status: "created" });
+  }
 });

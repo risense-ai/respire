@@ -2,6 +2,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { isTrustedEvidenceAuthor, loadAgentsConfig } from "./agents-config.mjs";
+import { ACTIVE_CARD_REPO, ARCHIVED_CARD_REPO } from "./cards.mjs";
 
 const RELEASE_COMPONENTS = new Set(["runtime", "cli", "client2"]);
 const GREEN_CONCLUSIONS = new Set(["success", "neutral", "skipped"]);
@@ -141,6 +142,10 @@ export function cmdEvidenceRegister({ gh, root, fetchAllCards, cmdSync }, args) 
       console.log(`Merged PR ${repo}#${pr.number} has no single explicit closing declaration for a canonical card; skipping.`);
       continue;
     }
+    if (!dryRun && card.repo === ARCHIVED_CARD_REPO) {
+      console.log(`Historical card ${card.ref} is read-only; skipping Evidence registration.`);
+      continue;
+    }
     if (registerCardEvidence(gh, card, pr, sha, runId, agentsCfg, dryRun)) registered += 1;
   }
 
@@ -222,7 +227,7 @@ export function cmdReleaseCheck({ gh }, args) {
     process.exit(1);
   }
 
-  const repo = "risense-ai/respire";
+  const repo = ACTIVE_CARD_REPO;
   const tag = `${component}-v${versionRaw}`;
   const manifestPath = component === "client2" ? "apps/client2/go.mod" : `apps/${component}/Cargo.toml`;
 
@@ -260,5 +265,5 @@ export function cmdReleaseCheck({ gh }, args) {
   }
 
   console.log("Release gate verdict: READY_TO_TAG");
-  console.log(`Next command (inside respire clone):\n  git tag ${tag} ${mainSha} && git push origin ${tag}`);
+  console.log(`Next command (from the respire root):\n  git tag ${tag} ${mainSha} && git push origin ${tag}`);
 }

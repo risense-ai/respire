@@ -10,13 +10,15 @@ labels: ["spec:proposed"]
 - **OpenSpec Change ID**: `00X-...`
 - **Target Milestone**: `MX: ...`
 - **Spec Section / Scenario**: `openspec/changes/.../specs/.../spec.md`
+- **Contract Path** (if API): `contracts/runtime-api/openapi.yaml`
 - **HTML Prototype Path** (if UI): `prototypes/pages/...` or `N/A`
 - **E2E Case ID**: `E2E-...`
 - **Depends On**: `#...` or `None`
 
 ## Definition of Done
 
+- [ ] The Change and this Milestone Issue received `spec:approved` before implementation
 - [ ] Implementation written strictly in English (no CJK outside UI i18n paths)
-- [ ] Meets all linked OpenSpec scenarios and E2E tests
-- [ ] Passes architectural guardrails (`<= 600` lines/file, dependency boundaries)
-- [ ] Verified independently by a read-only Verifier Agent
+- [ ] Meets all linked OpenSpec scenarios and E2E checks in `test-cases/`
+- [ ] Passes `node process/scripts/validate-openspec.mjs` and `node scripts/check-guardrails.mjs`
+- [ ] Verified independently by a read-only Verifier using `process/roles/verifier.md`

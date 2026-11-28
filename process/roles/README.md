@@ -1,6 +1,6 @@
 # Six-Role Collaboration & Permissions Matrix
 
-> Modeled on `ShiningRay/sebas` **Maker-Checker separation**: **the human Maintainer owns only front-gate approval and back-gate final merge**, while planning, coding, read-only verification, archiving, and mechanical releases run across isolated AI roles.
+Run role commands from the `risense-ai/respire` root. The Maintainer approves specs and merges PRs. Implementers and Verifiers work in independent sessions.
 
 ## Role Overview
 
@@ -20,9 +20,9 @@
 Full formatted prompts in **[oneline.md](oneline.md)** (`node process/scripts/respire-process.mjs roles --one-line`):
 
 - **Implementer**:
-  > Read `respire-resources/AGENTS.md`, `openspec/AGENT_EXECUTION_GUIDE.md`, and `process/roles/implementer.md`. Run `node process/scripts/respire-process.mjs next` inside `respire-resources`; if it exits 2, stop and report. Otherwise claim the card, work in `../.worktrees/` strictly in English (no CJK outside UI i18n), pass guardrails, open a Milestone-linked PR with `Fixes <repo>#<num>`, run `mark-verify`, and never self-verify.
+  > Read `AGENTS.md`, `openspec/AGENT_EXECUTION_GUIDE.md`, and `process/roles/implementer.md`. Run `node process/scripts/respire-process.mjs next` from the repository root. Stop and report exit 2. Claim the READY card, use `../.worktrees/<card-id>/respire`, pass both local guardrails, open a Milestone-linked PR with `Fixes <repo>#<num>`, and run `mark-verify` for independent verification.
 - **Bugfixer**:
-  > Read `respire-resources/AGENTS.md` and `openspec/FEATURE_LIFECYCLE.md` (Recipe D). Claim or open a Milestone bug card, write a failing regression test first in `../.worktrees/`, apply the minimal English fix, pass guardrails, open a PR with `Fixes <repo>#<num>`, run `mark-verify`, and check `LESSONS.md`.
+  > Read `AGENTS.md` and `openspec/FEATURE_LIFECYCLE.md` (Recipe D). Claim or open a Milestone bug card, write a failing regression test first in `../.worktrees/<card-id>/respire`, apply the minimal English fix, pass guardrails, open a PR with `Fixes <repo>#<num>`, run `mark-verify`, and check `LESSONS.md`.
 - **Verifier (launch in a NEW read-only session)**:
   > You are Respire's read-only Verifier (`process/roles/verifier.md`). Modify zero files or Issues. Run `node process/scripts/respire-process.mjs review-next` (stop on exit 2), inspect the PR diff, CI checks, matching OpenSpec scenarios, and `test-cases/` runs, then run `post-verdict <owner/repo#pr> --verdict <PASS|CONDITIONAL|REJECT> --summary "<evidence>"` (mark skipped items `UNTESTED`).
 - **Triager**:

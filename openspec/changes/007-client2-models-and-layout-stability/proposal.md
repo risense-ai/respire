@@ -13,4 +13,4 @@ Changing options or showing status messages can move desktop controls. Model man
 
 ## Impact
 
-The Runtime OpenAPI contract evolves additively. The mock, prototypes, and acceptance scenarios provide references for implementation in `risense-ai/respire` after approval.
+The [Runtime OpenAPI contract](../../../contracts/runtime-api/openapi.yaml) evolves additively. The [mock and prototypes](../../../prototypes/) and [acceptance scenarios](../../../test-cases/README.md) guide implementation in the same `risense-ai/respire` worktree after approval. The archived resources repository preserves the [original proposal](https://github.com/risense-ai/respire-resources/pull/56).

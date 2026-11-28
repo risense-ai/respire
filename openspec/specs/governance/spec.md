@@ -3,7 +3,7 @@
 ## Requirements
 
 ### Requirement: Spec-First Change Gate
-Every new feature, interface modification, architectural refactor, or UI redesign MUST be proposed as a complete OpenSpec Change package under `respire-resources/openspec/changes/<change-id>/` and receive Maintainer approval (`spec:approved`) before any implementation branch is opened.
+Every new feature, interface modification, architectural refactor, or UI redesign MUST be proposed as a complete OpenSpec Change package under `openspec/changes/<change-id>/` in `risense-ai/respire` and receive Maintainer approval (`spec:approved`) before any implementation branch is opened.
 
 #### Scenario: Implementation attempted without an approved Change
 - **GIVEN** a proposed feature has no approved Change package in `openspec/changes/`
@@ -11,7 +11,7 @@ Every new feature, interface modification, architectural refactor, or UI redesig
 - **THEN** the workflow MUST block execution (exit code `2`) and instruct the Agent to request Maintainer approval first
 
 ### Requirement: English-Only Repository Policy (Zero Non-i18n CJK)
-All documentation, OpenSpec specs, source code, inline comments, scripts, CI workflows, commit messages, PR bodies, and GitHub Issues in `respire-resources` and `respire` MUST be written strictly in English; non-English UI translations SHALL exist ONLY inside dedicated UI i18n paths and i18n test fixtures.
+All documentation, OpenSpec specs, source code, inline comments, scripts, CI workflows, commit messages, PR bodies, and GitHub Issues in `risense-ai/respire` MUST be written in English. Localized UI strings SHALL exist only inside dedicated UI i18n paths and i18n test fixtures.
 
 #### Scenario: Non-i18n CJK text committed to docs or code
 - **GIVEN** a PR adds Chinese characters inside a specification, Go/Rust source file, comment, or workflow outside exempted i18n paths

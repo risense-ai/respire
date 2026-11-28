@@ -1,6 +1,6 @@
 # Respire Transformation Master Roadmap (OpenSpec 001–007)
 
-> **Cold-Start Entry**: Any incoming AI Agent MUST read **[AGENT_EXECUTION_GUIDE.md](AGENT_EXECUTION_GUIDE.md)** and **[FEATURE_LIFECYCLE.md](FEATURE_LIFECYCLE.md)** first, then run `node process/scripts/respire-process.mjs next` to claim the next unblocked task deterministically.
+Read the [execution guide](AGENT_EXECUTION_GUIDE.md) and [feature lifecycle](FEATURE_LIFECYCLE.md), then run `node process/scripts/respire-process.mjs next` from the monorepo root.
 
 ---
 
@@ -17,7 +17,7 @@ flowchart LR
     C06 --> C07["M7: 007 Client2 Models & Layout Stability"]
 ```
 
-- **Current Status**: Both `risense-ai/respire-resources` and `risense-ai/respire` are live, public, published under **Respire Noncommercial License 1.0**, auto-merge enabled, and protected on `main` (`validate-openspec` / `ci-gate` + `verdict-gate`, with automated post-merge `evidence-register`). Org Project #1 ([Respire Transformation (001-006)](https://github.com/orgs/risense-ai/projects/1)), `M1`–`M6` Milestones, and 17 labels are in place. The workflow tracks **24 DAG-linked Issues** (`M1`–`M6` approved; `M7` proposed; `M1` archived; `CARD-001` and `CARD-002` closed; legacy freeze `CARD-005` deferred as `needs:human` until post-`-dev.1` cutover). The Core pre-publication audit is complete. Any later audited source import into `risense-ai/respire/apps/core/` follows **Respire Noncommercial License 1.0**, while legacy `risense-ai/respire-core` stays a private archive.
+- **Repository**: `risense-ai/respire` owns the product, OpenSpec, contracts, prototypes, acceptance tests, and process tooling. The `risense-ai/respire-resources` archive preserves M1–M6 governance history and the [original Change 007 proposal](https://github.com/risense-ai/respire-resources/pull/56). Active cards live in `risense-ai/respire` and use [Project #1](https://github.com/orgs/risense-ai/projects/1). Legacy `risense-ai/respire-core` remains private.
 
 ---
 
@@ -35,7 +35,9 @@ flowchart LR
 
 ---
 
-## 3. Live GitHub Issue DAG (24 Orchestration Cards)
+## 3. Historical and Active GitHub Issue DAG
+
+The table preserves original issue references and target repositories for earlier milestones.
 
 | Card | Milestone | Issue Ref | Target Repo | Depends On | Summary |
 | --- | --- | --- | --- | --- | --- |

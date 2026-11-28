@@ -1,24 +1,16 @@
 # Runtime SDKs
 
-The generated SDKs use the exact OpenAPI 3.1 and golden fixtures pinned in
-[contracts/sync.lock.json](../contracts/sync.lock.json). Never edit generated code,
-the copied contract, or copied fixtures manually.
+The generated SDKs use the canonical [OpenAPI 3.1 contract](../contracts/runtime-api/openapi.yaml)
+and the golden fixtures in this repository. Never edit generated code by hand.
 
-## Generate from a clean checkout
+## Generate and Test
 
-Fetch the public [resources repository](https://github.com/risense-ai/respire-resources)
-into an adjacent checkout, then verify the snapshot without updating it:
-
-```sh
-node scripts/sync-contracts.mjs --check ../respire-resources
-```
-
-To intentionally advance the snapshot, fetch the resources main ref and pass
-the approved 40-character commit to `node scripts/sync-contracts.mjs --update
-../respire-resources <commit>`. Then regenerate and test all three packages:
+After OpenSpec approval, update `contracts/runtime-api/openapi.yaml` in the same
+PR as its new endpoints and consuming app changes. Regenerate and test all
+three packages from the repository worktree:
 
 - **Rust (CLI):** `cargo +1.95.0 test --locked --manifest-path packages/runtime-sdk-rs/Cargo.toml`.
-  Progenitor builds the typed client automatically from the pinned contract.
+  Progenitor builds the typed client automatically from the local contract.
 - **Go (Client2):** from `packages/runtime-sdk-go`, run `go generate ./...`, then
   `go test ./...`. Generate before importing this local package into Client2.
 - **TypeScript (frontend and plugins):** from `packages/runtime-sdk-ts`, run

@@ -2,7 +2,7 @@
 
 ## Identity & Scope
 - **Purpose**: Triage incoming Issues/requests, deduplicate, draft English OpenSpec Change packages, and maintain GitHub Issue DAG metadata.
-- **Permissions**: Read/write `respire-resources/openspec/changes/*` proposals and Issue labels/comments only; NEVER modify product source code, and NEVER apply `spec:approved` on behalf of the Maintainer.
+- **Permissions**: Draft proposals in `openspec/changes/` and triage Issues in `risense-ai/respire`. Leave product edits to Implementers and `spec:approved` to the Maintainer.
 
 ## Workflow
 

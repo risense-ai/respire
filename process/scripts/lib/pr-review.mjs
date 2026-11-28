@@ -1,7 +1,7 @@
 // Self-dispatching PR review discovery, allowlist-checked verdict parsing, and pre-merge gating.
 import { isTrustedVerdictAuthor, loadAgentsConfig } from "./agents-config.mjs";
 
-const PR_REPOS = ["risense-ai/respire-resources", "risense-ai/respire", "risense-ai/respire-core"];
+const PR_REPOS = ["risense-ai/respire", "risense-ai/respire-core"];
 const VALID_VERDICTS = new Set(["PASS", "CONDITIONAL", "REJECT"]);
 const GREEN_CONCLUSIONS = new Set(["success", "neutral", "skipped"]);
 
@@ -99,12 +99,7 @@ function buildReviewItem(gh, pr, repo, byRef, byId, agentsCfg) {
   const card = matchLinkedCard(pr, repo, byRef, byId);
   const ci = getHeadCiStatus(gh, repo, headSha);
   const verdict = getLatestVerdict(gh, repo, pr.number, headSha, agentsCfg);
-  const repoDir = repo.split("/")[1];
   const prRef = `${repo}#${pr.number}`;
-  const checkoutCmd =
-    repoDir === "respire-resources"
-      ? `gh pr checkout ${pr.number}`
-      : `gh pr checkout ${pr.number} --repo ${repo}`;
 
   return {
     pr_ref: prRef,
@@ -134,7 +129,7 @@ function buildReviewItem(gh, pr, repo, byRef, byId, agentsCfg) {
       `gh pr view ${pr.number} --repo ${repo}`,
       `gh pr diff ${pr.number} --repo ${repo}`,
       `gh pr checks ${pr.number} --repo ${repo}`,
-      checkoutCmd,
+      `gh pr checkout ${pr.number} --repo ${repo}`,
     ],
     verdict_command: `node process/scripts/respire-process.mjs post-verdict ${prRef} --verdict <PASS|CONDITIONAL|REJECT> --summary "<findings>"`,
   };

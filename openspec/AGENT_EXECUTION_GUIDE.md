@@ -1,21 +1,22 @@
 # Multi-Agent Cold-Start Execution Guide
 
-> **Goal**: ANY newly started AI Agent or harness MUST be able to read this file and drive `001`–`006` or Day-2 feature, bugfix, and review work directly via `process/scripts/respire-process.mjs` with zero prior conversation context. See **[FEATURE_LIFECYCLE.md](FEATURE_LIFECYCLE.md)** for feature/bugfix recipes and **[../process/roles/oneline.md](../process/roles/oneline.md)** for concise one-line role prompts.
+See the [feature lifecycle](FEATURE_LIFECYCLE.md) for feature and bugfix recipes and [role prompts](../process/roles/oneline.md) for dispatch instructions.
 
 ---
 
 ## 1. Local & GitHub Repository Map
 
-All working clones live under `D:\sources\repos-new\gh\1memory\`:
+Run dispatch commands from the `risense-ai/respire` checkout. It contains `apps/`, `packages/`, `contracts/`, `openspec/`, `prototypes/`, `test-cases/`, and `process/`. See the [repository map](../README.md) for directory responsibilities.
 
 | Directory | GitHub Repository | Role & Boundaries |
 | --- | --- | --- |
-| **`respire-resources/`** | `risense-ai/respire-resources` | **SSOT Hub** (OpenSpec, OpenAPI 3.1, HTML prototypes, E2E suites, orchestration CLI) |
-| **`respire/`** | `risense-ai/respire` | **Open-Source Monorepo** (`apps/core`, `apps/runtime`, `apps/cli`, `apps/client2`, `packages/runtime-sdk-*`) |
+| **`respire-resources/`** | `risense-ai/respire-resources` | Read-only archive for M1–M6 cards and [Change 007's original proposal PR](https://github.com/risense-ai/respire-resources/pull/56) |
 | **`respire-core/`** | `risense-ai/respire-core` | **Legacy Source** (auditing for open-source migration into `respire/apps/core` via `CARD-002` / `CARD-013`) |
 | **`respire-runtime/`** | `risense-ai/respire-runtime` | **Migration Source** (freezes source writes after `003`; Release mirror only) |
 | **`respire-cli/`** | `risense-ai/respire-cli` | **Migration Source** (freezes source writes after `003`; Release/NPM mirror only) |
 | **`respire-client2/`** | `risense-ai/respire-client2` | **Migration Source** (freezes source writes after `003`; Release mirror only) |
+
+Legacy sibling checkouts are optional.
 
 ---
 
@@ -23,10 +24,9 @@ All working clones live under `D:\sources\repos-new\gh\1memory\`:
 
 1. **Run environment preflight & select the next task deterministically (NEVER pick tasks ad-hoc)**:
    ```sh
-   cd respire-resources
-   node process/scripts/respire-process.mjs preflight # Verify tools, gh auth & sibling clones
+   node process/scripts/respire-process.mjs preflight # Verify tools, gh auth & local guardrails
    node process/scripts/respire-process.mjs sync      # Refresh agent:ready DAG labels & Project #1
-   node process/scripts/respire-process.mjs status    # View M1-M6 Milestone & DAG status
+   node process/scripts/respire-process.mjs status    # View Milestone & DAG status
    node process/scripts/respire-process.mjs next      # Pick the single next READY card (Fail-Closed)
    ```
    - If `next` exits with code `2` (waiting for `spec:approved` or `needs:human`), **STOP immediately** and ask the Maintainer.
@@ -36,14 +36,14 @@ All working clones live under `D:\sources\repos-new\gh\1memory\`:
    ```
    - Adds `agent:in-progress` and removes `agent:ready` on GitHub.
 3. **Read all governing documents**:
-   - `respire-resources/AGENTS.md` (including the **Strict English-Only** rule outside UI i18n paths), `LESSONS.md`, and `openspec/changes/<change-id>/{proposal,design,tasks,specs/*/spec}.md`.
+   - Read [AGENTS.md](../AGENTS.md), [LESSONS.md](../LESSONS.md), and the card's OpenSpec Change artifacts.
 4. **Create an isolated Git Worktree (NEVER modify clean `main` clones)**:
    - Run the exact `worktree_command` printed by `next`, e.g.:
-     `git -C ../respire worktree add ../.worktrees/<card-id>/respire -b feat/<card-id>`
+     `git worktree add ../.worktrees/<card-id>/respire -b feat/<card-id>`
    - NEVER commit feature work into legacy `respire-runtime`, `respire-cli`, `respire-client2` repos.
 5. **Implement atomically & run local gates**:
    - Keep code files **≤ 600 lines**, OpenSpec `.md` files **≤ 400 lines**, Rust non-test code free of `.unwrap()`/`.expect()`, and **zero CJK characters outside UI i18n paths**.
-   - Run `node process/scripts/validate-openspec.mjs` (in `respire-resources`) and `node scripts/check-guardrails.mjs` (in `respire`) plus component unit tests.
+   - Run `node process/scripts/validate-openspec.mjs` and `node scripts/check-guardrails.mjs` from the worktree root, plus affected component tests.
 6. **Open a Milestone-linked PR & hand off to an independent Verifier**:
    - Attach the **exact GitHub Milestone** from the card, include **`Fixes <owner/repo>#<issue>`** in the PR body, and paste real command outputs.
    - Run `node process/scripts/respire-process.mjs mark-verify <CARD-XXX>` to move the Issue from `agent:in-progress` to `agent:verify`.
@@ -56,10 +56,9 @@ All working clones live under `D:\sources\repos-new\gh\1memory\`:
 
 1. **Discover open PRs awaiting review deterministically**:
    ```sh
-   cd respire-resources
    node process/scripts/respire-process.mjs review-next
    ```
-   - Scans `risense-ai/respire-resources`, `risense-ai/respire`, and `risense-ai/respire-core` for non-draft open PRs lacking a fresh `<!-- respire-verdict: ... head=<sha> -->` marker matching the current PR head SHA (prioritizing `agent:verify` cards and passing CI).
+   - Scans `risense-ai/respire` and `risense-ai/respire-core` for non-draft open PRs lacking a fresh `<!-- respire-verdict: ... head=<sha> -->` marker matching the current PR head SHA (prioritizing `agent:verify` cards and passing CI).
    - If `review-next` exits with code `2`, **STOP immediately** (no PRs require review).
 2. **Audit read-only & publish structured verdict**:
    - Inspect diff, `ci-gate`/`validate-openspec`/`check-guardrails` checks, linked OpenSpec scenarios, UI Preview artifacts, and `test-cases/` outputs without editing product code or Issues.
@@ -83,9 +82,4 @@ An Agent MUST halt immediately and report to the Maintainer if:
 
 ## 4. Ready-to-Copy One-Line Dispatch Prompts
 
-Full role cheat sheet in **[../process/roles/oneline.md](../process/roles/oneline.md)** or via `node process/scripts/respire-process.mjs roles --one-line`:
-
-- **Autonomous Implementer**:
-  > Read `respire-resources/AGENTS.md` and `respire-resources/openspec/AGENT_EXECUTION_GUIDE.md`. Inside `respire-resources`, run `node process/scripts/respire-process.mjs next`. If it exits with code 2, stop and report the blocker. Otherwise claim the card, create a worktree under `../.worktrees/`, implement strictly in English (no CJK outside UI i18n), pass local guardrails/tests, open a Milestone-linked PR with `Fixes <repo>#<num>`, and run `mark-verify`. Do not self-verify.
-- **Independent Read-Only Verifier (fresh session)**:
-  > You are the read-only Verifier (`respire-resources/process/roles/verifier.md`). Modify no code or Issues. Run `node process/scripts/respire-process.mjs review-next` (stop on exit 2), inspect the PR diff, CI checks, matching OpenSpec scenarios, and `test-cases/` outputs, then run `post-verdict <owner/repo#pr> --verdict <PASS|CONDITIONAL|REJECT> --summary "<concrete evidence>"` (mark unavailable checks `UNTESTED`).
+See the [role prompts](../process/roles/oneline.md) or run `node process/scripts/respire-process.mjs roles --one-line` from the repository root.

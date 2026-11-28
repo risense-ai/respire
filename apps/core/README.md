@@ -28,8 +28,8 @@ an extension in a DTO does not authorize its semantics during validation.
 Runtime links Core directly through Cargo. No private Core SDK tarball or
 cache helper remains in Core or the shared scripts directory. The public
 model-fixture preparation script is test infrastructure, not SDK acquisition.
-The frozen ABI contract is unchanged; contract documentation updates must
-originate in `respire-resources` and be synchronized separately.
+The [Core ABI contract](../../contracts/core-abi/README.md) is maintained in
+this repository. Govern interface changes through `openspec/`.
 
 Run verification from the monorepo root:
 

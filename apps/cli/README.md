@@ -36,4 +36,4 @@ Read results from stdout. Clients already configured for Runtime MCP over
 loopback can use `POST /mcp` with existing authentication instead. Neither
 method requires passing note or query content as process arguments, avoiding
 Windows command-line size and quoting limits. For the complete compatibility
-rules, see the [Runtime migration playbook](https://github.com/risense-ai/respire-resources/blob/main/contracts/OPENAPI_MIGRATION_PLAYBOOK.md).
+rules, see the [Runtime migration playbook](../../contracts/OPENAPI_MIGRATION_PLAYBOOK.md).
