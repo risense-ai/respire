@@ -1,11 +1,13 @@
 #!/usr/bin/env node
-// Zero-dependency OpenSpec, OpenAPI 3.1, doc-link anchor, script line-cap, and Zero-CJK policy validator.
+// Zero-dependency OpenSpec, OpenAPI 3.1, relative link, line-cap, and Zero-CJK validator.
 
 import fs from "node:fs";
 import path from "node:path";
 
 const root = process.cwd();
 const errors = [];
+const governanceDirs = ["openspec", "contracts", "prototypes", "test-cases", "process"];
+const governanceDocs = ["AGENTS.md", "LESSONS.md", "README.md"];
 
 const CJK_REGEX = /[\u3000-\u303F\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF\uFF00-\uFFEF]/;
 const I18N_EXEMPT_REGEXES = [
@@ -48,15 +50,22 @@ function isExemptI18nPath(relUnix) {
   return I18N_EXEMPT_REGEXES.some((re) => re.test(relUnix));
 }
 
+function governanceFiles(predicate, skipArchive = false) {
+  const docs = governanceDocs.filter(predicate).map((name) => path.join(root, name))
+    .filter((file) => fs.existsSync(file));
+  return governanceDirs.flatMap((dir) => walkFiles(path.join(root, dir), predicate, [], skipArchive))
+    .concat(docs);
+}
+
 function stripCodeBlocksAndSpans(mdText) {
-  let out = mdText.replace(/```[\s\S]*?```/g, "");
-  out = out.replace(/`[^`\r\n]*`/g, "");
-  return out;
+  const fences = /^ {0,3}((`|~)\2{2,})(?!\2)[^\r\n]*\r?\n[\s\S]*?(?:^ {0,3}\1\2*[ \t]*\r?$|(?![\s\S]))/gm;
+  return mdText.replace(fences, "\n").replace(/(?<!`)(`+)(?!`)[\s\S]*?(?<!`)\1(?!`)/g, " ");
 }
 
 // 1. Core governance files
 checkExists("AGENTS.md");
 checkExists("LESSONS.md");
+checkExists("README.md");
 checkExists("openspec/config.yaml");
 checkExists("openspec/ROADMAP.md");
 
@@ -132,7 +141,7 @@ for (const md of mdFiles) {
 }
 
 // 5. Strict Zero-CJK scan outside UI i18n paths
-const textFiles = walkFiles(root, (n) => TEXT_EXTENSIONS.has(path.extname(n).toLowerCase()) || n === ".gitattributes" || n === ".gitignore");
+const textFiles = governanceFiles((name) => TEXT_EXTENSIONS.has(path.extname(name).toLowerCase()) || name === ".gitattributes" || name === ".gitignore");
 for (const file of textFiles) {
   const relUnix = path.relative(root, file).replace(/\\/g, "/");
   if (isExemptI18nPath(relUnix)) continue;
@@ -145,22 +154,25 @@ for (const file of textFiles) {
   }
 }
 
-// 6. Markdown relative link / file anchor integrity across non-archive docs
-const allNonArchiveMd = walkFiles(root, (n) => n.endsWith(".md"), [], true);
-const linkRe = /\[[^\]]*\]\(([^)]+)\)/g;
+// 6. Markdown relative links in governance docs may point anywhere in the monorepo.
+const allNonArchiveMd = governanceFiles((name) => /\.md$/i.test(name), true);
+const linkRe = /\[[^\]\r\n]*\]\(\s*(?:<([^>\r\n]+)>|((?:[^\s()]|\([^()\r\n]*\))+))(?:[ \t]+(?:"[^"\r\n]*"|'[^'\r\n]*'|\([^()\r\n]*\)))?\s*\)/g;
 for (const mdFile of allNonArchiveMd) {
   const relDoc = path.relative(root, mdFile).replace(/\\/g, "/");
   const stripped = stripCodeBlocksAndSpans(fs.readFileSync(mdFile, "utf8"));
   for (const match of stripped.matchAll(linkRe)) {
-    const rawTarget = match[1].trim().split(/\s+/)[0];
-    if (!rawTarget || /^(https?:|mailto:|file:|#)/i.test(rawTarget)) continue;
-    if (/[<>*{}]/.test(rawTarget)) continue;
-    const cleanTarget = rawTarget.split("#")[0].split("?")[0];
+    const rawTarget = match[1] ?? match[2];
+    if (/^(?:[a-z][a-z\d+.-]*:|\/\/)/i.test(rawTarget)) continue;
+    const cleanTarget = rawTarget.split(/[?#]/, 1)[0];
     if (!cleanTarget) continue;
-    const resolved = path.resolve(path.dirname(mdFile), cleanTarget);
-    if (!fs.existsSync(resolved)) {
-      errors.push(`Broken Markdown link in ${relDoc}: (${rawTarget})`);
+    try {
+      const target = decodeURIComponent(cleanTarget);
+      const resolved = target.startsWith("/") ? path.resolve(root, `.${target}`) : path.resolve(path.dirname(mdFile), target);
+      if (fs.existsSync(resolved)) continue;
+    } catch (error) {
+      if (!(error instanceof URIError)) throw error;
     }
+    errors.push(`Broken Markdown link in ${relDoc}: (${rawTarget})`);
   }
 }
 

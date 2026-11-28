@@ -230,7 +230,7 @@ test("verify-merge and evidence validation read only exact merge data through th
     const repo = "risense-ai/respire-resources";
     const scenario = process.env.SCENARIO;
     child.execFileSync = (file, args) => {
-      if (file !== "gh" || args[0] !== "api" || args.length > 3 || args.includes("-X")) {
+      if (file !== "gh" || args[0] !== "api" || args.length > 4 || args.includes("-X")) {
         throw Error("unexpected operation");
       }
       const endpoint = args.at(-1);
@@ -240,8 +240,13 @@ test("verify-merge and evidence validation read only exact merge data through th
         body: scenario === "ambiguous" ? "Part of #7" : "Fixes #7",
         html_url: "https://github.com/" + repo + "/pull/10"
       });
-      if (endpoint.includes("/issues?")) return JSON.stringify(endpoint.startsWith("repos/" + repo + "/")
-        ? [{ number: 7, state: "open", body: "<!-- respire-card\\nid: CARD-020\\nchange: 006\\nmilestone: M6\\n-->" }] : []);
+      if (endpoint.startsWith("repos/" + repo + "/issues?state=closed")) return JSON.stringify([[
+        { number: 7, state: "closed", body: "<!-- respire-card\\nid: CARD-020\\nchange: 006\\nmilestone: M6\\n-->" }
+      ]]);
+      if (endpoint.startsWith("repos/risense-ai/respire/issues?state=all")) return JSON.stringify([[
+        { number: 8, state: "open", labels: [{ name: "spec:approved" }],
+          body: "<!-- respire-card\\nid: CARD-021\\nchange: 007\\nmilestone: M7\\ndepends_on: [risense-ai/respire-resources#7]\\n-->" }
+      ]]);
       if (endpoint.includes("/issues/7/comments")) return "[]";
       if (endpoint.includes("/issues/10/comments")) return JSON.stringify([{
         body: "<!-- respire-verdict: PASS head=" + sha + " -->", user: { login: "luodaoyi" }
@@ -265,6 +270,10 @@ test("verify-merge and evidence validation read only exact merge data through th
   assert.throws(() => run("wrong-merge", ...validate), /Expected one exact merge/);
   assert.throws(() => run("ambiguous", ...validate), /Expected one explicit card/);
   assert.match(run("valid", "verify-merge", repo + "#10"), /READY_TO_MERGE/);
+  const next = JSON.parse(run("valid", "next", "--json"));
+  assert.equal(next.ref, "risense-ai/respire#8");
+  assert.equal(next.worktree_command, "git worktree add ../.worktrees/card-021/respire -b feat/card-021");
+  assert.equal(next.all_ready[0].worktree_command, next.worktree_command);
   assert.throws(() => run("gate-only", "verify-merge", repo + "#10"), (err) =>
     err.status === 2 && err.stdout.includes("no CI checks reported"));
 });
@@ -307,19 +316,16 @@ test("nightly report combines snapshots and keeps one stable draft per lesson ac
   const repos = ["resources", "product"].map((name) => path.join(dir, name));
   const git = (cwd, ...args) => execFileSync("git", ["-c", "user.name=Fixture", "-c",
     "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false", ...args], { cwd, stdio: "pipe" });
-  for (const repo of repos) {
-    fs.mkdirSync(repo);
-    git(repo, "init", "-q");
-    git(repo, "commit", "--allow-empty", "-qm", "initial");
-  }
+  fs.mkdirSync(repos[0]);
+  git(repos[0], "init", "-q");
+  git(repos[0], "commit", "--allow-empty", "-qm", "initial");
   const fix = (repo, title) => git(repo, "commit", "--allow-empty", "-qm", "fix: " + title, "-m", "Lesson: L-001");
   const report = () => execFileSync(process.execPath, [path.join(ROOT, "process/scripts/nightly-lessons.mjs"),
     ...repos], { cwd: dir, encoding: "utf8" });
   fix(repos[0], "first");
   // The same commit object exists in both first-parent histories.
   const shared = git(repos[0], "rev-parse", "HEAD").toString().trim();
-  git(repos[1], "fetch", repos[0], "HEAD");
-  git(repos[1], "checkout", "--detach", shared);
+  fs.cpSync(repos[0], repos[1], { recursive: true });
   fix(repos[1], "second");
   assert.deepEqual(JSON.parse(report()).drafts, []);
   fix(repos[1], "third");

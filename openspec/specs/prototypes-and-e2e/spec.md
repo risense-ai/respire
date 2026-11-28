@@ -3,7 +3,7 @@
 ## Requirements
 
 ### Requirement: High-Fidelity HTML Prototypes as UI Truth Source
-Every new desktop screen or major interaction redesign MUST provide offline-interactive HTML prototypes under `respire-resources/prototypes/pages/` wired to deterministic `prototypes/mock-api/` scenarios before frontend implementation begins.
+Every new desktop screen or major interaction redesign MUST provide offline-interactive HTML prototypes under `prototypes/pages/` wired to deterministic `prototypes/mock-api/` scenarios before frontend implementation begins.
 
 #### Scenario: Reviewing a redesigned Models page
 - **GIVEN** an OpenSpec Change proposes modifying the Client2 Models page
@@ -11,7 +11,7 @@ Every new desktop screen or major interaction redesign MUST provide offline-inte
 - **THEN** the prototype SHALL interactively demonstrate downloading, SSE progress, failed rollback, and online uninstall states
 
 ### Requirement: Out-of-Repo Black-Box E2E & Windows Regression Suite
-`respire-resources/test-cases/` MUST verify compiled `apps/runtime`, `apps/cli`, `apps/client2`, and plugin HTTP/MCP workflows independently of implementation repositories, including Windows-specific edge cases.
+`test-cases/` MUST verify compiled `apps/runtime`, `apps/cli`, `apps/client2`, and plugin HTTP/MCP workflows as black-box tests, including Windows-specific edge cases.
 
 #### Scenario: Windows large UTF-8 plugin payload regression
 - **GIVEN** compiled `rsrs-runtime` and `rsrs` binaries running on Windows

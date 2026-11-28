@@ -2,13 +2,13 @@
 // Idempotent initializer and status synchronizer for the risense-ai organization GitHub Project v2 board.
 // Usage:
 //   node process/scripts/sync-project-board.mjs         # Dry-run & token scope check
-//   node process/scripts/sync-project-board.mjs --apply # Create/reuse Project & sync all M1-M6 Issues
+//   node process/scripts/sync-project-board.mjs --apply # Create/reuse Project & sync monorepo cards
 
 import { execFileSync } from "node:child_process";
+import { ACTIVE_CARD_REPO, fetchAllCards } from "./lib/cards.mjs";
 
 const OWNER = "risense-ai";
 const PROJECT_TITLE = "Respire Transformation (001-006)";
-const REPOS = ["risense-ai/respire-resources", "risense-ai/respire"];
 const apply = process.argv.includes("--apply");
 
 function runGh(args, allowFail = false) {
@@ -93,39 +93,23 @@ const statusOptByName = new Map(
   (statusField?.options || []).map((o) => [o.name.toLowerCase(), o.id])
 );
 
-function targetStatusName(issue) {
-  if (issue.state === "closed") return "Done";
-  const labels = new Set((issue.labels || []).map((l) => l.name));
-  if (labels.has("agent:in-progress") || labels.has("agent:verify")) return "In Progress";
+function targetStatusName(card) {
+  if (card.state === "closed") return "Done";
+  if (card.labels.has("agent:in-progress") || card.labels.has("agent:verify")) return "In Progress";
   return "Todo";
 }
 
 let added = 0;
 let updated = 0;
 
-for (const repo of REPOS) {
-  const issuesJson = runGh(["api", "--paginate", `repos/${repo}/issues?state=all&per_page=100`]).out;
-  const issues = JSON.parse(issuesJson).filter(
-    (i) => !i.pull_request && /<!--\s*respire-card\b/.test(i.body || "")
-  );
-
-  for (const issue of issues) {
-    if (!existingUrls.has(issue.html_url)) {
-      if (!apply) {
-        console.log(`[dry-run] Would add ${repo}#${issue.number} (${issue.title})`);
-      } else {
-        runGh([
-          "project",
-          "item-add",
-          String(project.number),
-          "--owner",
-          OWNER,
-          "--url",
-          issue.html_url,
-        ]);
-        added += 1;
-      }
-    }
+const { cards } = fetchAllCards((args) => runGh(args).out, [ACTIVE_CARD_REPO]);
+for (const card of cards) {
+  if (existingUrls.has(card.url)) continue;
+  if (apply) {
+    runGh(["project", "item-add", String(project.number), "--owner", OWNER, "--url", card.url]);
+    added += 1;
+  } else {
+    console.log(`[dry-run] Would add ${card.ref} (${card.title})`);
   }
 }
 
@@ -145,20 +129,12 @@ if (apply && statusField && project.id) {
       ]).out
     ).items || [];
 
-  const allIssuesByUrl = new Map();
-  for (const repo of REPOS) {
-    const issues = JSON.parse(
-      runGh(["api", "--paginate", `repos/${repo}/issues?state=all&per_page=100`]).out
-    );
-    for (const iss of issues) {
-      if (!iss.pull_request) allIssuesByUrl.set(iss.html_url, iss);
-    }
-  }
+  const cardsByUrl = new Map(cards.map((card) => [card.url, card]));
 
   for (const item of refreshed) {
-    const iss = allIssuesByUrl.get(item.content?.url);
-    if (!iss) continue;
-    const wantName = targetStatusName(iss);
+    const card = cardsByUrl.get(item.content?.url);
+    if (!card) continue;
+    const wantName = targetStatusName(card);
     const wantOptId = statusOptByName.get(wantName.toLowerCase());
     if (!wantOptId || item.status === wantName) continue;
     runGh([

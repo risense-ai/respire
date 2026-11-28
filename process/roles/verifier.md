@@ -7,8 +7,8 @@
 ## Four-Step Audit Protocol
 
 0. **Self-Dispatch Queue Discovery**:
-   - Run `node process/scripts/respire-process.mjs review-next` inside `respire-resources/`.
-   - It scans `risense-ai/respire-resources`, `risense-ai/respire`, and `risense-ai/respire-core` for open non-draft PRs lacking a verdict comment matching the current head SHA. Stop immediately if it exits with code `2`.
+   - Run `node process/scripts/respire-process.mjs review-next` from the `risense-ai/respire` root.
+   - It scans `risense-ai/respire` and `risense-ai/respire-core` for open non-draft PRs lacking a verdict comment matching the current head SHA. Stop if it exits with code `2`.
 1. **Scope & Guardrail Audit**:
    - Confirm the PR stays strictly within its target OpenSpec Change and card scope;
    - Verify `validate-openspec.mjs`, `check-guardrails.mjs` (including Zero-CJK), `oasdiff`, and `ci-gate` all succeeded.
@@ -16,7 +16,7 @@
    - For Runtime API changes, verify `openapi.yaml` matches registered routes and legacy compatibility holds;
    - For Client2 UI changes, inspect PR UI Preview screenshots and MP4 demos (`en` and `zh`) against `prototypes/pages/`.
 3. **Black-Box E2E Execution**:
-   - Run relevant scenarios in `respire-resources/test-cases/`;
+   - Run relevant scenarios in the monorepo's `test-cases/`;
    - Confirm Windows regression coverage whenever paths, CLI/MCP payloads, or installers are affected.
 4. **Emit & Publish Structured Verdict**:
    - **PASS**: All requirements backed by concrete logs, commands, or preview artifacts;

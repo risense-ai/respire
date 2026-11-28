@@ -44,7 +44,7 @@
 ### L-006: Non-English Text Drifting into Docs, Scripts, and Comments
 - **Symptom**: Mixed-language prose made repository instructions harder to follow and reviews less consistent.
 - **Root Cause**: No automated scanner prevented non-English prose from being committed outside UI i18n resources.
-- **Guardrail Target (`001` / `004`)**: Enforce Zero-CJK scanning across both `respire-resources` and `respire`, exempting only UI i18n paths.
+- **Guardrail Target (`001` / `004`)**: Enforce Zero-CJK across the monorepo through the OpenSpec validator for governance files and monorepo guardrails for product code. Exempt only UI i18n paths.
 - **Status**: Active in `validate-openspec.mjs` and `check-guardrails.mjs`.
 
 ### L-007: Audit Closeout Is Not Publication

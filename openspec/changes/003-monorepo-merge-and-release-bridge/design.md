@@ -7,7 +7,7 @@ risense-ai/respire/
 ├── .github/workflows/
 │   ├── ci.yml                # detect-changes -> core/runtime/cli/client2 CI -> ci-gate
 │   ├── verify.yml            # guardrails / Zero-CJK / sync.lock.json checks
-│   ├── e2e.yml               # cross-app E2E from respire-resources/test-cases
+│   ├── e2e.yml               # cross-app E2E from the governance test suite
 │   └── release.yml           # component-prefixed tag builds + legacy/NPM Release Fan-Out
 ├── apps/
 │   ├── core/                 # Independent Cargo.toml + Cargo.lock (open-source pure engine)

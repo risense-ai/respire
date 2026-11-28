@@ -22,7 +22,7 @@ With the decision to **open-source `respire-core`** alongside the three open-sou
 
 ## 3. Non-Goals
 
-- Does not fold `respire-resources` into `risense-ai/respire` (SSOT specs/prototypes/E2E stay separate).
+- The original product import left governance assets in `respire-resources`. A later consolidation moved them into `risense-ai/respire`.
 - Does not delete legacy GitHub Releases or static assets (`model-bge-m3-ort-v1`).
 - Does not flip legacy `risense-ai/respire-core` visibility to public; audited Core source is published under **Respire Noncommercial License 1.0** (preserving third-party notices) in `risense-ai/respire/apps/core/` after `CARD-002`, while legacy `respire-core` stays private archive.
 

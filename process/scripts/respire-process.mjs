@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Deterministic multi-agent workflow scheduler & gate CLI (modeled on ShiningRay/sebas-process, Fail-Closed).
+// Deterministic workflow scheduler and fail-closed gate CLI.
 // Exit codes:
 //   0 = Success / READY card selected
 //   1 = Invalid args, missing metadata, or check error (Fail-Closed)
@@ -9,7 +9,7 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { classifyCard, fetchAllCards as fetchAllCardsFromApi } from "./lib/cards.mjs";
+import { ARCHIVED_CARD_REPO, classifyCard, fetchAllCards as fetchAllCardsFromApi } from "./lib/cards.mjs";
 import { auditLessons } from "./lib/lessons-audit.mjs";
 import { cmdArchiveNext, cmdEvidenceRegister, cmdReleaseCheck } from "./lib/lifecycle.mjs";
 import { cmdPostVerdict, cmdReviewNext, cmdVerifyMerge } from "./lib/pr-review.mjs";
@@ -110,15 +110,8 @@ function cmdNext(asJson) {
   }
 
   const chosen = ready[0].card;
-  const targetDir = chosen.meta.target_repo?.split("/")[1] || "respire";
-  const slug = chosen.meta.id.toLowerCase();
-  const worktreeCmd =
-    targetDir === "respire-resources"
-      ? `git worktree add ../.worktrees/${slug}/respire-resources -b feat/${slug}`
-      : `git -C ../${targetDir} worktree add ../.worktrees/${slug}/${targetDir} -b feat/${slug}`;
   const allReady = ready.map((r) => {
-    const tDir = r.card.meta.target_repo?.split("/")[1] || "respire";
-    const s = r.card.meta.id.toLowerCase();
+    const slug = r.card.meta.id.toLowerCase();
     return {
       card_id: r.card.meta.id,
       ref: r.card.ref,
@@ -126,10 +119,7 @@ function cmdNext(asJson) {
       title: r.card.title,
       milestone: r.card.milestone,
       target_repo: r.card.meta.target_repo,
-      worktree_command:
-        tDir === "respire-resources"
-          ? `git worktree add ../.worktrees/${s}/respire-resources -b feat/${s}`
-          : `git -C ../${tDir} worktree add ../.worktrees/${s}/${tDir} -b feat/${s}`,
+      worktree_command: `git worktree add ../.worktrees/${slug}/respire -b feat/${slug}`,
     };
   });
   const out = {
@@ -144,7 +134,7 @@ function cmdNext(asJson) {
     spec_dir: `openspec/changes/${chosen.meta.change}`,
     claim_command: `node process/scripts/respire-process.mjs claim ${chosen.ref}`,
     mark_verify_command: `node process/scripts/respire-process.mjs mark-verify ${chosen.meta.id}`,
-    worktree_command: worktreeCmd,
+    worktree_command: allReady[0].worktree_command,
     pr_requirements: [
       `Attach Milestone: ${chosen.milestone}`,
       `Include in PR body: Fixes ${chosen.ref}`,
@@ -221,7 +211,7 @@ function cmdMarkVerify(arg) {
 
 function cmdApproveMilestone(target) {
   if (!target) {
-    console.error("Usage: respire-process.mjs approve-milestone <M1|M2|M3|M4|M5|M6|all>");
+    console.error("Usage: respire-process.mjs approve-milestone <M1..M7|all>");
     process.exit(1);
   }
   const norm = target.toUpperCase();
@@ -290,9 +280,9 @@ function cmdRoles(args) {
         console.error(`Unknown role: ${roleName}`);
         process.exit(1);
       }
-      console.log(prompts[roleName]);
+      console.log(`Run commands from the risense-ai/respire root. ${prompts[roleName]}`);
     } else {
-      for (const [k, v] of Object.entries(prompts)) console.log(`[${k}] ${v}`);
+      for (const [k, v] of Object.entries(prompts)) console.log(`[${k}] Run commands from the risense-ai/respire root. ${v}`);
     }
     return;
   }
@@ -372,6 +362,11 @@ function cmdComplete(args) {
     process.exit(1);
   }
 
+  if (card.repo === ARCHIVED_CARD_REPO) {
+    console.error(`Refusing completion on read-only historical card ${card.ref}.`);
+    process.exit(1);
+  }
+
   const commentLines = [
     `Completed ${card.meta.id} (${card.ref}) under milestone \`${card.milestone}\`.`,
     prUrl ? `- Merged PR / Evidence: ${prUrl}` : "- Verified and closed via `respire-process.mjs complete`.",
@@ -423,37 +418,22 @@ function cmdPreflight() {
     failed = true;
   }
 
-  const filterRepoRes = tryExec("git", ["filter-repo", "--version"]);
-  if (filterRepoRes.ok) {
-    console.log(`  [OK]   git-filter-repo: ${filterRepoRes.out}`);
-  } else {
-    console.log("  [WARN] git-filter-repo not found (required in M3; install via: pip install --user git-filter-repo)");
-  }
-
   const parentDir = path.dirname(ROOT);
-  const siblings = ["respire", "respire-core", "respire-runtime", "respire-cli", "respire-client2"];
-  const missingClones = [];
-  console.log(`Workspace root: ${parentDir}`);
+  const siblings = ["respire-resources", "respire-core", "respire-runtime", "respire-cli", "respire-client2"];
+  console.log(`Repository root: ${ROOT}`);
   for (const name of siblings) {
-    const dir = path.join(parentDir, name);
-    if (fs.existsSync(path.join(dir, ".git"))) {
-      console.log(`  [OK]   sibling repo present: ${name}`);
-    } else {
-      console.log(`  [MISS] sibling repo missing: ${name}`);
-      missingClones.push(`git clone https://github.com/risense-ai/${name}.git "${dir}"`);
-    }
-  }
-  if (missingClones.length > 0) {
-    console.log("\nClone missing sibling repos before starting cross-repo work:");
-    for (const cmd of missingClones) console.log(`  ${cmd}`);
+    const present = fs.existsSync(path.join(parentDir, name, ".git"));
+    console.log(`  [INFO] optional legacy sibling ${name}: ${present ? "present" : "absent"}`);
   }
 
-  const valRes = tryExec(process.execPath, [path.join(ROOT, "process", "scripts", "validate-openspec.mjs")]);
-  if (valRes.ok) {
-    console.log(`  [OK]   ${valRes.out}`);
-  } else {
-    console.error(`  [FAIL] validate-openspec.mjs failed:\n${valRes.err || valRes.out}`);
-    failed = true;
+  for (const script of ["process/scripts/validate-openspec.mjs", "scripts/check-guardrails.mjs"]) {
+    const result = tryExec(process.execPath, [script]);
+    if (result.ok) {
+      console.log(`  [OK]   ${script}\n${result.out}`);
+    } else {
+      console.error(`  [FAIL] ${script} failed:\n${[result.out, result.err].filter(Boolean).join("\n")}`);
+      failed = true;
+    }
   }
 
   if (failed) process.exit(1);
@@ -483,8 +463,8 @@ switch (cmd) {
     console.log([
       "Respire Process CLI - Deterministic Multi-Agent Orchestrator",
       "Usage: node process/scripts/respire-process.mjs <command> [options]",
-      "  preflight                                   Verify tools, gh auth & sibling clones",
-      "  status                                      Summarize M1-M6 Milestones and DAG cards",
+      "  preflight                                   Verify tools, gh auth & local guardrails",
+      "  status                                      Summarize Milestones and DAG cards",
       "  next [--json]                               Pick the single next READY card (Fail-Closed)",
       "  claim <CARD-XXX | owner/repo#num>           Lock card (+agent:in-progress)",
       "  mark-verify <CARD-XXX | ref>                Move card to agent:verify for review",
@@ -497,7 +477,7 @@ switch (cmd) {
       "  release-check <runtime|cli|client2> <X.Y.Z> Pre-tag main CI & manifest gate",
       "  complete <CARD-XXX | ref> [--pr <url>]      Close card, post evidence & sync DAG",
       "  sync                                        Refresh agent:ready labels & Project #1",
-      "  approve-milestone <M1..M6|all>              Maintainer milestone approval helper",
+      "  approve-milestone <M1..M7|all>              Maintainer milestone approval helper",
       "  roles [implementer|bugfixer|verifier|triager|scribe|release-manager] [--one-line]",
     ].join("\n"));
     if (cmd && cmd !== "help" && cmd !== "--help") process.exit(1);

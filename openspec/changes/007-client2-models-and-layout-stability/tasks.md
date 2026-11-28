@@ -1,11 +1,13 @@
 # Implementation Tasks
 
-## Resource Alignment
+All tasks use a `risense-ai/respire` worktree. Follow the [execution guide](../../AGENT_EXECUTION_GUIDE.md) and validate from the repository root.
+
+## Spec and Acceptance Alignment
 
 - [x] Draft the change package and update the roadmap.
 - [x] Extend OpenAPI, mock behavior, and the Models, Overview, and Onboarding prototypes.
 - [x] Add `E2E-008` and update existing model operation scenarios.
-- [ ] Record independent verification of OpenSpec, contract compatibility, mock parity, and resource E2E checks.
+- [ ] Record independent verification of OpenSpec, contract compatibility, mock parity, and `test-cases/` E2E checks.
 
 ## Product Implementation After Approval
 

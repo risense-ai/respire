@@ -1,6 +1,8 @@
 // Pure OpenSpec card metadata parsing, dependency DAG classification, and GitHub card fetching.
 
+// Read closed M1-M6 cards from the archived repository. Active cards live in risense-ai/respire.
 export const REPOS = ["risense-ai/respire-resources", "risense-ai/respire"];
+export const [ARCHIVED_CARD_REPO, ACTIVE_CARD_REPO] = REPOS;
 
 /** Parse the <!-- respire-card ... --> YAML-like block inside a GitHub Issue body. */
 export function parseCardMetadata(body) {
@@ -56,7 +58,8 @@ export function fetchAllCards(gh, repos = REPOS) {
   const byId = new Map();
 
   for (const repo of repos) {
-    const list = JSON.parse(gh(["api", "--paginate", `repos/${repo}/issues?state=all&per_page=100`]));
+    const state = repo === ARCHIVED_CARD_REPO ? "closed" : "all";
+    const list = JSON.parse(gh(["api", "--paginate", "--slurp", `repos/${repo}/issues?state=${state}&per_page=100`])).flat();
     for (const iss of list) {
       if (iss.pull_request) continue;
       const meta = parseCardMetadata(iss.body);

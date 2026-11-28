@@ -3,7 +3,7 @@
 ## Requirements
 
 ### Requirement: OpenAPI 3.1 as Sole Runtime External Contract
-`respire-resources/contracts/runtime-api/openapi.yaml` MUST serve as the sole machine-readable source of truth for `apps/runtime` HTTP REST and SSE APIs; typed client SDKs (`packages/runtime-sdk-{rs,go,ts}`) MUST be generated from it, and hand-written duplicate DTOs across apps are forbidden.
+[`contracts/runtime-api/openapi.yaml`](../../../contracts/runtime-api/openapi.yaml) MUST serve as the sole machine-readable source of truth for `apps/runtime` HTTP REST and SSE APIs. Typed client SDKs (`packages/runtime-sdk-{rs,go,ts}`) MUST be generated from it. Hand-written duplicate DTOs across apps are forbidden.
 
 #### Scenario: Adding or modifying a Runtime API field
 - **GIVEN** a Change requires a new Runtime request parameter or response field

@@ -1,37 +1,38 @@
-# CI, Regression Gates & How Sebas + Magpie Practices Land in Respire
+# CI and Regression Gates
 
-> Concrete engineering constraints ensuring Respire scales at high AI commit velocity without reverting into bloated codebases or brittle workflows.
-
----
-
-## 1. Borrowing Matrix: `ShiningRay/sebas` + `yetone/magpie` -> Respire
-
-| Proven Practice | Origin Repo | Exact Respire Implementation |
-| --- | --- | --- |
-| **Spec-first § specs + WBS/DAG** | `sebas` | `openspec/specs/` + `openspec/changes/001..006/` + 20 GitHub Issues with `<!-- respire-card -->` `depends_on` DAG |
-| **Deterministic lifecycle & review CLI** | `sebas` (`sebas-process`) | `process/scripts/respire-process.mjs` (`status`, `next`, `claim`, `mark-verify`, `review-next`, `post-verdict`, `verify-merge`, `evidence-register`, `archive-next`, `release-check`, `complete`, `approve-milestone`, Fail-Closed exit codes `0/1/2`) |
-| **Maker-Checker hard merge gate** | `sebas` (`Implementer` vs `Verifier`) | `process/roles/{implementer,verifier}.md` + `.github/agents.yml` allowlist + required `verdict-gate` status check + Auto-Merge + Bot `evidence-register.yml` |
-| **Trusted identity allowlist** | `sebas` (`.github/agents.yml`) | `.github/agents.yml` (`maintainers`, `trusted_bots`, optional `trusted_reviewers`, `enforce_distinct_reviewer`) |
-| **Single-file line cap + doc anchors** | `sebas` (`<=400` lines, anchor checks) | `validate-openspec.mjs` (`<=400` lines in `openspec/`, Markdown link/anchor verification, scripts `<=600` lines), `check-guardrails.mjs` (`<=600` lines/code file), `AGENTS.md` |
-| **Strict path-scoped CodeRabbit rules** | `sebas` (`.coderabbit.yaml`) | `process/templates/coderabbit.yaml` (`assertive`, blocking workflow, per-app Rust/Go/JS/Workflow rules, `en-US`) |
-| **Subsystem docs + semantic PR before/after** | `magpie` (`docs/subsystems/`) | `PULL_REQUEST_TEMPLATE.md` mandatory Before/After behavior + linked OpenSpec specs |
-| **PR automated UI Preview + Mock seeds** | `magpie` (`.github/ui-preview/`) | `prototypes/mock-api/` + privilege-separated `ui-preview.yml` (`detect -> record -> publish`) |
-| **Nightly `LESSONS.md` -> 3-strike CI tests** | `magpie` (`LESSONS.md` + parity tests) | `LESSONS.md` 3-strike policy -> automated `guardrail` Issues + route/CLI/i18n parity tests |
-| **Worktree isolation & shard fast CI** | `magpie` (`worktree --detach`, shards) | Mandatory `../.worktrees/<card>/<repo>` + `ci.yml` path-filtered `detect-changes` & `ci-gate` |
+Run local checks from the `risense-ai/respire` worktree root.
 
 ---
 
-## 2. Hard CI Gates Enforced on Every PR
+## 1. Engineering Practices
 
-| Repository | Workflow | Mandatory Gates |
-| --- | --- | --- |
-| **`respire-resources`** | `validate.yml` + `verdict-gate.yml` + `evidence-register.yml` | OpenSpec 4-artifact completeness, `MUST`/`SHALL` + `GIVEN`/`WHEN`/`THEN`, `<= 400`-line doc cap, doc link/anchor integrity, `respire-process.test.mjs`, Zero-CJK, required `verdict-gate` + post-merge `evidence-register` |
-| **`respire`** | `ci.yml` (`ci-gate`) + `verify.yml` | `detect-changes` path isolation; no root `Cargo.toml`; `apps/core` zero-I/O crates; `apps/cli` zero server crates; `apps/client2` zero SQLite drivers; `sync.lock.json` SHA-256 parity; `<= 5` workflows; Zero-CJK; `verdict-gate` + `evidence-register`; per-app unit tests |
-| **`respire`** *(E2E / Release)* | `e2e.yml` + `ui-preview.yml` + `release.yml` | 3-OS black-box E2E (`test-cases/`), Windows 100 KB+ UTF-8 & reparse-point checks, `en`/`zh` Playwright screenshots/MP4, component tag Fan-Out parity |
+| Practice | Implementation |
+| --- | --- |
+| Spec approval and card dependencies | `openspec/` and `<!-- respire-card -->` Issues with `depends_on` |
+| Dispatch and review | `node process/scripts/respire-process.mjs` and [role guides](roles/README.md) |
+| Independent verdict and merge evidence | `verdict-gate`, evidence registration, and the `.github/agents.yml` allowlist |
+| Worktree isolation and path-filtered CI | `../.worktrees/<card>/respire`, `detect-changes`, and `ci-gate` |
+| PR evidence and UI preview | [PR template](templates/PULL_REQUEST_TEMPLATE.md), `prototypes/mock-api/`, and UI preview artifacts |
+| Three-strike regression policy | [LESSONS.md](../LESSONS.md), `guardrail` Issues, and route, CLI, and i18n parity tests |
 
 ---
 
-A PR that completes a card must put a single directive such as `Closes #5` or `Fixes risense-ai/respire-resources#6` on the first body line, followed by a blank line before any explanation. Do not include other closing directives. Use `Part of #5` for prerequisite PRs, and avoid using closing keywords in prose (including negated examples). Review association may also use card names or branch names; automated completion never does.
+## 2. Validation Gates
+
+```sh
+node process/scripts/validate-openspec.mjs
+node scripts/check-guardrails.mjs
+node --test process/scripts/respire-process.test.mjs process/scripts/lessons-audit.test.mjs
+node --test prototypes/mock-api/*.test.mjs
+node test-cases/runner.test.mjs
+```
+
+The OpenSpec validator checks governance files, relative links, line limits,
+and the OpenAPI baseline. Monorepo guardrails enforce dependency boundaries,
+build isolation, and product code rules. CI verifies affected components,
+black-box E2E cases, UI previews, and release artifacts as applicable.
+
+A PR that completes a card must put one directive such as `Closes #5` or `Fixes risense-ai/respire#6` on the first body line, followed by a blank line. Use `Part of #5` for prerequisite PRs. Review can associate a PR with a card name or branch name. Automated completion requires the single closing directive.
 
 ## 3. Anti-Flake & Anti-Regression Discipline
 
