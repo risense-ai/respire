@@ -64,7 +64,7 @@ Legacy sibling checkouts are optional.
    - Inspect diff, `ci-gate`/`validate-openspec`/`check-guardrails` checks, linked OpenSpec scenarios, UI Preview artifacts, and `test-cases/` outputs without editing product code or Issues.
    - Publish verdict anchored to the exact head SHA:
      ```sh
-     node process/scripts/respire-process.mjs post-verdict <owner/repo#pr> --verdict <PASS|CONDITIONAL|REJECT> --summary "<concrete evidence>"
+     node process/scripts/respire-process.mjs post-verdict <owner/repo#pr> --head-sha <head-sha> --verdict <PASS|CONDITIONAL|REJECT> --summary "<concrete evidence>"
      ```
    - Before merging, Maintainers verify CI + fresh verdict parity with `node process/scripts/respire-process.mjs verify-merge <owner/repo#pr>`.
 

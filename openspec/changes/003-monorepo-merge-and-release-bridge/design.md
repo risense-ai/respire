@@ -2,6 +2,8 @@
 
 ## 1. Monorepo Directory & Isolation Layout
 
+This layout shows the initial `003` design, before the `respire-resources` consolidation removed `sync.lock.json` in favor of the local `contracts/runtime-api/openapi.yaml`.
+
 ```text
 risense-ai/respire/
 ├── .github/workflows/

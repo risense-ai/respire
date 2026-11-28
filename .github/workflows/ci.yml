@@ -99,7 +99,7 @@ jobs:
           if match_path '^(contracts/|packages/|\.github/workflows/ci\.yml$|scripts/check-guardrails\.mjs$|process/scripts/validate-runtime-fixtures\.mjs$)'; then
             contracts=true
           fi
-          if match_path '^(openspec/|prototypes/|test-cases/|process/|contracts/|scripts/e2e/|(AGENTS|LESSONS|README)\.md$|\.github/(agents\.yml$|ISSUE_TEMPLATE/|workflows/(ci|verify|lessons-audit)\.yml$))'; then
+          if match_path '^(openspec/|prototypes/|test-cases/|process/|contracts/|scripts/(e2e|pr-preview)/|(AGENTS|LESSONS|README)\.md$|\.github/(agents\.yml$|ISSUE_TEMPLATE/|workflows/(ci|e2e|verify|lessons-audit)\.yml$))'; then
             resources=true
           fi
 
@@ -200,9 +200,17 @@ jobs:
           oasdiff validate "$spec" --allow-external-refs=false --fail-on INFO
           oasdiff flatten "$spec" --allow-external-refs=false --format json > "$RUNNER_TEMP/flattened.json"
           node process/scripts/validate-runtime-fixtures.mjs "$RUNNER_TEMP/flattened.json"
-          if [[ "$BASE_SHA" =~ ^[0-9a-fA-F]{40}$ && ! "$BASE_SHA" =~ ^0{40}$ ]] &&
-             git cat-file -e "$BASE_SHA:$spec" 2>/dev/null; then
-            git show "$BASE_SHA:$spec" > "$tmp/base.yaml"
+          base_sha="$BASE_SHA"
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && -z "$base_sha" ]]; then
+            base_sha="$(git rev-parse --verify HEAD^ 2>/dev/null || true)"
+          fi
+          if [[ "$GITHUB_EVENT_NAME" == pull_request ]]; then
+            [[ "$base_sha" =~ ^[0-9a-fA-F]{40}$ && ! "$base_sha" =~ ^0{40}$ ]]
+            git show "$base_sha:$spec" > "$tmp/base.yaml"
+            oasdiff breaking "$tmp/base.yaml" "$spec" --allow-external-refs=false --fail-on ERR
+          elif [[ "$base_sha" =~ ^[0-9a-fA-F]{40}$ && ! "$base_sha" =~ ^0{40}$ ]] &&
+               git cat-file -e "$base_sha:$spec" 2>/dev/null; then
+            git show "$base_sha:$spec" > "$tmp/base.yaml"
             oasdiff breaking "$tmp/base.yaml" "$spec" --allow-external-refs=false --fail-on ERR
           fi
 
@@ -632,11 +640,22 @@ jobs:
             local name="$1"
             shift
             local result="${!name}"
+            local flag needed=false
+            for flag in "$@"; do
+              case "$flag" in
+                true) needed=true ;;
+                false) ;;
+                *)
+                  echo "::error::Invalid detector flag '$flag' for $name"
+                  exit 1
+                  ;;
+              esac
+            done
             echo "$name=$result"
-            if [[ "$result" == success || ( "$result" == skipped && " $* " != *" true "* ) ]]; then
+            if [[ "$result" == success || ( "$result" == skipped && "$needed" == false ) ]]; then
               return
             fi
-            echo "::error::Gate failed because $name ended with '$result'"
+            echo "::error::Gate failed because $name ended with '$result' (needed=$needed)"
             exit 1
           }
           check_job DETECT true
