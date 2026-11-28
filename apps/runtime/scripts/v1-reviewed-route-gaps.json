@@ -1,1 +1,4 @@
-[]
+[
+  "POST /v1/models/delete deleteModelWeight",
+  "POST /v1/models/probe probeModel"
+]

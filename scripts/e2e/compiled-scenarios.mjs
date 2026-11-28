@@ -1,15 +1,14 @@
-// The pinned referee owns every request, assertion, executable and process lifetime.
 import assert from 'node:assert/strict';
 import {channel} from 'node:diagnostics_channel';
-import {loadScenarios, runScenario} from '../../referee/test-cases/runner.mjs';
-import {withRuntime} from '../../referee/test-cases/targets.mjs';
-import {mcpRoundTrip} from '../../referee/test-cases/plugin-rpc/mcp.mjs';
-import {cliTarget} from '../../referee/test-cases/cli-e2e/command.mjs';
+import {loadScenarios, runScenario} from '../../test-cases/runner.mjs';
+import {withRuntime} from '../../test-cases/targets.mjs';
+import {mcpRoundTrip} from '../../test-cases/plugin-rpc/mcp.mjs';
+import {cliTarget} from '../../test-cases/cli-e2e/command.mjs';
 import {prepareRecall, prepareSwitch, settledSwitchTarget} from './switch-fixture.mjs';
 import {runDownload} from './download-fixture.mjs';
 import {verifyPluginTransport} from './plugin-transport.mjs';
 
-// The frozen referee reports "HTTP status mismatch" without the received status.
+// The scenario runner reports "HTTP status mismatch" without the received status.
 channel('undici:request:headers').subscribe(({request, response}) => {
   if (request.method === 'POST' && request.path === '/v1/models/switch') {
     console.log('Model switch admission: expected HTTP 202, received ' + response.statusCode);
@@ -17,8 +16,9 @@ channel('undici:request:headers').subscribe(({request, response}) => {
 });
 
 const [binary, cli, downloadBinary] = process.argv.slice(2);
-const scenarios = await loadScenarios();
-assert.deepEqual(scenarios.map(s => s.id), Array.from({length:7}, (_,n) => 'E2E-00'+(n+1)));
+const compiledIds = ['E2E-001', 'E2E-002', 'E2E-003', 'E2E-004', 'E2E-005', 'E2E-006', 'E2E-007'];
+const scenarios = (await loadScenarios()).filter(scenario => compiledIds.includes(scenario.id));
+assert.deepEqual(scenarios.map(scenario => scenario.id), compiledIds);
 let passed = 0;
 let skipped = 0;
 for (const scenario of scenarios) {

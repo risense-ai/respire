@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { cjkProjection, scanCjk } from "./check-zero-cjk.mjs";
 
@@ -37,6 +38,25 @@ test("unknown binary and text disguised as asset still fail", () => {
   assert.match(scanCjk([[png, bytes(original)]], new Map()).reports[0], /unreviewed CJK text/);
   assert.match(scanCjk([["src/code.rs", Buffer.from([255, 0, 1])]], new Map()).reports[0], /malformed UTF-8/);
   assert.match(scanCjk([[png, Buffer.from([255, 0, 1])]], new Map()).reports[0], /unclassified binary/);
+});
+
+test("accepts only exact SQLite fixture bytes at their reviewed paths", () => {
+  for (const fixture of ["comprehensive-synthetic.db", "respire-1x-synthetic.db"]) {
+    const path = "test-cases/fixtures/db/" + fixture;
+    const database = readFileSync(new URL("../" + path, import.meta.url));
+    const reviewed = new Map();
+    assert.deepEqual(scanCjk([[path, database]], reviewed), {
+      reports: [], textFiles: 0, assets: 1, reviewed: 0,
+    });
+
+    const modified = Buffer.from(database);
+    modified[modified.length - 1] ^= 1;
+    for (const invalid of [modified, database.subarray(0, -1), Buffer.alloc(database.length),
+      bytes("plain ascii"), bytes(original)]) {
+      assert.match(scanCjk([[path, invalid]], reviewed).reports[0], /unclassified binary/);
+    }
+    assert.match(scanCjk([["test-cases/fixtures/db/copy.db", database]], reviewed).reports[0], /unclassified binary/);
+  }
 });
 
 test("publisher path does not exempt text in SVG badge comments", () => {

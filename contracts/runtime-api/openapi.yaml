@@ -4,7 +4,7 @@ info:
   version: 1.0.0-draft
   summary: Canonical REST + SSE contract for respire-runtime, respire-cli, respire-client2, and plugins.
   description: |
-    Canonical OpenAPI 3.1 contract for Respire Runtime (see openspec/changes/002-runtime-openapi-v1-migration).
+    Canonical OpenAPI 3.1 contract for Respire Runtime (see openspec/specs/runtime-api/spec.md).
     All clients and plugins MUST negotiate features via /v1/health capabilities rather than comparing version strings.
     Health discovery does not require credentials. Send the discovered Runtime-local Bearer token for protected operations.
     Existing operation security annotations remain unchanged for compatibility; new backup operations declare localBearer.
@@ -435,6 +435,7 @@ paths:
       operationId: startModelDownload
       tags: [models]
       summary: Start Runtime-managed streaming model download without stopping Runtime
+      description: Download the selected variant using the requested mirror or the configured mirror.
       requestBody:
         required: true
         content:
@@ -450,6 +451,80 @@ paths:
                 $ref: "#/components/schemas/OperationAccepted"
         "409":
           description: Conflicting operation in progress
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetails"
+        default:
+          $ref: "#/components/responses/RuntimeProblem"
+
+  /v1/models/probe:
+    post:
+      operationId: probeModel
+      tags: [models]
+      summary: Probe installed candidate weights
+      description: Load a candidate and run sample inference without changing the serving model or index.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ModelProbeRequest"
+      responses:
+        "200":
+          description: Candidate load and inference probe result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelProbeResponse"
+        "400":
+          description: Invalid model, variant, or engine
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetails"
+        "404":
+          description: Candidate weights not installed
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetails"
+        default:
+          $ref: "#/components/responses/RuntimeProblem"
+
+  /v1/models/delete:
+    post:
+      operationId: deleteModelWeight
+      tags: [models]
+      summary: Delete downloaded non-active weights
+      description: Remove an installed variant while protecting serving weights and weights targeted by running downloads or switches.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeleteModelWeightRequest"
+      responses:
+        "200":
+          description: Non-active model weights removed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeleteModelWeightResponse"
+        "400":
+          description: Invalid model or variant
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetails"
+        "404":
+          description: Model weights not installed
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetails"
+        "409":
+          description: Active or in-flight model weights cannot be deleted
           content:
             application/problem+json:
               schema:
@@ -1408,6 +1483,16 @@ components:
           type: string
         legacy:
           type: boolean
+        dimensions:
+          type: integer
+        max_tokens:
+          type: integer
+        default_variant:
+          type: string
+        variants:
+          type: array
+          items:
+            $ref: "#/components/schemas/ModelVariantInfo"
         engines:
           type: array
           items:
@@ -1418,6 +1503,10 @@ components:
       required: [active_model_id, models]
       properties:
         active_model_id:
+          type: string
+        active_variant:
+          type: string
+        active_engine:
           type: string
         models:
           type: array
@@ -1458,6 +1547,98 @@ components:
           type: string
         mirror:
           type: string
+        variant:
+          type: string
+
+    ModelVariantInfo:
+      type: object
+      required: [id, file_name]
+      properties:
+        id:
+          type: string
+        file_name:
+          type: string
+        size_bytes:
+          type: integer
+        companion_files:
+          type: array
+          items:
+            type: string
+        total_size_bytes:
+          type: integer
+          description: Combined size in bytes of the primary and companion files.
+        recommended:
+          type: boolean
+        verified:
+          type: boolean
+        installed:
+          type: boolean
+        active:
+          type: boolean
+
+    ModelProbeRequest:
+      type: object
+      required: [model_id]
+      properties:
+        model_id:
+          type: string
+        engine:
+          type: string
+        variant:
+          type: string
+
+    ModelProbeResponse:
+      type: object
+      required: [ok, model_id, engine, diagnostic_log]
+      properties:
+        ok:
+          type: boolean
+        model_id:
+          type: string
+        variant:
+          type: string
+        engine:
+          type: string
+        provider:
+          type: string
+        load_ms:
+          type: number
+        inference_ms:
+          type: number
+        dimensions:
+          type: integer
+        norm:
+          type: number
+        diagnostic_log:
+          type: string
+        error:
+          oneOf:
+            - $ref: "#/components/schemas/ProblemDetails"
+            - type: "null"
+
+    DeleteModelWeightRequest:
+      type: object
+      required: [model_id]
+      properties:
+        model_id:
+          type: string
+        variant:
+          type: string
+
+    DeleteModelWeightResponse:
+      type: object
+      required: [model_id, deleted_paths]
+      properties:
+        model_id:
+          type: string
+        variant:
+          type: string
+        deleted_paths:
+          type: array
+          items:
+            type: string
+        freed_bytes:
+          type: integer
 
     OperationAccepted:
       type: object

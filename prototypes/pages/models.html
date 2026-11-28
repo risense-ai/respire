@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Models | Respire</title>
+  <link rel="stylesheet" href="../tokens/tokens.css">
+  <script defer src="../mock-api/fixture.js"></script>
+  <script defer src="gallery.js"></script>
+  <script defer src="screens.js"></script>
+</head>
+<body data-page="models">
+  <aside aria-label="Navigation"></aside>
+  <main>
+    <div class="toolbar"><span>Studio / Models</span><label>Scenario <select id="scenario"></select></label></div>
+    <section class="heading"><h1>Model library</h1><p>Manage installed models and follow Runtime operations.</p></section>
+    <section class="twin-cards">
+      <article class="fixed-card">
+        <h2>Active Model &amp; Live Inference Activity</h2>
+        <p id="active-model"></p><span id="legacy-active" class="pill" hidden>Active legacy model (read-only)</span><p id="index-coverage"></p>
+        <p id="inference-latency"></p><p id="inference-queues"></p>
+      </article>
+      <article class="fixed-card">
+        <header><h2>Model Tasks &amp; Switch Pipeline</h2><button id="copy-snapshot" class="secondary">Copy Snapshot JSON</button></header>
+        <p id="pipeline-state"></p>
+        <div id="operation" hidden>
+          <p id="op-target"></p>
+          <ol id="pipeline-steps" aria-label="Shadow-switch pipeline"></ol>
+          <progress id="op-progress" max="100" value="0" aria-label="Model operation progress"></progress>
+          <p id="op-state" role="status"></p><button id="cancel" class="secondary">Cancel operation</button>
+          <ol id="activity-log" aria-label="Model activity log"></ol>
+        </div>
+      </article>
+    </section>
+    <article>
+      <header><h2>Model catalog</h2>
+        <div class="mirror-controls">
+          <label>Download Mirror <select id="mirror"><option value="auto">Auto</option><option value="https://hf-mirror.com">hf-mirror.com</option><option value="https://hf-mirror.net">hf-mirror.net</option><option value="https://huggingface.co">huggingface.co</option><option value="custom">Custom</option></select></label>
+          <form id="custom-mirror" hidden><label>Mirror URL <input id="mirror-url" type="url" required></label><button class="secondary">Save</button></form>
+        </div>
+      </header>
+      <div id="results" class="model-grid" role="group" aria-label="Model families"></div>
+      <h3 id="variant-title">Quantization</h3>
+      <div id="variants" class="variant-grid" role="group" aria-labelledby="variant-title"></div>
+      <div class="engine-dock">
+        <label>Engine <select id="engine"><option value="cpu">CPU</option><option value="gpu">GPU</option><option value="npu">NPU</option></select></label>
+        <button id="download">Download</button><button id="enable">Enable</button>
+        <button id="probe" class="secondary">Load &amp; Inference Test</button><button id="delete-weight" class="secondary">Delete</button>
+      </div>
+    </article>
+    <dialog id="probe-modal" class="probe-modal" aria-labelledby="probe-title">
+      <header><h2 id="probe-title">Load &amp; Inference Test</h2><form method="dialog"><button class="secondary">Close</button></form></header>
+      <p id="probe-metrics" role="status"></p>
+      <pre id="probe-log"></pre>
+      <div class="chip-row"><button id="copy-probe" class="secondary">Copy diagnostic log</button><a id="report-probe" target="_blank" rel="noopener noreferrer">Report an issue</a></div>
+    </dialog>
+    <p id="notice" role="status" aria-live="polite"></p>
+  </main>
+</body>
+</html>

@@ -3,8 +3,8 @@ import {once} from 'node:events';
 import {readdir} from 'node:fs/promises';
 import {createServer} from 'node:http';
 import {join} from 'node:path';
-import {runScenario} from '../../referee/test-cases/runner.mjs';
-import {withRuntime} from '../../referee/test-cases/targets.mjs';
+import {runScenario} from '../../test-cases/runner.mjs';
+import {withRuntime} from '../../test-cases/targets.mjs';
 
 const catalogPath = '/Xenova/bge-base-zh-v1.5/resolve/71e50dc531959f9e04ebf190ea25b00261a0a186/tokenizer.json';
 // The test cancels before completion. No synthetic bytes can pass catalog integrity verification.

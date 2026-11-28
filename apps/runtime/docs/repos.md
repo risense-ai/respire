@@ -9,8 +9,7 @@ See [SOURCE-PROVENANCE.md](../SOURCE-PROVENANCE.md) for the pinned historical so
   a relative Cargo dependency and consumes its existing C ABI.
 - CLI, Client2, and plugins interact with Runtime through protocols and
   capabilities. Hosts supervise Runtime and keep persistent credential custody.
-- The versioned API snapshot is under the monorepo's root `contracts/`,
-  maintained from `respire-resources`. Runtime's typed internal protocol
-  remains in its own crate.
+- The canonical API is defined in [contracts/](../../../contracts/README.md).
+  Runtime's typed internal protocol remains in its own crate.
 
 See [SOURCE-BUILD.md](../SOURCE-BUILD.md) for direct builds.

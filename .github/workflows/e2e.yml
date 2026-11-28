@@ -8,6 +8,8 @@ on:
       - 'apps/**'
       - 'contracts/**'
       - 'packages/**'
+      - 'test-cases/**'
+      - 'prototypes/**'
       - '.github/workflows/e2e.yml'
       - 'scripts/e2e/**'
       - 'scripts/pr-preview/**'
@@ -46,12 +48,6 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          repository: risense-ai/respire-resources
-          ref: 5b14b8ea189873d14055cb24994c04afae9e926c
-          path: referee
-          persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: '22.14.0'
@@ -63,7 +59,6 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          test "$(git -C referee rev-parse HEAD)" = 5b14b8ea189873d14055cb24994c04afae9e926c
           rustup toolchain install 1.95.0 --profile minimal
           test "$(rustc +1.95.0 -vV | sed -n 's/^host: //p')" = "$TARGET"
           if [[ "$RUNNER_OS" == Linux ]]; then
@@ -131,18 +126,11 @@ jobs:
           PYTHONDONTWRITEBYTECODE: '1'
         run: python3 -m unittest discover -s scripts/pr-preview -p test_publish.py
       - if: steps.paths.outputs.eligible == 'true'
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          repository: risense-ai/respire-resources
-          ref: ade89e47833f99baf7f6acba7592d59ffc789d0c
-          path: referee
-          persist-credentials: false
-      - if: steps.paths.outputs.eligible == 'true'
         id: input
         run: |
           set -euo pipefail
           mkdir -p stage/build/ref
-          git -C referee archive ade89e47833f99baf7f6acba7592d59ffc789d0c test-cases prototypes | tar -x -C stage/build/ref
+          git archive HEAD test-cases prototypes | tar -x -C stage/build/ref
           cp scripts/pr-preview/{Dockerfile,record.mjs,canonical.py} stage/build/
           curl -fsSL 'https://raw.githubusercontent.com/wailsapp/wails/7b11001b92b712210b27d8cb53430e83f67ad8e4/v3/internal/assetserver/bundledassets/runtime.js' -o stage/build/wails.js
           echo '8326f27a4c511e71cf1e64eb8b861fd201b9cf0ca6035bfd65fc4dfd2cb0f25b  stage/build/wails.js' | sha256sum -c -

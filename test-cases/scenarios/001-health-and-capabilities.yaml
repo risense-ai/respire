@@ -1,0 +1,68 @@
+{
+  "id": "E2E-001",
+  "title": "Cold start exposes health and discovers capabilities",
+  "mock": "empty",
+  "steps": [
+    {
+      "name": "Discover OpenAPI and SSE from public health",
+      "request": {
+        "method": "GET",
+        "path": "/v1/health",
+        "public": true
+      },
+      "expect": {
+        "status": 200,
+        "equal": {
+          "status": "ready"
+        },
+        "present": [
+          "instance_id"
+        ],
+        "includes": {
+          "capabilities": [
+            "openapi.v1",
+            "sse.operations.v1"
+          ]
+        }
+      },
+      "save": {
+        "instance": "instance_id"
+      }
+    },
+    {
+      "name": "Check authenticated status for the empty active workspace",
+      "request": {
+        "method": "GET",
+        "path": "/v1/status/light"
+      },
+      "expect": {
+        "status": 200,
+        "equal": {
+          "memory_count": 0,
+          "diary_count": 0,
+          "indexed_count": 0
+        },
+        "present": [
+          "space_id"
+        ]
+      },
+      "save": {
+        "space": "space_id"
+      }
+    },
+    {
+      "name": "Public instance stays stable after inspecting the workspace",
+      "request": {
+        "method": "GET",
+        "path": "/v1/health",
+        "public": true
+      },
+      "expect": {
+        "status": 200,
+        "equal": {
+          "instance_id": "${instance}"
+        }
+      }
+    }
+  ]
+}

@@ -282,6 +282,30 @@
       "lines": 1,
       "sha256": "fa2d3d0ee00a352cb30b954d0c2d25f08e03da62aec70fccd5e3df9330df2d9b",
       "reason": "Approved localized embedded prompt"
+    },
+    {
+      "path": "test-cases/fixtures/i18n/compiled-quick-panel.json",
+      "lines": 1,
+      "sha256": "177e65db3493cd8864db5fcadb9b488fb99d4c534aa1f17caee730f12aa2d877",
+      "reason": "Synthetic compatibility fixture"
+    },
+    {
+      "path": "test-cases/fixtures/i18n/compiled-workspace.json",
+      "lines": 17,
+      "sha256": "4f2860e527cbc5a6d3d197da4c8fbf33bc200bc13b86a69bf9dde901c97622e7",
+      "reason": "Synthetic compatibility fixture"
+    },
+    {
+      "path": "test-cases/fixtures/i18n/screens.json",
+      "lines": 32,
+      "sha256": "57e6d44c48c2977d20fd074609c967b26265323c519e2a8d636f90806e17d064",
+      "reason": "Synthetic compatibility fixture"
+    },
+    {
+      "path": "test-cases/fixtures/i18n/transport.json",
+      "lines": 2,
+      "sha256": "36b1932590d4d2e2af83c50f6bac77984b64bc9ff379b9b4f61f45b8e064685b",
+      "reason": "Synthetic compatibility fixture"
     }
   ]
 }

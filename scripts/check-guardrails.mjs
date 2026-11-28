@@ -5,11 +5,10 @@
 // 2. Any Cargo.toml under apps/core forbids I/O crates (rusqlite, sqlx, reqwest, ureq, axum, tiny_http);
 // 3. Any Cargo.toml under apps/cli forbids ../runtime, ../core, and server/storage crates;
 // 4. apps/client2/go.mod forbids go-sqlite3 or any sqlite3 driver;
-// 5. contracts/sync.lock.json exists and matches contracts/runtime-api/openapi.yaml SHA-256;
+// 5. contracts/runtime-api/openapi.yaml exists and starts with OpenAPI 3.1.0;
 // 6. .github/workflows/*.yml count <= 5;
 // 7. Zero CJK outside exact reviewed data in tracked text.
 
-import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { checkZeroCjk } from "./check-zero-cjk.mjs";
@@ -88,30 +87,13 @@ if (fs.existsSync(client2GoMod)) {
   }
 }
 
-// 5. Verify contracts/sync.lock.json matches contracts/runtime-api/openapi.yaml
-const lockPath = path.join(root, "contracts", "sync.lock.json");
+// 5. Verify the local OpenAPI contract header
 const openapiPath = path.join(root, "contracts", "runtime-api", "openapi.yaml");
 
-if (!fs.existsSync(lockPath)) {
-  errors.push("Missing contract lock file: contracts/sync.lock.json");
-} else if (!fs.existsSync(openapiPath)) {
-  errors.push("Missing synced OpenAPI contract: contracts/runtime-api/openapi.yaml");
-} else {
-  try {
-    const lock = JSON.parse(fs.readFileSync(lockPath, "utf8"));
-    const openapiBytes = fs.readFileSync(openapiPath);
-    const actualSha256 = crypto.createHash("sha256").update(openapiBytes).digest("hex");
-    if (!lock.commit || !/^[a-f0-9]{40}$/.test(lock.commit)) {
-      errors.push("contracts/sync.lock.json must contain a 40-char source commit SHA");
-    }
-    if (lock.openapi_sha256 !== actualSha256) {
-      errors.push(
-        `contracts/runtime-api/openapi.yaml checksum mismatch: lock=${lock.openapi_sha256}, actual=${actualSha256}`
-      );
-    }
-  } catch (err) {
-    errors.push(`Failed to parse contracts/sync.lock.json: ${err.message}`);
-  }
+if (!fs.existsSync(openapiPath)) {
+  errors.push("Missing OpenAPI contract: contracts/runtime-api/openapi.yaml");
+} else if (!/^openapi: 3\.1\.0(?:\r?\n|$)/.test(fs.readFileSync(openapiPath, "utf8"))) {
+  errors.push("contracts/runtime-api/openapi.yaml must start with openapi: 3.1.0");
 }
 
 // 6. Cap .github/workflows/*.yml count <= 5

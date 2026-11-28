@@ -25,6 +25,7 @@ jobs:
       cli: ${{ steps.detect.outputs.cli }}
       client2: ${{ steps.detect.outputs.client2 }}
       contracts: ${{ steps.detect.outputs.contracts }}
+      resources: ${{ steps.detect.outputs.resources }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -50,6 +51,7 @@ jobs:
             echo "cli=true" >> "$GITHUB_OUTPUT"
             echo "client2=true" >> "$GITHUB_OUTPUT"
             echo "contracts=true" >> "$GITHUB_OUTPUT"
+            echo "resources=true" >> "$GITHUB_OUTPUT"
             exit 0
           }
 
@@ -88,13 +90,17 @@ jobs:
           cli=false
           client2=false
           contracts=false
+          resources=false
 
           if match_path '^apps/core/'; then core=true; fi
           if match_path '^apps/runtime/'; then runtime=true; fi
           if match_path '^apps/cli/'; then cli=true; fi
           if match_path '^apps/client2/'; then client2=true; fi
-          if match_path '^(contracts/|packages/|\.github/workflows/ci\.yml$|scripts/(check-guardrails|sync-contracts(\.test)?)\.mjs$)'; then
+          if match_path '^(contracts/|packages/|\.github/workflows/ci\.yml$|scripts/check-guardrails\.mjs$|process/scripts/validate-runtime-fixtures\.mjs$)'; then
             contracts=true
+          fi
+          if match_path '^(openspec/|prototypes/|test-cases/|process/|contracts/|scripts/(e2e|pr-preview)/|(AGENTS|LESSONS|README)\.md$|\.github/(agents\.yml$|ISSUE_TEMPLATE/|workflows/(ci|e2e|verify|lessons-audit)\.yml$))'; then
+            resources=true
           fi
 
           echo "core=$core" >> "$GITHUB_OUTPUT"
@@ -102,6 +108,7 @@ jobs:
           echo "cli=$cli" >> "$GITHUB_OUTPUT"
           echo "client2=$client2" >> "$GITHUB_OUTPUT"
           echo "contracts=$contracts" >> "$GITHUB_OUTPUT"
+          echo "resources=$resources" >> "$GITHUB_OUTPUT"
 
   guardrails:
     name: guardrails
@@ -169,14 +176,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          persist-credentials: false
-
-      - name: Checkout contract source
-        uses: actions/checkout@v4
-        with:
-          repository: risense-ai/respire-resources
-          ref: main
-          path: contract-source
           fetch-depth: 0
           persist-credentials: false
 
@@ -184,10 +183,36 @@ jobs:
         with:
           node-version: "22"
 
-      - name: Verify contract snapshot and lock
+      - name: Check Runtime API compatibility and golden fixtures
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: |
-          node scripts/sync-contracts.mjs --check contract-source
-          node --test scripts/sync-contracts.test.mjs
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          trap 'rm -rf -- "$tmp"' EXIT
+          asset=oasdiff_1.39.0_linux_amd64.tar.gz
+          curl --fail --silent --show-error --location "https://github.com/oasdiff/oasdiff/releases/download/v1.39.0/$asset" --output "$tmp/$asset"
+          echo "71a85930728f367a2086077b7ae1411319421549d18473a3e8258b6451520433  $tmp/$asset" | sha256sum --check
+          tar -xzf "$tmp/$asset" -C "$tmp" oasdiff
+          export PATH="$tmp:$PATH"
+          spec=contracts/runtime-api/openapi.yaml
+          oasdiff validate "$spec" --allow-external-refs=false --fail-on INFO
+          oasdiff flatten "$spec" --allow-external-refs=false --format json > "$RUNNER_TEMP/flattened.json"
+          node process/scripts/validate-runtime-fixtures.mjs "$RUNNER_TEMP/flattened.json"
+          base_sha="$BASE_SHA"
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && -z "$base_sha" ]]; then
+            base_sha="$(git rev-parse --verify HEAD^ 2>/dev/null || true)"
+          fi
+          if [[ "$GITHUB_EVENT_NAME" == pull_request ]]; then
+            [[ "$base_sha" =~ ^[0-9a-fA-F]{40}$ && ! "$base_sha" =~ ^0{40}$ ]]
+            git show "$base_sha:$spec" > "$tmp/base.yaml"
+            oasdiff breaking "$tmp/base.yaml" "$spec" --allow-external-refs=false --fail-on ERR
+          elif [[ "$base_sha" =~ ^[0-9a-fA-F]{40}$ && ! "$base_sha" =~ ^0{40}$ ]] &&
+               git cat-file -e "$base_sha:$spec" 2>/dev/null; then
+            git show "$base_sha:$spec" > "$tmp/base.yaml"
+            oasdiff breaking "$tmp/base.yaml" "$spec" --allow-external-refs=false --fail-on ERR
+          fi
 
       - name: Generate and test the Rust SDK
         run: |
@@ -216,6 +241,29 @@ jobs:
           npm run check
           npm test
 
+  openspec-resources-ci:
+    name: openspec-resources-ci
+    needs: detect-changes
+    if: needs.detect-changes.outputs.resources == 'true' || needs.detect-changes.outputs.contracts == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Validate OpenSpec and test process and fixtures
+        run: |
+          node process/scripts/validate-openspec.mjs
+          node --test process/scripts/respire-process.test.mjs process/scripts/lessons-audit.test.mjs
+          node --test prototypes/mock-api/*.test.mjs
+          node test-cases/runner.test.mjs
 
   core-ci:
     name: core-ci
@@ -564,7 +612,7 @@ jobs:
 
   ci-gate:
     name: ci-gate
-    needs: [detect-changes, guardrails, contract-check, core-ci, runtime-ci, cli-ci, client2-ci]
+    needs: [detect-changes, guardrails, contract-check, openspec-resources-ci, core-ci, runtime-ci, cli-ci, client2-ci]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -575,22 +623,47 @@ jobs:
           DETECT: ${{ needs.detect-changes.result }}
           GUARDRAILS: ${{ needs.guardrails.result }}
           CONTRACTS: ${{ needs.contract-check.result }}
+          RESOURCES: ${{ needs.openspec-resources-ci.result }}
           CORE: ${{ needs.core-ci.result }}
           RUNTIME: ${{ needs.runtime-ci.result }}
           CLI: ${{ needs.cli-ci.result }}
           CLIENT2: ${{ needs.client2-ci.result }}
+          CORE_NEEDED: ${{ needs.detect-changes.outputs.core }}
+          RUNTIME_NEEDED: ${{ needs.detect-changes.outputs.runtime }}
+          CLI_NEEDED: ${{ needs.detect-changes.outputs.cli }}
+          CLIENT2_NEEDED: ${{ needs.detect-changes.outputs.client2 }}
+          CONTRACTS_NEEDED: ${{ needs.detect-changes.outputs.contracts }}
+          RESOURCES_NEEDED: ${{ needs.detect-changes.outputs.resources }}
         run: |
           set -euo pipefail
-          for name in DETECT GUARDRAILS CONTRACTS CORE RUNTIME CLI CLIENT2; do
-            val="${!name}"
-            echo "$name=$val"
-            if [ "$val" = "success" ]; then
-              continue
+          check_job() {
+            local name="$1"
+            shift
+            local result="${!name}"
+            local flag needed=false
+            for flag in "$@"; do
+              case "$flag" in
+                true) needed=true ;;
+                false) ;;
+                *)
+                  echo "::error::Invalid detector flag '$flag' for $name"
+                  exit 1
+                  ;;
+              esac
+            done
+            echo "$name=$result"
+            if [[ "$result" == success || ( "$result" == skipped && "$needed" == false ) ]]; then
+              return
             fi
-            if [ "$val" = "skipped" ] && [ "$name" != "DETECT" ] && [ "$name" != "GUARDRAILS" ]; then
-              continue
-            fi
-            echo "::error::Gate failed because $name ended with '$val'"
+            echo "::error::Gate failed because $name ended with '$result' (needed=$needed)"
             exit 1
-          done
+          }
+          check_job DETECT true
+          check_job GUARDRAILS true
+          check_job CONTRACTS "$CONTRACTS_NEEDED"
+          check_job RESOURCES "$RESOURCES_NEEDED" "$CONTRACTS_NEEDED"
+          check_job CORE "$CORE_NEEDED" "$CONTRACTS_NEEDED"
+          check_job RUNTIME "$RUNTIME_NEEDED" "$CORE_NEEDED" "$CONTRACTS_NEEDED"
+          check_job CLI "$CLI_NEEDED" "$CONTRACTS_NEEDED"
+          check_job CLIENT2 "$CLIENT2_NEEDED" "$CONTRACTS_NEEDED"
           echo "All triggered CI jobs passed (untouched components skipped)."

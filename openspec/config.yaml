@@ -1,0 +1,40 @@
+schema: openspec-v1
+project: respire
+ssot_repo: risense-ai/respire
+
+repositories:
+  monorepo:
+    name: risense-ai/respire
+    visibility: public
+    role: Product apps, generated SDKs, OpenSpec, OpenAPI and Core ABI contracts, prototypes, acceptance tests, and governance
+  historical_governance:
+    name: risense-ai/respire-resources
+    role: Read-only archive for M1-M6 and Change 007 origin (PR 56)
+  legacy_migration_sources:
+    - risense-ai/respire-core
+    - risense-ai/respire-runtime
+    - risense-ai/respire-cli
+    - risense-ai/respire-client2
+
+rules:
+  language: English only (CJK permitted strictly inside UI i18n files and i18n test fixtures)
+  zero_cjk_gate: true
+  max_doc_lines: 400
+  max_code_lines: 600
+  required_change_artifacts:
+    - proposal.md
+    - design.md
+    - tasks.md
+    - specs/*/spec.md
+  delta_headings:
+    - "## ADDED Requirements"
+    - "## MODIFIED Requirements"
+    - "## REMOVED Requirements"
+  scenario_heading_prefix: "#### Scenario:"
+  scenario_keywords:
+    - GIVEN
+    - WHEN
+    - THEN
+  capability_negotiation_only: true
+  forbid_version_string_coupling: true
+  forbid_line_number_anchors_in_docs: true

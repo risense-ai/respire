@@ -4,9 +4,12 @@
 without extension or i18n path exemptions. Valid UTF-8 text is always scanned,
 including SVG, locale modules and vendored sources. Missing, unmerged, linked
 or unknown binary files fail closed. The only binary classes currently needed
-are typed PNG and WOFF2 assets in their actual Client2 asset directories and
-two exact historical little-endian float fixtures. A text file renamed to
-a binary extension is still scanned.
+are typed PNG and WOFF2 assets in their actual Client2 asset directories,
+two exact historical little-endian float fixtures, and two exact SQLite
+fixtures under `test-cases/fixtures/db/`: `comprehensive-synthetic.db` and
+`respire-1x-synthetic.db`. Each database must match its reviewed path,
+270336-byte length, 16-byte `SQLite format 3\0` header, and SHA-256 digest.
+A text file renamed to a binary extension is still scanned.
 
 The checker recognizes Han supplementary extensions, Hiragana, Katakana,
 Hangul, Bopomofo and dedicated punctuation/compatibility blocks. It does not
@@ -25,6 +28,9 @@ edits on other lines do not invalidate a data line. A new/modified/repeated
 CJK line cannot use an existing path exemption. Remove stale entries; only
 update the manifest for independently reviewed language data as part of that
 data change, never to hide untranslated implementation or comments.
+The roster also pins the reviewed CJK lines in `compiled-quick-panel.json`,
+`compiled-workspace.json`, `screens.json`, and `transport.json` under
+`test-cases/fixtures/i18n/`.
 
 The inherited Client2 branding SVG comments were translated without editing
 the rendering data. The existing injection disclosure arrows are represented

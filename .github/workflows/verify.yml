@@ -12,9 +12,6 @@ on:
 
 permissions:
   contents: read
-  issues: write
-  pull-requests: read
-  statuses: write
 
 concurrency:
   group: verify-${{ github.event.pull_request.number || github.event.issue.number || github.ref }}
@@ -23,6 +20,8 @@ concurrency:
 jobs:
   verify-guardrails:
     name: verify-guardrails
+    permissions:
+      contents: read
     if: github.event_name != 'issue_comment'
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -42,6 +41,10 @@ jobs:
 
   verdict-gate:
     name: verdict-gate
+    permissions:
+      contents: read
+      pull-requests: read
+      statuses: write
     if: >-
       github.event_name == 'pull_request' ||
       (github.event_name == 'issue_comment' &&
@@ -50,12 +53,33 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Checkout trusted governance scripts from respire-resources
+      - name: Checkout trusted governance scripts from main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          path: _trusted
+          persist-credentials: false
+
+      - name: Select trusted governance root
+        id: trusted-bootstrap
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f _trusted/process/scripts/respire-process.mjs ]; then
+            echo "need_legacy=false" >> "$GITHUB_OUTPUT"
+            echo "script_root=_trusted" >> "$GITHUB_OUTPUT"
+          else
+            echo "need_legacy=true" >> "$GITHUB_OUTPUT"
+            echo "script_root=_legacy_resources" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout pre-cutover governance bootstrap
+        if: steps.trusted-bootstrap.outputs.need_legacy == 'true'
         uses: actions/checkout@v4
         with:
           repository: risense-ai/respire-resources
-          ref: main
-          path: _resources
+          ref: db89f9cb50b97cc7c412dbbca320e657019b4eec
+          path: _legacy_resources
           persist-credentials: false
 
       - name: Setup Node.js
@@ -68,24 +92,27 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
         run: |
-          node _resources/process/scripts/respire-process.mjs verify-merge \
+          node "${{ steps.trusted-bootstrap.outputs.script_root }}/process/scripts/respire-process.mjs" verify-merge \
             "risense-ai/respire#${PR_NUMBER}" \
             --verdict-only \
             --publish-status
 
   evidence-register:
     name: evidence-register
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: read
     needs: [verify-guardrails]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Checkout trusted governance scripts from respire-resources
+      - name: Checkout trusted governance scripts from main
         uses: actions/checkout@v4
         with:
-          repository: risense-ai/respire-resources
           ref: main
-          path: _resources
+          path: _trusted
           persist-credentials: false
 
       - name: Setup Node.js
@@ -97,7 +124,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.RESPIRE_BOT_TOKEN || github.token }}
         run: |
-          node _resources/process/scripts/respire-process.mjs evidence-register \
+          node _trusted/process/scripts/respire-process.mjs evidence-register \
             --repo risense-ai/respire \
             --sha "${{ github.sha }}" \
             --run-id "${{ github.run_id }}"
