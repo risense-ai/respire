@@ -18,6 +18,11 @@ const binaryFixtures = new Set([
   "apps/core/crates/memory-core/tests/fixtures/legacy_embedding.f32le",
   "apps/runtime/crates/app/src/fixtures/legacy-memory-v1/legacy_embedding.f32le",
 ]);
+const sqliteHeader = Buffer.from("SQLite format 3\0", "ascii");
+const sqliteFixtures = new Map([
+  ["test-cases/fixtures/db/comprehensive-synthetic.db", "33f83225b1441f6d813792add07ea3d5ab0d0748b2ae4f14363b1725f17e2e30"],
+  ["test-cases/fixtures/db/respire-1x-synthetic.db", "a081b149521d3dd516fdda50bc744249293fb30990e3b98d1ee392189fe02c9d"],
+]);
 
 function validName(name) {
   return !/[\\\x00-\x1f\x7f]/.test(name)
@@ -35,6 +40,11 @@ export function cjkProjection(text) {
 
 function binary(file, bytes) {
   if (binaryFixtures.has(file)) return bytes.length === 12 && sha(bytes) === binaryFixtureSha;
+  const sqliteSha = sqliteFixtures.get(file);
+  if (sqliteSha) {
+    return bytes.length === 270336 && bytes.subarray(0, sqliteHeader.length).equals(sqliteHeader)
+      && sha(bytes) === sqliteSha;
+  }
   if (file.startsWith("apps/client2/internal/desktop/frontend/fonts/") && file.endsWith(".woff2")) {
     return bytes.length >= 48 && bytes.subarray(0, 4).toString("ascii") === "wOF2"
       && bytes.readUInt32BE(8) === bytes.length;
