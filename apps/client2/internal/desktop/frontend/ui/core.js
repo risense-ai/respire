@@ -33,10 +33,16 @@ export const raw = (value) => JSON.stringify(value, null, 2);
 export function notify(message, error = false) {
   const node = typeof document === "undefined" ? null : document.querySelector?.("#notice");
   if (!node) return;
-  node.textContent = message || "";
-  node.hidden = !message;
   node.classList.toggle("error", Boolean(message && error));
-  if (!message || !document.createElement) return;
+  node.hidden = !message;
+  if (!message || !document.createElement) {
+    node.textContent = message || "";
+    return;
+  }
+  if (node.firstElementChild) {
+    node.firstElementChild.textContent = message;
+    return;
+  }
   const text = document.createElement("span");
   text.textContent = message;
   const dismiss = document.createElement("button");

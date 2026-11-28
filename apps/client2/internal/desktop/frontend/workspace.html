@@ -84,8 +84,10 @@
           ><button id="refresh">Refresh</button>
         </div>
       </header>
-      <div id="notice" role="status" hidden></div>
-      <div class="view-scroll"><div id="view" tabindex="-1"></div></div>
+      <div class="view-scroll">
+        <div class="workspace-toast-anchor"><div id="notice" role="status" hidden></div></div>
+        <div id="view" tabindex="-1"></div>
+      </div>
       <footer class="statusbar">
         <span id="status-summary">Reading local status</span
         ><span id="sync-summary">Sync status pending</span>

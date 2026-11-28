@@ -114,7 +114,7 @@ export function models(root, ctx) {
   const live = $("[data-live]", root);
   live.innerHTML = `<div class="grid"><div data-inference-status></div>${panel(
     i18nMessages.m281dccfa29c6c9fb,
-    `<div class="panel-body"><div data-model-task-progress><div data-model-task-content></div><button type="button" data-model="reopen-download" hidden>${h(i18nMessages.mDownloadShowProgress)}</button></div>${modelCancelButton(root)}<p class="form-error section-gap" data-model-task-error hidden></p>${i18nMessages.m31f6729bd220085e}</pre></details>`,
+    `<div class="panel-body"><div data-model-task-progress><div data-model-task-content></div><div class="actions"><button type="button" data-model="reopen-download" hidden>${h(i18nMessages.mDownloadShowProgress)}</button>${modelCancelButton(root)}</div></div><p class="form-error section-gap" data-model-task-error hidden></p>${i18nMessages.m31f6729bd220085e}</pre></details>`,
   )}</div>`;
   let profileRefreshing = false;
   let disposed = false;

@@ -133,7 +133,7 @@ export function createWizard(ctx) {
     const skipButton = wizard.state.reRun
       ? ""
       : `${i18nMessages.m46c2a5ac3ccb371c}`;
-    return `<h1>${h(title)}</h1>${subtitle ? `<p class="wizard-sub">${h(subtitle)}</p>` : ""}${inner}<div class="wizard-actions">${skip ? skipButton : ""}${actions}</div><p class="form-error" role="alert" data-wizard-error ${wizard.state.error ? "" : "hidden"}>${h(wizard.state.error || "")}</p>`;
+    return `<div class="wizard-step-content"><h1>${h(title)}</h1>${subtitle ? `<p class="wizard-sub">${h(subtitle)}</p>` : ""}${inner}</div><div class="wizard-actions">${skip ? skipButton : ""}${actions}</div><p class="form-error" role="alert" data-wizard-error ${wizard.state.error ? "" : "hidden"}>${h(wizard.state.error || "")}</p>`;
   }
 
   function card(

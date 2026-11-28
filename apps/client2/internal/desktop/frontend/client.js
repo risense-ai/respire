@@ -131,6 +131,7 @@ function route() {
   notify("");
   const root = document.createElement("section");
   root.className = "view-page";
+  root.dataset.page = page;
   $("#view").replaceChildren(root);
   $("#breadcrumb").textContent = definitions[page][0];
   const inSettings = settingsPages.includes(page);
