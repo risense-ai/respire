@@ -124,6 +124,15 @@ test("offline dry-run writes both reports without changing the ledger", (t) => {
   assert.throws(() => auditCli(cwd, ...args, "--target-repo", "respire"), /--target-repo requires owner\/repo/);
 });
 
+test("archive rejects apply and permits explicit dry-run", (t) => {
+  const cwd = fixtureDirectory(t);
+  const args = ["--target-repo", "risense-ai/RESPire-resources"];
+  assert.throws(() => auditCli(cwd, ...args, "--apply"), /--apply cannot target the read-only archive/);
+  fs.writeFileSync(path.join(cwd, "LESSONS.md"), LEDGER);
+  fs.writeFileSync(path.join(cwd, "input.json"), '{"commits": []}');
+  assert.deepEqual(JSON.parse(auditCli(cwd, ...args, "--dry-run", "--input", "input.json")).guardrails, []);
+});
+
 test("live dry-run reads merged main commits and their trailers", (t) => {
   const cwd = fixtureDirectory(t);
   const git = (...args) => execFileSync("git", ["-c", "user.name=Fixture", "-c",

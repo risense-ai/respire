@@ -63,7 +63,9 @@ export function scanCjk(files, reviewed) {
   for (const [file, bytes] of files) {
     if (CJK.test(file)) reports.push(file + ": CJK in tracked filename");
     let text;
-    try { text = utf8.decode(bytes); } catch { /* Only typed assets may be non-UTF-8. */ }
+    if (!sqliteFixtures.has(file)) {
+      try { text = utf8.decode(bytes); } catch { /* Only typed assets may be non-UTF-8. */ }
+    }
     if (text === undefined || text.includes("\0")) {
       if (!binary(file, bytes)) reports.push(file + ": unclassified binary or malformed UTF-8");
       else assets++;

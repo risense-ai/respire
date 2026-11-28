@@ -469,7 +469,7 @@ switch (cmd) {
       "  claim <CARD-XXX | owner/repo#num>           Lock card (+agent:in-progress)",
       "  mark-verify <CARD-XXX | ref>                Move card to agent:verify for review",
       "  review-next [--json]                        Discover next open PR needing review",
-      "  post-verdict <pr-ref> --verdict <V> --summary \"<text>\"   Post head-SHA verdict",
+      "  post-verdict <pr-ref> --verdict <V> --summary \"<text>\" [--head-sha <sha>]   Post head-SHA verdict",
       "  verify-merge <pr-ref> [--verdict-only] [--publish-status] Pre-merge verdict gate",
       "  evidence-register --repo <r> --sha <sha> [--pr <n>] [--validate-only] Register post-merge Bot Evidence",
       "  lessons-audit <base-sha> <main-sha>        Report fixes, reverts and three-strike candidates",

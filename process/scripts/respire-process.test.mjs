@@ -220,6 +220,39 @@ test("respire-process.mjs --help lists lifecycle and review subcommands", () => 
   }
 });
 
+test("post-verdict only posts for the expected head when supplied", (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "process-verdict-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const fixture = path.join(dir, "fixture.cjs");
+  const posted = path.join(dir, "posted.txt");
+  const sha = "a".repeat(40);
+  fs.writeFileSync(fixture, `
+    require("node:child_process").execFileSync = (file, args) => {
+      if (file === "gh" && args.join(" ") === "api repos/risense-ai/respire-resources/pulls/10") {
+        return JSON.stringify({ state: "open", head: { sha: ${JSON.stringify(sha)} } });
+      }
+      if (file === "gh" && args.slice(0, 6).join(" ") === "pr comment 10 --repo risense-ai/respire-resources --body") {
+        require("node:fs").writeFileSync(${JSON.stringify(posted)}, args[6], { flag: "wx" });
+        return "";
+      }
+      throw Error("unexpected operation: " + args.join(" "));
+    };
+    require("node:module").syncBuiltinESMExports();
+  `);
+  const cli = path.join(ROOT, "process/scripts/respire-process.mjs");
+  const run = (...args) => execFileSync(process.execPath, ["--require", fixture, cli,
+    "post-verdict", "risense-ai/respire-resources#10", "--verdict", "PASS", "--summary", "Checked", ...args],
+  { cwd: ROOT, encoding: "utf8", stdio: "pipe" });
+
+  assert.throws(() => run("--head-sha", "bad"), /40-character hexadecimal SHA/);
+  assert.throws(() => run(`--head-sha=${"b".repeat(40)}`), /expected head .* current head is/);
+  assert.equal(fs.existsSync(posted), false);
+  assert.match(run("--head-sha", sha.toUpperCase()), /Posted PASS verdict/);
+  assert.match(fs.readFileSync(posted, "utf8"), new RegExp(`respire-verdict: PASS head=${sha}`));
+  fs.unlinkSync(posted);
+  assert.match(run(), /Posted PASS verdict/);
+});
+
 test("verify-merge and evidence validation read only exact merge data through the CLI", (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "process-review-"));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));

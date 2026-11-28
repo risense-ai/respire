@@ -17,6 +17,7 @@ pub(super) async fn download_m3(
     }
     let request = DownloadModelRequest {
         model_id: "m3".into(),
+        variant: None,
         engine: intent.for_engine.clone(),
         mirror: intent
             .mirror

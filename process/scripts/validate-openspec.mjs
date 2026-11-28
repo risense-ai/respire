@@ -7,7 +7,7 @@ import path from "node:path";
 const root = process.cwd();
 const errors = [];
 const governanceDirs = ["openspec", "contracts", "prototypes", "test-cases", "process"];
-const governanceDocs = ["AGENTS.md", "LESSONS.md", "README.md"];
+const governanceDocs = ["AGENTS.md", "LESSONS.md", "README.md", ".github/ISSUE_TEMPLATE/openspec-task.md"];
 
 const CJK_REGEX = /[\u3000-\u303F\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF\uFF00-\uFFEF]/;
 const I18N_EXEMPT_REGEXES = [
@@ -157,10 +157,11 @@ for (const file of textFiles) {
 // 6. Markdown relative links in governance docs may point anywhere in the monorepo.
 const allNonArchiveMd = governanceFiles((name) => /\.md$/i.test(name), true);
 const linkRe = /\[[^\]\r\n]*\]\(\s*(?:<([^>\r\n]+)>|((?:[^\s()]|\([^()\r\n]*\))+))(?:[ \t]+(?:"[^"\r\n]*"|'[^'\r\n]*'|\([^()\r\n]*\)))?\s*\)/g;
+const referenceRe = /^ {0,3}\[[^\]\r\n]+\]:\s*(?:<([^>\r\n]+)>|([^\s\r\n]+))/gm;
 for (const mdFile of allNonArchiveMd) {
   const relDoc = path.relative(root, mdFile).replace(/\\/g, "/");
   const stripped = stripCodeBlocksAndSpans(fs.readFileSync(mdFile, "utf8"));
-  for (const match of stripped.matchAll(linkRe)) {
+  for (const match of [...stripped.matchAll(linkRe), ...stripped.matchAll(referenceRe)]) {
     const rawTarget = match[1] ?? match[2];
     if (/^(?:[a-z][a-z\d+.-]*:|\/\/)/i.test(rawTarget)) continue;
     const cleanTarget = rawTarget.split(/[?#]/, 1)[0];

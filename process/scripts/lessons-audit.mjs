@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
+import { ARCHIVED_CARD_REPO } from "./lib/cards.mjs";
 import { FIX_OR_REVERT } from "./lib/lessons-audit.mjs";
 
 const TARGET = "risense-ai/respire";
@@ -220,6 +221,9 @@ function run() {
   } });
   const target = values["target-repo"];
   if (!/^[\w.-]+\/[\w.-]+$/.test(target)) throw new Error("--target-repo requires owner/repo");
+  if (values.apply && target.toLowerCase() === ARCHIVED_CARD_REPO) {
+    throw new Error(`--apply cannot target the read-only archive ${ARCHIVED_CARD_REPO}`);
+  }
   if (values.apply && (values["dry-run"] || values.input !== undefined)) {
     throw new Error("--apply requires live history and cannot be combined with --dry-run or --input");
   }

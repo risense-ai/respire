@@ -51,10 +51,10 @@ test("accepts only exact SQLite fixture bytes at their reviewed paths", () => {
 
     const modified = Buffer.from(database);
     modified[modified.length - 1] ^= 1;
-    for (const invalid of [modified, database.subarray(0, -1), Buffer.alloc(database.length)]) {
+    for (const invalid of [modified, database.subarray(0, -1), Buffer.alloc(database.length),
+      bytes("plain ascii"), bytes(original)]) {
       assert.match(scanCjk([[path, invalid]], reviewed).reports[0], /unclassified binary/);
     }
-    assert.match(scanCjk([[path, bytes(original)]], reviewed).reports[0], /unreviewed CJK text/);
     assert.match(scanCjk([["test-cases/fixtures/db/copy.db", database]], reviewed).reports[0], /unclassified binary/);
   }
 });

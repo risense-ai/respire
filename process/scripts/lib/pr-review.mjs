@@ -1,4 +1,5 @@
 // Self-dispatching PR review discovery, allowlist-checked verdict parsing, and pre-merge gating.
+import { parseArgs } from "node:util";
 import { isTrustedVerdictAuthor, loadAgentsConfig } from "./agents-config.mjs";
 
 const PR_REPOS = ["risense-ai/respire", "risense-ai/respire-core"];
@@ -131,7 +132,7 @@ function buildReviewItem(gh, pr, repo, byRef, byId, agentsCfg) {
       `gh pr checks ${pr.number} --repo ${repo}`,
       `gh pr checkout ${pr.number} --repo ${repo}`,
     ],
-    verdict_command: `node process/scripts/respire-process.mjs post-verdict ${prRef} --verdict <PASS|CONDITIONAL|REJECT> --summary "<findings>"`,
+    verdict_command: `node process/scripts/respire-process.mjs post-verdict ${prRef} --head-sha ${headSha} --verdict <PASS|CONDITIONAL|REJECT> --summary "<findings>"`,
   };
 }
 
@@ -239,27 +240,22 @@ export function cmdReviewNext({ gh, root, fetchAllCards }, asJson) {
   console.log(`\nPublish verdict on current head SHA:\n  ${out.verdict_command}`);
 }
 
-function readFlag(args, flagName) {
-  const idx = args.indexOf(flagName);
-  if (idx < 0) return null;
-  const val = args[idx + 1];
-  if (!val || val.startsWith("--")) {
-    console.error(`Missing value after ${flagName}`);
-    process.exit(1);
-  }
-  return val;
-}
-
 /** Post a structured PASS/CONDITIONAL/REJECT verdict comment anchored to the PR head SHA. */
 export function cmdPostVerdict({ gh }, args) {
-  const target = args.find((a) => !a.startsWith("--") && parsePrRef(a));
-  const prRef = parsePrRef(target);
-  const verdict = readFlag(args, "--verdict")?.toUpperCase();
-  const summary = readFlag(args, "--summary");
-  if (!prRef || !verdict || !VALID_VERDICTS.has(verdict) || !summary) {
+  const { values, positionals } = parseArgs({ args, allowPositionals: true, options: {
+    verdict: { type: "string" }, summary: { type: "string" }, "head-sha": { type: "string" },
+  } });
+  const prRef = parsePrRef(positionals[0]);
+  const verdict = values.verdict?.toUpperCase();
+  const { summary, "head-sha": expectedHead } = values;
+  if (positionals.length !== 1 || !prRef || !VALID_VERDICTS.has(verdict) || !summary) {
     console.error(
-      'Usage: respire-process.mjs post-verdict <owner/repo#pr | pr-url> --verdict <PASS|CONDITIONAL|REJECT> --summary "<findings>"'
+      'Usage: respire-process.mjs post-verdict <owner/repo#pr | pr-url> --verdict <PASS|CONDITIONAL|REJECT> --summary "<findings>" [--head-sha <40-hex-sha>]'
     );
+    process.exit(1);
+  }
+  if (expectedHead !== undefined && !/^[0-9a-f]{40}$/i.test(expectedHead)) {
+    console.error("--head-sha requires a 40-character hexadecimal SHA.");
     process.exit(1);
   }
 
@@ -270,6 +266,10 @@ export function cmdPostVerdict({ gh }, args) {
   }
 
   const headSha = pr.head.sha;
+  if (expectedHead !== undefined && expectedHead.toLowerCase() !== headSha.toLowerCase()) {
+    console.error(`Refusing post-verdict on ${prRef.repo}#${prRef.number}: expected head ${expectedHead}, current head is ${headSha}.`);
+    process.exit(1);
+  }
   const body = [
     `<!-- respire-verdict: ${verdict} head=${headSha} -->`,
     "### Independent Verifier Verdict",
