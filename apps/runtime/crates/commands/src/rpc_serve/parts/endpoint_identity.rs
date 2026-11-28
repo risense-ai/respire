@@ -411,11 +411,26 @@ fn queue_wait() -> Duration {
     )
 }
 
+pub fn is_readonly_doctor(args: &[String]) -> bool {
+    if command_name(args) != Some("doctor") {
+        return false;
+    }
+    let options = &args[..args.iter().position(|arg| arg == "--").unwrap_or(args.len())];
+    !options.iter().any(|arg| {
+        matches!(arg.as_str(), "--fix" | "--check-update")
+            || arg.starts_with("--fix=")
+            || arg.starts_with("--check-update=")
+    })
+}
+
 pub fn is_exclusive(args: &[String]) -> bool {
     if is_context_query(args) {
         return false;
     }
     if command_name(args) == Some("update") {
+        return false;
+    }
+    if is_readonly_doctor(args) {
         return false;
     }
     if command_name(args) == Some("remember")

@@ -157,7 +157,9 @@ fn validate_job_scope(scope: &RuntimeRequestScope) -> Result<(), String> {
 
 fn capture_scoped(scope: &RuntimeRequestScope, args: Vec<String>) -> CommandResult {
     let _scope_held = SCOPE_EXECUTION.read().map_err(|_| "scope_mismatch: identity fence poisoned".to_owned())?;
-    if !is_status(&args) {
+    if is_readonly_doctor(&args) {
+        validate_job_scope(scope)?;
+    } else if !is_status(&args) {
         let gate = shared_exclusive();
         let _held = gate.acquire(true);
         validate_job_scope(scope)?;

@@ -54,6 +54,7 @@ let themeDropdown = null;
 const ctx = {
   desktop: null,
   status: null,
+  statusScope: "",
   statusError: "",
   modelInventory: createModelInventory(() => ctx.desktop),
   api,
@@ -204,16 +205,22 @@ async function refresh() {
     setRefreshText($("#client-version"), t(i18nMessages.m477581b84e505d10) + " " + ctx.desktop.version);
     setRefreshText($("#client-platform"), ctx.desktop.platform);
     if (ctx.desktop.connected) {
+      const statusScope = `${ctx.desktop.health?.account_id || ""}|${ctx.desktop.health?.instance_id || ""}`;
       try {
         ctx.status = await api("runtime-status");
+        ctx.statusScope = statusScope;
         ctx.statusError = "";
       } catch (error) {
-        ctx.status = null;
+        if (ctx.statusScope !== statusScope) {
+          ctx.status = null;
+          ctx.statusScope = "";
+        }
         ctx.statusError = error.message;
       }
     } else {
       ctx.status = null;
-    ctx.statusError = ctx.desktop.connectionError || t(i18nMessages.mcef1537a814bdc68);
+      ctx.statusScope = "";
+      ctx.statusError = ctx.desktop.connectionError || t(i18nMessages.mcef1537a814bdc68);
     }
     const s = ctx.status?.summary || {};
     setRefreshText($("#nav-memory-count"), number(s.local_alive));
