@@ -263,15 +263,13 @@ func (d *desktop) businessRoute(w http.ResponseWriter, r *http.Request) bool {
 			result, err = d.InstallPlugin(ctx, input.Target, input.Mirror)
 		case "/api/open-model-dir":
 			// Reveal a model file in the OS file manager; only paths inside the
-			// model directory are accepted.
-			dir := d.m.ModelDir()
-			abs, absErr := filepath.Abs(input.Path)
+			// configured models directories are accepted.
+			abs, ok, absErr := allowModelRevealPath(d.m.DataRoot, d.m.ModelDir(), input.Path)
 			if absErr != nil {
 				err = absErr
 				break
 			}
-			rel, relErr := filepath.Rel(dir, abs)
-			if relErr != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			if !ok {
 				err = errors.New(i18n.Messagea32ad328c9836b84)
 				break
 			}
@@ -430,6 +428,29 @@ func writeJSONFile(path string, value any) error {
 		return err
 	}
 	return os.WriteFile(path, append(data, '\n'), 0600)
+}
+
+func pathWithinDir(root, abs string) bool {
+	if root == "" {
+		return false
+	}
+	rel, err := filepath.Rel(root, abs)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+func allowModelRevealPath(dataRoot, modelDir, target string) (string, bool, error) {
+	if strings.TrimSpace(target) == "" {
+		return "", false, nil
+	}
+	abs, err := filepath.Abs(target)
+	if err != nil {
+		return "", false, err
+	}
+	modelsRoot := ""
+	if dataRoot != "" {
+		modelsRoot = filepath.Join(dataRoot, "models")
+	}
+	return abs, pathWithinDir(modelDir, abs) || pathWithinDir(modelsRoot, abs), nil
 }
 
 func errorText(err error) string {

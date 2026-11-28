@@ -1,19 +1,21 @@
 import { messages as i18nMessages } from "../ui/i18n/messages.js";
-import { $, all, h, bytes, api, execute, confirm, notify } from "../ui/core.js";
+import { $, all, action, h, bytes, api, execute, confirm, notify, input, select } from "../ui/core.js";
 import { t } from "../ui/i18n.js";
 import {
   MODEL_CARDS,
   MODEL_OPTIONS,
-  DEVICE_VARIANTS,
-  graniteVariant,
-  DEVICES,
+  MIRROR_OPTIONS,
   engineAvailable,
   isProfileModel,
+  variantFilename,
   activeDownloadSession,
   openDownloadModal,
   reopenActiveDownloadModal,
   applyEngineChoice,
 } from "../pages/model-kit.js";
+
+const MODEL_IDS = ["granite-311m-r2", "granite-97m-r2", "m3", "bge-base-zh-v1.5"];
+const ENGINES = ["cpu", "gpu", "npu"];
 
 const EXECUTE_STAGES = [
   ["download", i18nMessages.m4673a23061656125],
@@ -30,7 +32,6 @@ export function modelSteps(wizard, {
   frame,
   card,
   backButton,
-  render,
   goto,
   complete,
   connected,
@@ -39,43 +40,92 @@ export function modelSteps(wizard, {
   root,
   session,
   exitToModels,
+  curatedModels,
+  defaultModel,
+  defaultVariantForModel,
 }) {
   async function ensureInventory(model) {
     return ctx.modelInventory.get(model) || ctx.modelInventory.load(model);
   }
 
+  function bindChoices(group, onSelect) {
+    const choices = all("[data-choice]", group);
+    choices.forEach((choice) => choice.addEventListener("click", () => {
+      onSelect(choice.dataset.choice);
+      choices.forEach((button) => {
+        const active = button === choice;
+        button.classList.toggle("active", active);
+        button.setAttribute("aria-pressed", String(active));
+      });
+    }));
+  }
+
   function renderModel(body) {
-    const benefit =
-      i18nMessages.m682a50ff84a77cf7;
+    const cards = curatedModels || MODEL_IDS.map((id) => MODEL_CARDS.find((model) => model.id === id));
+    const mirror = ctx.desktop?.preferences?.modelMirror || "auto";
+    const preset = MIRROR_OPTIONS.some(([value]) => value !== "custom" && value === mirror);
     body.innerHTML = frame(
       i18nMessages.m1afed6a81a2512d2,
       "",
-      `<p class="hint">${h(benefit)}</p><div class="wizard-choices">${MODEL_CARDS.map(
-        (model, index) =>
-          card(model.title, model.detail, model.id, {
-            badge: index === 0 ? i18nMessages.m844b8cc8dff7c1d8 : "",
-            active: wizard.state.model === model.id,
-          }),
-      ).join("")}</div>`,
+      `<div class="wizard-choices wizard-model-grid">${cards.map((model) => {
+        const detail = model.dims ? `${model.dims} ${t(i18nMessages.modelDims)} · ${model.context.toLocaleString()} ${t(i18nMessages.modelContext)} · ${t(model.tag)}` : "";
+        return card(model.title, detail, model.id, {
+          badge: model.id === defaultModel ? i18nMessages.m844b8cc8dff7c1d8 : "",
+          active: wizard.state.model === model.id,
+        });
+      }).join("")}</div><form class="wizard-form wizard-mirror" data-wizard-mirror>
+        ${select("mirror", i18nMessages.m012f0f4b569f1b90, MIRROR_OPTIONS, preset ? mirror : "custom")}
+        <div data-mirror-custom ${preset ? "hidden" : ""}>${input("mirror-custom", i18nMessages.mad70940de1eb29fc, preset ? "" : mirror, { type: "url" })}</div>
+        <button type="submit">${h(i18nMessages.ma3030bf8f16dc63c)}</button>
+      </form>`,
       backButton(wizard.state.syncChoice === "cloud" ? "account" : "sync") +
         `${i18nMessages.meed1c46e80a4bae6}`,
     );
-    all("[data-choice]", body).forEach((choice) =>
-      choice.addEventListener("click", () => {
-        if (wizard.state.model !== choice.dataset.choice) {
-          wizard.state.model = choice.dataset.choice;
-          if (graniteVariant(wizard.state.model)) wizard.state.device = "cpu";
-          wizard.state.variantTouched = false;
-          wizard.state.variant = "";
+    bindChoices($(".wizard-model-grid", body), (id) => {
+      if (wizard.state.model === id) return;
+      wizard.state.model = id;
+      wizard.state.variant = defaultVariantForModel?.(id) || (id.startsWith("granite-") ? "quint8_avx2" : "quantized");
+    });
+    const form = $("[data-wizard-mirror]", body);
+    const mirrorSelect = $("[name=mirror]", form);
+    const custom = $("[name=mirror-custom]", form);
+    function updateMirrorField() {
+      const isCustom = mirrorSelect.value === "custom";
+      $("[data-mirror-custom]", form).hidden = !isCustom;
+      custom.disabled = !isCustom;
+      custom.required = isCustom;
+    }
+    updateMirrorField();
+    mirrorSelect.addEventListener("change", updateMirrorField);
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const isCustom = mirrorSelect.value === "custom";
+      const value = isCustom ? custom.value.trim() : mirrorSelect.value;
+      if (isCustom) {
+        if (!URL.canParse(value)) return setError(t(i18nMessages.modelMirrorInvalid));
+        const parsed = new URL(value);
+        if (!["http:", "https:"].includes(parsed.protocol) || parsed.username || parsed.password)
+          return setError(t(i18nMessages.modelMirrorInvalid));
+      }
+      action($("[type=submit]", form), async () => {
+        wizard.busy = true;
+        try {
+          setError("");
+          await ctx.savePreferences({ modelMirror: value });
+          notify(i18nMessages.m9b49b31f2416becd);
+        } catch (error) {
+          if (body.isConnected) setError(error.message);
+        } finally {
+          wizard.busy = false;
         }
-        render();
-      }),
-    );
+      });
+    });
     $("[data-next-model]", body).addEventListener("click", () => {
       if (wizard.busy) return;
       goto("device");
     });
     $("[data-skip-model]", body).addEventListener("click", async () => {
+      if (wizard.busy) return;
       if (
         await confirm(
           i18nMessages.mc9f42140d9d65f5c,
@@ -98,69 +148,62 @@ export function modelSteps(wizard, {
       return;
     }
     const platform = ctx.desktop?.platform || "";
-    // OS-level entry gates from the shared kit; real capability is decided
-    // by the runtime's inference probe at enable time.
-    const gpuEntry = engineAvailable(platform, "gpu");
+    const available = (engine) => engineAvailable(platform, engine) ||
+      (!curatedModels && /^(windows|darwin|linux)\b/.test(platform));
     body.innerHTML = frame(
       i18nMessages.mbbccf7516f5e53ae,
-      i18nMessages.m4b4018eca61fe94e,
-      `<div class="wizard-choices">${DEVICES.map((device) =>
-        card(device.title, device.detail, device.id, {
-          disabled:
-            (Boolean(graniteVariant(wizard.state.model)) && device.id !== "cpu") ||
-            (device.id === "gpu" && !gpuEntry),
-          badge: device.id === "cpu" ? i18nMessages.m844b8cc8dff7c1d8 : "",
-          active: wizard.state.device === device.id,
+      "",
+      `<div class="wizard-choices wizard-engines">${ENGINES.map((engine) =>
+        card(engine.toUpperCase(), "", engine, {
+          disabled: !available(engine),
+          active: wizard.state.device === engine,
         }),
-      ).join("")}</div>${i18nMessages.meefec8afa359fa58}`,
+      ).join("")}</div><h2 class="wizard-weight-title">${h(t(i18nMessages.modelQuantization))}</h2>
+      <div class="wizard-weights" data-weights aria-busy="true"><p class="hint wizard-weight-loading">${h(t(i18nMessages.modelInventoryLoading))}</p></div>
+      <p class="hint" data-download-estimate></p>`,
       backButton("model") +
         `${i18nMessages.m8c76acc0c2bd1487}`,
-    );
-    all("[data-choice]", body).forEach((choice) =>
-      choice.addEventListener("click", () => {
-        wizard.state.device = choice.dataset.choice;
-        wizard.state.variantTouched = false;
-        render();
-      }),
     );
     loadWeights(body);
   }
 
-  // Weights follow the device: CPU defaults to quantized, GPU to fp16;
-  // the advanced section may override. Download estimate always reflects the
-  // files actually missing on disk.
   async function loadWeights(body) {
+    const weights = $("[data-weights]", body);
+    const next = $("[data-device-next]", body);
+    next.disabled = true;
     let inventory;
+    bindChoices($(".wizard-engines", body), (engine) => {
+      wizard.state.device = engine;
+      if (inventory) updateEstimate(body, inventory);
+    });
     try {
       inventory = await ensureInventory(wizard.state.model);
     } catch (error) {
-      setError(error.message);
+      if (body.isConnected) {
+        weights.textContent = "";
+        weights.removeAttribute("aria-busy");
+        setError(error.message);
+      }
       return;
     }
-    if (!root.isConnected || wizard.state.step !== "device") return;
-    if (!wizard.state.variantTouched || !wizard.state.variant)
-      wizard.state.variant = graniteVariant(wizard.state.model) || DEVICE_VARIANTS[wizard.state.device] || "quantized";
-    const weights = $("[data-weights]", body);
-    if (weights) {
-      const options = inventory.variants
-        .map(
-          (variant) =>
-            `<option value="${h(variant.name)}" ${variant.name === wizard.state.variant ? "selected" : ""}>${h(variant.name)} · ${h(bytes(variant.size))}${variant.installed ? i18nMessages.m49dc4aa5307dd88e : ""}</option>`,
-        )
-        .join("");
-      weights.innerHTML = `${i18nMessages.m4355d91bc30250f1}${options}${i18nMessages.m4f223f8434acbff1}`;
-      const select = $("select[name=variant]", weights);
-      select.addEventListener("change", () => {
-        wizard.state.variant = select.value;
-        wizard.state.variantTouched = true;
-        updateEstimate(body, inventory);
+    if (!body.isConnected || wizard.state?.step !== "device") return;
+    weights.innerHTML = inventory.variants.map((variant) => {
+      const filename = variantFilename(variant);
+      const detail = `${variant.name === "fp32" ? "" : `${filename} · `}${bytes(variant.size)}`;
+      return card(variant.name === "fp32" ? filename : variant.name, detail, variant.name, {
+        badge: variant.installed ? i18nMessages.me2f12da7faa68217 : i18nMessages.mdccec95b65e15ff0,
+        active: variant.name === wizard.state.variant,
       });
-    }
-    const next = $("[data-device-next]", body);
-    if (next) {
-      next.addEventListener("click", () => goto("confirm"));
-    }
-    updateEstimate(body, inventory);
+    }).join("");
+    weights.removeAttribute("aria-busy");
+    bindChoices(weights, (variant) => {
+      wizard.state.variant = variant;
+      next.disabled = false;
+      updateEstimate(body, inventory);
+    });
+    next.disabled = !inventory.variants.some((variant) => variant.name === wizard.state.variant);
+    next.addEventListener("click", () => goto("confirm"));
+    if (!next.disabled) updateEstimate(body, inventory);
   }
 
   function pendingDownloadBytes(inventory) {
@@ -198,6 +241,7 @@ export function modelSteps(wizard, {
     try {
       inventory = await ensureInventory(wizard.state.model);
     } catch (error) {
+      if (!body.isConnected) return;
       body.innerHTML = frame(
         i18nMessages.m3550e7790941f374,
         "",
@@ -206,6 +250,7 @@ export function modelSteps(wizard, {
       );
       return;
     }
+    if (!body.isConnected) return;
     const cloud =
       wizard.state.syncChoice === "cloud"
         ? `${t(i18nMessages.m5f30fb70507cbc2c)}${i18nMessages.mda047c04c9b5e27e}${h(session().user || "")}${i18nMessages.m68f30e86a6eb9b0a}${t(i18nMessages.m6e9adb42a28942eb)}${wizard.state.autoSync ? t(i18nMessages.m8a4ef3e48e4e8a5a) : t(i18nMessages.m3cffa9757b693b52)}`
@@ -309,11 +354,6 @@ export function modelSteps(wizard, {
   async function runExecute(startStage) {
     if (wizard.state.executing) return;
     wizard.state.executing = true;
-    // The in-memory device/weight selection may be missing on a resumed
-    // run; derive the device default so the download never uses a blank
-    // variant name.
-    if (!wizard.state.variant)
-      wizard.state.variant = graniteVariant(wizard.state.model) || DEVICE_VARIANTS[wizard.state.device] || "quantized";
     executeActions([]);
     try {
       if (startStage === "download") {
@@ -376,7 +416,7 @@ export function modelSteps(wizard, {
         model: wizard.state.model,
         variant,
         label: modelLabel(wizard.state.model),
-        getMirror: () => "auto",
+        getMirror: () => ctx.desktop?.preferences?.modelMirror || "auto",
       });
       executeActions([[i18nMessages.mDownloadShowProgress, "reopen-download"]]);
       const ok = await modal.done;
@@ -477,7 +517,7 @@ export function modelSteps(wizard, {
       if (isProfileModel(wizard.state.model))
         await execute("index_prepare");
       else
-        await execute("model_prepare", { mirror: "auto" });
+        await execute("model_prepare", { mirror: ctx.desktop?.preferences?.modelMirror || "auto" });
     } catch (error) {
       failure("index", error.message);
       return false;

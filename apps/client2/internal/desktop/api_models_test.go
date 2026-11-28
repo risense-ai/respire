@@ -175,3 +175,28 @@ func TestDesktopModelActions(t *testing.T) {
 		t.Fatalf("shared tokenizer was removed: %v", err)
 	}
 }
+
+func TestAllowModelRevealPath(t *testing.T) {
+	root := t.TempDir()
+	m3Dir := filepath.Join(root, "models", "bge-m3")
+	for _, path := range []string{
+		filepath.Join(m3Dir, "onnx", "model_quantized.onnx"),
+		filepath.Join(root, "models", "granite-311m-r2", "onnx", "model_quint8_avx2.onnx"),
+		filepath.Join(root, "models", "granite-97m-r2", "onnx", "model.onnx"),
+		filepath.Join(root, "models", "bge-base-zh-v1.5", "onnx", "model_fp16.onnx"),
+	} {
+		if _, ok, err := allowModelRevealPath(root, m3Dir, path); err != nil || !ok {
+			t.Fatalf("expected reveal path allowed for %s: ok=%v err=%v", path, ok, err)
+		}
+	}
+	for _, blocked := range []string{
+		"",
+		"   ",
+		filepath.Join(root, "client2", "preferences.json"),
+		filepath.Join(root, "models", "..", "rsrs.db"),
+	} {
+		if _, ok, err := allowModelRevealPath(root, m3Dir, blocked); err != nil || ok {
+			t.Fatalf("expected reveal path blocked for %s: ok=%v err=%v", blocked, ok, err)
+		}
+	}
+}

@@ -1,9 +1,12 @@
 import { messages as i18nMessages } from "../ui/i18n/messages.js";
 import { $, h, confirm, notify } from "../ui/core.js";
+import * as modelKit from "../pages/model-kit.js";
 
 import { accountSteps } from "./wizard-account.js";
 import { modelSteps } from "./wizard-model.js";
 import { agentSteps } from "./wizard-agents.js";
+
+const DEFAULT_ID = modelKit.DEFAULT_MODEL || "granite-311m-r2";
 
 // First-run onboarding wizard: a resumable step machine over real runtime
 // state. Steps advance only on real receipts (auth envelopes, session
@@ -142,7 +145,7 @@ export function createWizard(ctx) {
     value,
     { disabled = false, badge = "", active = false } = {},
   ) {
-    return `<button type="button" class="wizard-choice${active ? " active" : ""}" data-choice="${h(value)}"${disabled ? " disabled" : ""}><span class="wizard-choice-copy"><strong>${h(label)}${badge ? `<span class="wizard-badge">${h(badge)}</span>` : ""}</strong><small>${h(detail)}</small></span></button>`;
+    return `<button type="button" class="wizard-choice${active ? " active" : ""}" data-choice="${h(value)}" aria-pressed="${active}"${disabled ? " disabled" : ""}><span class="wizard-choice-copy"><strong>${h(label)}${badge ? `<span class="wizard-badge">${h(badge)}</span>` : ""}</strong>${detail ? `<small>${h(detail)}</small>` : ""}</span></button>`;
   }
 
   function backButton(step) {
@@ -185,7 +188,6 @@ export function createWizard(ctx) {
     frame,
     card,
     backButton,
-    render,
     goto,
     complete,
     connected,
@@ -194,6 +196,9 @@ export function createWizard(ctx) {
     root,
     session,
     exitToModels,
+    curatedModels: modelKit.CURATED_MODELS,
+    defaultModel: DEFAULT_ID,
+    defaultVariantForModel: modelKit.defaultVariantForModel,
   });
   const { renderAgents, renderImport } = agentSteps(wizard, {
     goto,
@@ -290,10 +295,9 @@ export function createWizard(ctx) {
       accountPhase: "auth",
       autoSync: true,
       material: null,
-      model: "m3",
+      model: DEFAULT_ID,
       device: "cpu",
-      variant: "",
-      variantTouched: false,
+      variant: modelKit.defaultVariantForModel?.(DEFAULT_ID) || "quint8_avx2",
       stages: {},
       agentScope: "prompt",
       agentTargets: null,

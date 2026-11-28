@@ -51,8 +51,8 @@
     },
     {
       "path": "apps/client2/internal/desktop/frontend/ui/i18n/messages04.js",
-      "lines": 28,
-      "sha256": "ab4a6f4524a9c0a198c2a994e0dd84b16c041ab65a7c9a9c484101b6be71bd82",
+      "lines": 63,
+      "sha256": "60dd99aba4608def0232000bd64ba3cda38ccddbc8aef4e5b56af0cd56ea36a1",
       "reason": "Translated UI catalog"
     },
     {
@@ -69,8 +69,8 @@
     },
     {
       "path": "apps/client2/internal/desktop/frontend/ui/i18n/translations3.js",
-      "lines": 346,
-      "sha256": "6d8b939a136681ec8681161ee1cf3b509544a74539201fcaf43abe42427d8c2a",
+      "lines": 375,
+      "sha256": "54d7fd57846f8b3e8bb8e50a41862449d1c6cbfac7457ba1665c65480657d0fb",
       "reason": "Translated UI catalog"
     },
     {

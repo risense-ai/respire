@@ -179,7 +179,7 @@ async function test(name, fn) { await fn(); console.log(`PASS ${++count}: ${name
   await test('core configuration notices require the original applied receipt', async () => {
     const models = read('pages/models-settings.js');
     const start = models.indexOf('  function fusionApplicationNotice(');
-    const notice = new Function(models.slice(start, models.indexOf('\n  $("[data-mirror]"', start)) + '\nreturn fusionApplicationNotice;')();
+    const notice = new Function(models.slice(start, models.indexOf('\n  $("[data-recall]"', start)) + '\nreturn fusionApplicationNotice;')();
     for (const state of [undefined, null, {state:'unknown'}, {state:'applied'}, {state:'pending'}]) {
       const value = notice(state);
       assert.equal(value.warning, true);
