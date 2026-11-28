@@ -7,6 +7,7 @@
   inset: 0;
   z-index: 300;
   display: grid;
+  grid-template-rows: minmax(0, 1fr);
   place-items: center;
   padding: 20px;
   background: color-mix(in srgb, var(--bg) 88%, transparent);
@@ -14,11 +15,16 @@
   overflow: auto;
 }
 
+.wizard-shell {
+  inline-size: min(680px, 100%);
+  block-size: min(42rem, 100%);
+}
+
 .wizard-card {
   position: relative;
-  width: min(680px, 100%);
-  max-height: calc(100% - 40px);
-  overflow: auto;
+  block-size: 100%;
+  display: grid;
+  grid-template-rows: 3.875rem minmax(0, 1fr);
   padding: 1.75rem;
   border: 1px solid var(--line);
   border-radius: 18px;
@@ -59,6 +65,7 @@
   padding: 0 2.4rem 1rem 0;
   list-style: none;
   border-bottom: 1px solid var(--line);
+  overflow: auto;
 }
 
 .wizard-step {
@@ -98,7 +105,14 @@
 }
 
 .wizard-body {
-  display: block;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) 4.25rem 2.75rem;
+}
+
+.wizard-step-content {
+  overflow: auto;
+  scrollbar-gutter: stable;
+  padding-inline: 3px;
 }
 
 .wizard-choices {
@@ -114,6 +128,9 @@
   border-radius: 10px;
   background: var(--panel);
   white-space: normal;
+  block-size: 6rem;
+  align-items: safe center;
+  overflow: auto;
 }
 
 .wizard-choice-copy {
@@ -154,6 +171,15 @@
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--panel);
+  block-size: 3.75rem;
+  overflow: auto;
+}
+
+[data-agent-list] {
+  block-size: 12rem;
+  align-content: start;
+  overflow: auto;
+  scrollbar-gutter: stable;
 }
 
 .wizard-agent-row input {
@@ -174,6 +200,8 @@
   display: grid;
   gap: 6px;
   margin-top: 0.75rem;
+  max-block-size: 8rem;
+  overflow: auto;
 }
 
 .wizard-agent-results .row {
@@ -191,7 +219,14 @@
   flex-wrap: wrap;
   gap: 10px;
   justify-content: flex-end;
-  margin-top: 1.25rem;
+  align-content: start;
+  padding: 0.625rem 3px 3px;
+  overflow: auto;
+}
+
+[data-wizard-error] {
+  grid-row: 3;
+  overflow: auto;
 }
 
 .wizard-actions [data-skip-wizard] {
@@ -283,6 +318,8 @@ button.wizard-busy {
 
 .wizard-advanced {
   margin: 0.75rem 0;
+  block-size: 7rem;
+  overflow: auto;
 }
 
 .wizard-advanced summary {
@@ -303,6 +340,8 @@ button.wizard-busy {
   align-items: center;
   gap: 8px;
   color: var(--muted);
+  block-size: 2.25rem;
+  overflow: auto;
 }
 
 .wizard-stage-dot {
@@ -344,7 +383,13 @@ button.wizard-busy {
 }
 
 .wizard-execute-status {
-  min-height: 1.25rem;
+  block-size: 5rem;
+  overflow: auto;
+}
+
+[data-download-estimate] {
+  block-size: 2.75rem;
+  overflow: auto;
 }
 
 .wizard-resume-pill {
@@ -360,6 +405,9 @@ button.wizard-busy {
   .wizard-card {
     padding: 1.25rem;
     border-radius: 12px;
+  }
+  .wizard-body {
+    grid-template-rows: minmax(0, 1fr) 7rem 2.75rem;
   }
   .wizard-actions {
     flex-direction: column-reverse;

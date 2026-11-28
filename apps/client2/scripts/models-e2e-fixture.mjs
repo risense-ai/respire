@@ -14,7 +14,7 @@ export const granite = {
 };
 const baseline = { model: "m3", variant: "quantized", engine: "cpu" };
 
-export async function startModelsFixture() {
+export async function startModelsFixture({ scenario = {} } = {}) {
   const preferences = { onboardingCompleted: true, language: "en", modelMirror: "auto" };
   const health = { instance_id: "fixture", account_id: "account", generation: 1,
     capabilities: ["openapi.v1", "sse.operations.v1"], inference: { phase: "idle" } };
@@ -66,6 +66,10 @@ export async function startModelsFixture() {
   function execute({ id, name, args }) {
     const job = { id, name, state: "done", envelope: envelope() };
     jobs.set(id, job);
+    if (Object.hasOwn(scenario.commands ?? {}, name)) {
+      Object.assign(job, scenario.commands[name](args));
+      return job;
+    }
     switch (name) {
       case "index_rebuild":
         rebuild = job;
@@ -118,9 +122,12 @@ export async function startModelsFixture() {
     const reply = (result) => response.writeHead(200, { "Content-Type": "application/json" })
       .end(JSON.stringify({ ok: true, result }));
     switch (path) {
-      case "/api/state": return reply({ connected: true, version: "fixture", platform: "windows", health, preferences, task });
-      case "/api/runtime-status": return reply(envelope({ indexed_count: indexed, local_alive: total,
-        retrieval_index: { running: indexRunning(), state: indexRunning() ? "running" : "idle" }, model_operation: modelOperation() }));
+      case "/api/state": return reply({ connected: true, version: "fixture", platform: "windows", health, preferences, task, ...scenario.state });
+      case "/api/runtime-status":
+        if (scenario.statusError) return response.writeHead(503, { "Content-Type": "application/json" })
+          .end(JSON.stringify({ ok: false, error: scenario.statusError }));
+        return reply(envelope({ indexed_count: indexed, local_alive: total,
+          retrieval_index: { running: indexRunning(), state: indexRunning() ? "running" : "idle" }, model_operation: modelOperation(), ...scenario.status }));
       case "/api/preferences": {
         if (body?.modelMirror && !/^(?:auto$|https?:\/\/[^/]+)/.test(body.modelMirror)) {
           return response.writeHead(200, { "Content-Type": "application/json" })
@@ -164,9 +171,9 @@ export async function startModelsFixture() {
       case "/api/runtime-operation-events": return subscribe(id, runtime.get(id), response);
       case "/api/execute": return reply(execute(body));
       case "/api/operation": return reply(jobs.get(id));
-      case "/api/operations": return reply([...jobs.values()].filter(job => job.state === "running"));
+      case "/api/operations": return reply(scenario.operations ?? [...jobs.values()].filter(job => job.state === "running"));
       case "/api/operation-ack": return reply(jobs.delete(body.id));
-      case "/api/inject-targets":
+      case "/api/inject-targets": return reply(scenario.agents ?? []);
       case "/api/plugins": return reply([]);
       case "/api/stats": return reply(envelope());
       default: throw new Error(`Unexpected route ${request.method} ${path}`);
@@ -186,7 +193,7 @@ export async function startModelsFixture() {
     server.listen(0, "127.0.0.1", resolve);
   });
   return {
-    url: `http://127.0.0.1:${server.address().port}/`, errors, requests, switches, cancellations, downloads, installed, health,
+    url: `http://127.0.0.1:${server.address().port}/`, errors, requests, switches, cancellations, downloads, installed, health, preferences,
     get selection() { return active; },
     get rebuild() { return rebuild; },
     progressDownload,

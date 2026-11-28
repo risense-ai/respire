@@ -47,6 +47,7 @@ try {
   if (!executable) throw new Error("Set PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH to a Chromium browser");
   env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH = executable;
   run(process.execPath, ["scripts/test-models-e2e.mjs"]);
+  run(process.execPath, ["scripts/test-layout-stability-e2e.mjs"]);
 } finally {
   if (temporary && dirname(resolve(temporary)) === tempRoot) rmSync(temporary, { recursive: true, force: true });
 }
