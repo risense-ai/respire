@@ -90,8 +90,8 @@ pub fn create_owner_credential(
     let name = directory_name(instance_id)?;
     let name = name.to_str().map_err(Error::other)?;
     let base = pinned_base(base)?;
-    let user = CurrentUser::query()?;
-    user.verify_handle(base.as_raw_handle(), false)?;
+    let user = CurrentUser::query_managed()?;
+    user.verify_legacy_profile_owner(base.as_raw_handle())?;
     let descriptor = user.descriptor()?;
     // NtCreateFile links a new directory under the exact validated base
     // HANDLE; FILE_CREATE never opens or changes an existing path.
@@ -119,8 +119,8 @@ pub fn read_owner_credential(base: &Path, instance_id: &str) -> io::Result<Owner
     let name = directory_name(instance_id)?;
     let name = name.to_str().map_err(Error::other)?;
     let base = pinned_base(base)?;
-    let user = CurrentUser::query()?;
-    user.verify_handle(base.as_raw_handle(), false)?;
+    let user = CurrentUser::query_managed()?;
+    user.verify_legacy_profile_owner(base.as_raw_handle())?;
     let directory = relative_open(
         base.as_raw_handle(),
         OsStr::new(name),

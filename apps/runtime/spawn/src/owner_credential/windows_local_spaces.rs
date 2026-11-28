@@ -48,7 +48,7 @@ impl LocalSpaceNamespace {
     pub fn open(profile: &Path) -> io::Result<Self> {
         let base = pinned_base_with_sharing(profile, SHARE, true)?;
         let user = CurrentUser::query_managed()?;
-        user.verify_managed_base(base.as_raw_handle())?;
+        user.verify_legacy_profile_owner(base.as_raw_handle())?;
         let catalog = managed_child(base.as_raw_handle(), CATALOG, &user, false)?;
         Ok(Self { _base: base, catalog, path: profile.join(CATALOG), user })
     }
@@ -56,7 +56,7 @@ impl LocalSpaceNamespace {
     pub fn open_existing(profile: &Path) -> io::Result<Option<Self>> {
         let base = pinned_base_with_sharing(profile, SHARE, true)?;
         let user = CurrentUser::query_managed()?;
-        user.verify_managed_base(base.as_raw_handle())?;
+        user.verify_legacy_profile_owner(base.as_raw_handle())?;
         match open_managed_child(base.as_raw_handle(), CATALOG, &user) {
             Ok(catalog) => Ok(Some(Self { _base: base, catalog, path: profile.join(CATALOG), user })),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),

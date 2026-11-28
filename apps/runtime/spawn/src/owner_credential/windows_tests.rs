@@ -39,6 +39,82 @@ fn record(value: u8) -> OwnerRecord {
 }
 
 #[test]
+fn windows_historical_profile_keeps_new_children_owner_only() -> io::Result<()> {
+    const SHARE: u32 = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
+    const PROFILE_KEY: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    let fixture = Fixture::new()?;
+    let user = CurrentUser::query_managed()?;
+    let descriptor = user.legacy_fixture_descriptor()?;
+    let base = fixture.path.join("historical");
+    let historical = relative_open(
+        fixture.directory.handle(), OsStr::new("historical"), META | FILE_TRAVERSE,
+        SHARE, Some(&descriptor), FILE_CREATE, FILE_DIRECTORY_FILE,
+    )?;
+    user.verify_legacy_profile_owner(historical.as_raw_handle())?;
+    assert!(user.verify_managed_base(historical.as_raw_handle()).is_err());
+
+    let copy = migration_copy::MigrationCopy::create(&base, "backup.pending")?;
+    let backup_bytes = b"synthetic backup";
+    std::fs::write(copy.path(), backup_bytes)?;
+    copy.publish("backup.db")?;
+    let backup = relative_open(
+        historical.as_raw_handle(), OsStr::new("backup.db"), META | DELETE,
+        SHARE, None, FILE_OPEN, FILE_NON_DIRECTORY_FILE,
+    )?;
+    let backup = Removable(File::from(backup));
+    user.verify_handle(backup.handle(), true)?;
+    assert_eq!(std::fs::read(base.join("backup.db"))?, backup_bytes);
+    drop(backup);
+
+    let expected = record(7);
+    let writer = create_owner_credential(&base, "historical-custody", &expected)?;
+    user.verify_handle(writer.directory.handle(), true)?;
+    let secret = writer.published.as_ref().ok_or_else(|| Error::other("secret missing"))?;
+    user.verify_handle(secret.handle(), true)?;
+    assert!(read_owner_credential(&base, "historical-custody")?.as_bytes() == expected.as_bytes());
+    drop(writer);
+
+    let verify_directory = |path: &Path| -> io::Result<()> {
+        let handle = pinned_base_with_sharing(path, SHARE, true)?;
+        user.verify_new_managed_directory(handle.as_raw_handle())
+    };
+    let mut job = model_job::ModelJobRoot::create(&base)?;
+    verify_directory(job.root()?)?;
+    let spool = job.create_source_spool()?;
+    user.verify_handle(spool.as_raw_handle(), true)?;
+    drop(spool);
+    job.remove_empty()?;
+
+    let runtime = relative_open(
+        historical.as_raw_handle(), OsStr::new("runtime"), META | FILE_TRAVERSE,
+        SHARE, Some(&descriptor), FILE_CREATE, FILE_DIRECTORY_FILE,
+    )?;
+    assert!(user.verify_managed_base(runtime.as_raw_handle()).is_err());
+    model_namespace::provision_model_namespace(&base, PROFILE_KEY)?;
+    model_namespace::provision_model_namespace(&base, PROFILE_KEY)?;
+    let model_assets = base.join("runtime").join("model-assets-v1");
+    let namespace = model_assets.join(PROFILE_KEY);
+    verify_directory(&model_assets)?;
+    verify_directory(&namespace)?;
+    std::fs::remove_dir(namespace)?;
+    std::fs::remove_dir(model_assets)?;
+    drop(runtime);
+    std::fs::remove_dir(base.join("runtime"))?;
+
+    assert!(local_spaces::LocalSpaceNamespace::open_existing(&base)?.is_none());
+    let local_spaces = local_spaces::LocalSpaceNamespace::open(&base)?;
+    let catalog = base.join(".respire-local-spaces-v1");
+    verify_directory(&catalog)?;
+    assert!(local_spaces::LocalSpaceNamespace::open_existing(&base)?.is_some());
+    drop(local_spaces);
+    std::fs::remove_dir(catalog)?;
+
+    drop(historical);
+    std::fs::remove_dir(base)
+}
+
+#[test]
 fn windows_roundtrip_rotate_open_old_snapshot_and_clean() -> io::Result<()> {
     let fixture = Fixture::new()?;
     let a = record(5);
