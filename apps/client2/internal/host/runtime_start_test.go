@@ -16,6 +16,34 @@ import (
 	"time"
 )
 
+func cleanupFixtureServing(t *testing.T, m *Manager, health HealthInfo) {
+	t.Helper()
+	t.Cleanup(func() {
+		if err := os.WriteFile(filepath.Join(m.DataRoot, "fixture-stop"), nil, 0600); err != nil {
+			t.Error(err)
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		for {
+			birth, err := runtimeControlProcessBirth(ctx, int(health.PID))
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			if birth == "" {
+				return
+			}
+			select {
+			case <-ctx.Done():
+				t.Error("fixture serving child retained")
+				return
+			case <-time.After(10 * time.Millisecond):
+			}
+		}
+	})
+}
+
 func standaloneTestManager(t *testing.T) *Manager {
 	t.Helper()
 	root, err := canonicalSessionDirectory(t.TempDir())
@@ -24,6 +52,7 @@ func standaloneTestManager(t *testing.T) *Manager {
 	}
 	t.Setenv("RSRS_DATA_DIR", root)
 	t.Setenv("RSRS_RPC_PORT", "1")
+	t.Setenv("RESPIRE_TEST_STARTUP_PORT", "1")
 	m, err := New()
 	if err != nil {
 		t.Fatal(err)

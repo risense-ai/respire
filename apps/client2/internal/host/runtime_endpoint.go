@@ -73,7 +73,25 @@ func (m *Manager) archiveStoppedEndpoint(ctx context.Context, address string) er
 	return archiveRuntimeRecord(path, original)
 }
 
-// Call with takeover and the affected library locks held.
+func (m *Manager) archiveStoppedEndpointUnderStartupControl(ctx context.Context, address string) error {
+	path := filepath.Join(m.DataRoot, "runtime", "endpoint.json")
+	original, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !original.Mode().IsRegular() || modelUninstallRedirect(original) {
+		return errors.New(i18n.Message3d218924060ab868)
+	}
+	if err := requireStoppedRuntime(ctx, m.DataRoot, address); err != nil {
+		return err
+	}
+	return archiveRuntimeRecord(path, original)
+}
+
+// Call with startup exclusion or with takeover and the affected library locks held.
 func archiveRuntimeRecord(path string, original os.FileInfo) error {
 	if original.IsDir() {
 		return fmt.Errorf(i18n.Message7fe726524c66bc43, filepath.Base(path))
