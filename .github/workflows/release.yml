@@ -330,7 +330,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     env:
-      CANDIDATE_VERSION: ${{ needs.tag-plan.outputs.version || '2.0.0-dev.26' }}
+      CANDIDATE_VERSION: ${{ needs.tag-plan.outputs.version || '2.0.0-dev.27' }}
       CLIENT2_PLATFORM: ${{ matrix.platform }}
       CLIENT2_ARCH: ${{ matrix.arch }}
       NATIVE_ARCH: ${{ matrix.node_arch }}
@@ -416,7 +416,7 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 10
     env:
-      CANDIDATE_VERSION: ${{ needs.tag-plan.outputs.version || '2.0.0-dev.26' }}
+      CANDIDATE_VERSION: ${{ needs.tag-plan.outputs.version || '2.0.0-dev.27' }}
       CANDIDATE_SOURCE: ${{ github.sha }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -493,7 +493,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 25
     env:
-      CANDIDATE_VERSION: ${{ needs.tag-plan.outputs.version || '2.0.0-dev.26' }}
+      CANDIDATE_VERSION: ${{ needs.tag-plan.outputs.version || '2.0.0-dev.27' }}
       CANDIDATE_SOURCE: ${{ github.sha }}
       CLIENT2_TARGET: ${{ matrix.target }}
     steps:
@@ -545,7 +545,7 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 10
     env:
-      CANDIDATE_VERSION: ${{ needs.tag-plan.outputs.version || '2.0.0-dev.26' }}
+      CANDIDATE_VERSION: ${{ needs.tag-plan.outputs.version || '2.0.0-dev.27' }}
       CANDIDATE_SOURCE: ${{ github.sha }}
       COMPONENT_TAG: ${{ needs.tag-plan.outputs.tag }}
     steps:

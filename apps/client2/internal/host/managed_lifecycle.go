@@ -85,6 +85,37 @@ func (m *Manager) stopSelectedDetached(ctx context.Context, h HealthInfo) error 
 
 var runtimeInstanceID = regexp.MustCompile(`^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$`)
 
+func (m *Manager) stopOwnedDetached(ctx context.Context, h HealthInfo) error {
+	if h.ManagedID != "" {
+		return errors.New(i18n.Messagecbef8ccc12ad43e6)
+	}
+	if !validVersion(h.Version) || !validHash(h.ImageSHA256) {
+		return errors.New(i18n.Message233068eb02d0163d)
+	}
+	running := InstalledRuntime{Version: h.Version, SHA256: h.ImageSHA256}
+	if err := m.verifyInstalled(running); err != nil {
+		return err
+	}
+	_, profile, account, err := m.startupScope()
+	if err != nil {
+		return err
+	}
+	if err := m.verifyScopedRuntimeOwner(ctx, h, running, profile, account); err != nil {
+		return err
+	}
+	if err := m.stopDetached(ctx, h); err != nil {
+		return err
+	}
+	_, _, err = m.Health(ctx)
+	if IsUnavailable(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return errors.New(i18n.Message7612dd2e3c38e61f)
+}
+
 func (m *Manager) stopDetached(ctx context.Context, h HealthInfo) error {
 	if !samePath(h.InstallationRoot, m.DataRoot) || !validHash(h.InstallationID) ||
 		!runtimeInstanceID.MatchString(h.InstanceID) || !validHash(h.AccountID) || h.Generation == 0 ||

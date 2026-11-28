@@ -393,7 +393,11 @@ func (m *Manager) activateRuntimeRelease(ctx context.Context, selected Installed
 	}
 	if h.PID != 0 && !m.runtimeMatchesRelease(h, selected) {
 		m.progress(i18n.Message422c4db6d999bce0, 0, 0)
-		if err := m.stopManaged(ctx, h); err != nil {
+		stop := m.stopManaged
+		if m.hostAuthority == nil && m.startupControl != nil {
+			stop = m.stopOwnedDetached
+		}
+		if err := stop(ctx, h); err != nil {
 			return err
 		}
 	}

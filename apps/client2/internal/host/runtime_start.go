@@ -92,7 +92,12 @@ func (m *Manager) startDetachedComplete(ctx context.Context, info InstalledRunti
 	} else if err := archiveTerminalRuntimeMaintenance(m.DataRoot); err != nil {
 		return HealthInfo{}, err
 	}
-	if err := m.archiveStoppedEndpoint(ctx, endpoint.Host); err != nil {
+	if complete != nil && m.hostAuthority == nil {
+		err = m.archiveStoppedEndpointUnderStartupControl(ctx, endpoint.Host)
+	} else {
+		err = m.archiveStoppedEndpoint(ctx, endpoint.Host)
+	}
+	if err != nil {
 		return HealthInfo{}, err
 	}
 	executable := filepath.Join(m.runtimeDir(info.Version), runtimeBinary())

@@ -30,7 +30,8 @@ func startupControlFixture() int {
 		return 3
 	}
 	if os.Getenv("RSRS_RUNTIME_BOOT_TOKEN") != "" || os.Getenv("RSRS_SUPER") != "" ||
-		!samePath(os.Getenv("RSRS_DATA_DIR"), request.InstallationRoot) || os.Getenv("RSRS_RPC_PORT") != "1" {
+		!samePath(os.Getenv("RSRS_DATA_DIR"), request.InstallationRoot) ||
+		os.Getenv("RSRS_RPC_PORT") != os.Getenv("RESPIRE_TEST_STARTUP_PORT") {
 		return 4
 	}
 	birth, err := hostControlBirth(context.Background())
@@ -403,30 +404,7 @@ func TestStartupProductionWiring(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() {
-		if err := os.WriteFile(filepath.Join(m.DataRoot, "fixture-stop"), nil, 0600); err != nil {
-			t.Error(err)
-			return
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		for {
-			birth, err := runtimeControlProcessBirth(ctx, int(health.PID))
-			if err != nil {
-				t.Error(err)
-				return
-			}
-			if birth == "" {
-				return
-			}
-			select {
-			case <-ctx.Done():
-				t.Error("fixture serving child retained")
-				return
-			case <-time.After(10 * time.Millisecond):
-			}
-		}
-	})
+	cleanupFixtureServing(t, m, health)
 	if health.PID == 0 || m.directRuntime != health {
 		t.Fatal("startup did not publish its completed owner")
 	}
@@ -486,30 +464,89 @@ func TestStartupDoesNotRetireTerminalMaintenance(t *testing.T) {
 	requireFixtureHelperExited(t, m)
 }
 
-func TestStartupStaleEndpointRequiresLibraryAuthority(t *testing.T) {
-	m := standaloneTestManager(t)
-	info := standaloneTestSelection(t, m)
+func startupEndpointFixture(t *testing.T, m *Manager) (string, []byte) {
+	t.Helper()
 	t.Setenv("RESPIRE_TEST_STARTUP_CONTROL", "ok")
 	startupFixtureHealth(t, m)
 	path := filepath.Join(m.DataRoot, "runtime", "endpoint.json")
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		t.Fatal(err)
 	}
-	original := []byte(`{"historical":"synthetic-only"}`)
+	original := []byte("{\"historical\": \"stale\"}\n")
 	if err := os.WriteFile(path, original, 0600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := m.startDetached(startupTestContext(t), info); !errors.Is(err, errRuntimeHostAuthorityUnavailable) {
-		t.Fatalf("stale endpoint bypassed library authority: %v", err)
+	return path, original
+}
+
+func TestStartupArchivesStaleEndpointUnderStartupControl(t *testing.T) {
+	m := standaloneTestManager(t)
+	info := standaloneTestSelection(t, m)
+	path, original := startupEndpointFixture(t, m)
+	if m.hostAuthority != nil {
+		t.Fatal("expected production startup control wiring")
+	}
+	health, err := m.startDetached(startupTestContext(t), info)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanupFixtureServing(t, m, health)
+	if health.PID == 0 || !health.StartupComplete || m.directRuntime != health {
+		t.Fatal("startup did not publish its completed owner")
+	}
+	archives, err := filepath.Glob(filepath.Join(filepath.Dir(path), "endpoint.stopped-*.json"))
+	if err != nil || len(archives) != 1 {
+		t.Fatalf("expected one archived endpoint, got %v, %v", archives, err)
+	}
+	current, err := os.ReadFile(archives[0])
+	if err != nil || !bytes.Equal(current, original) {
+		t.Fatalf("archive did not preserve endpoint bytes: %v", err)
+	}
+	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stale endpoint was retained: %v", err)
+	}
+	requireFixtureHelperExited(t, m)
+}
+
+func TestStartupRefusesOccupiedPortWithEndpointUnderStartupControl(t *testing.T) {
+	m := standaloneTestManager(t)
+	info := standaloneTestSelection(t, m)
+	path, original := startupEndpointFixture(t, m)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	address := listener.Addr().String()
+	m.Endpoint = "http://" + address
+	t.Setenv("RESPIRE_TEST_STARTUP_PORT", strings.TrimPrefix(address, "127.0.0.1:"))
+	if _, err := m.startDetached(startupTestContext(t), info); err == nil || !strings.Contains(err.Error(), address) {
+		t.Fatalf("expected occupied endpoint rejection: %v", err)
 	}
 	current, err := os.ReadFile(path)
 	if err != nil || !bytes.Equal(current, original) {
-		t.Fatalf("historical endpoint changed: %v", err)
+		t.Fatalf("occupied endpoint changed: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(m.DataRoot, "fixture-health.json")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("stale endpoint launched a child: %v", err)
+	for _, pattern := range []string{"runtime/endpoint.stopped-*.json", "client2/runtime-start-*.log"} {
+		files, err := filepath.Glob(filepath.Join(m.DataRoot, pattern))
+		if err != nil || len(files) != 0 {
+			t.Fatalf("occupied endpoint produced unexpected files: %v, %v", files, err)
+		}
 	}
 	requireFixtureHelperExited(t, m)
+}
+
+func TestStopOwnedDetachedRejectsUnverifiedRuntime(t *testing.T) {
+	m := standaloneTestManager(t)
+	authority := &hostAuthorityFixture{}
+	m.hostAuthority = authority
+	health := HealthInfo{Version: "1.0.21", ImageSHA256: controlDigest([]byte("uninstalled image"))}
+	if err := m.stopOwnedDetached(startupTestContext(t), health); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected missing Runtime receipt rejection: %v", err)
+	}
+	if authority.held != nil {
+		t.Fatal("detached stop requested host authority")
+	}
 }
 
 func TestStartupCancellationCleansServingChild(t *testing.T) {
