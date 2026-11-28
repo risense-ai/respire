@@ -1,9 +1,12 @@
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
-import {canonicalTuples, checkGapShrink, compare, parseGapRoster, runtimeRows} from './test-v1-route-parity.mjs';
+import {
+  canonicalTuples, checkGapShrink, checkReviewedGapBaseline, compare, parseGapRoster, runtimeRows,
+} from './test-v1-route-parity.mjs';
 
 const route = {method: 'GET', path: '/v1/memories/{memoryId}', operation_id: 'readMemory'};
 const expected = ['GET /v1/memories/{memoryId} readMemory'];
+const wire = (rows) => Buffer.from(JSON.stringify(rows, null, 2) + '\n');
 
 test('metadata must agree in both directions; methods and names are not interchangeable', () => {
   assert.doesNotThrow(() => compare(expected, [route]));
@@ -70,8 +73,22 @@ test('trusted predecessor prevents adding or exchanging exact debt tuples', () =
   assert.doesNotThrow(() => checkGapShrink(old, [old[1]]));
   const regression = 'GET /v1/health getHealth';
   assert.throws(() => checkGapShrink(old, [old[1], regression]), /cannot add reviewed route gaps/);
-  const wire = (rows) => Buffer.from(JSON.stringify(rows, null, 2) + '\n');
   assert.deepEqual(parseGapRoster(wire(old)), old);
   assert.throws(() => parseGapRoster(wire([old[0], old[0]])), /duplicate/);
   assert.throws(() => parseGapRoster(wire([...old].reverse())), /noncanonical/);
+});
+
+test('only the pinned cutover pair can enter an empty pre-merge roster', () => {
+  const pair = [
+    'POST /v1/models/delete deleteModelWeight',
+    'POST /v1/models/probe probeModel',
+  ];
+  assert.deepEqual(checkReviewedGapBaseline([], wire(pair), false), pair);
+  assert.throws(() => checkReviewedGapBaseline([], wire(pair), true), /cannot add reviewed route gaps/);
+  assert.throws(() => checkReviewedGapBaseline(expected, wire(pair), false), /cannot add reviewed route gaps/);
+  assert.throws(() => checkReviewedGapBaseline([], wire([...expected, ...pair]), false),
+    /cannot add reviewed route gaps/);
+  assert.throws(() => checkReviewedGapBaseline([], wire(pair.slice(1)), false), /cannot add reviewed route gaps/);
+  assert.deepEqual(checkReviewedGapBaseline(pair, wire(pair.slice(1)), true), pair.slice(1));
+  assert.throws(() => checkReviewedGapBaseline(pair.slice(1), wire(pair), true), /cannot add reviewed route gaps/);
 });
