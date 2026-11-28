@@ -1,0 +1,48 @@
+{
+  "id": "E2E-008",
+  "title": "Probe candidate weights and protect active and in-flight weights from deletion",
+  "mock": "rich-1k",
+  "steps": [
+    {
+      "name": "Check default active assets",
+      "request": {"method": "GET", "path": "/v1/models/active-assets"},
+      "expect": {"status": 200, "equal": {"active_model_id": "granite-311m-r2"}}
+    },
+    {
+      "name": "Probe installed weights on CPU",
+      "request": {"method": "POST", "path": "/v1/models/probe", "body": {"model_id": "granite-311m-r2", "variant": "quint8_avx2", "engine": "cpu"}},
+      "expect": {"status": 200, "equal": {"ok": true, "model_id": "granite-311m-r2"}}
+    },
+    {
+      "name": "Confirm the probe preserved the active model",
+      "request": {"method": "GET", "path": "/v1/models/active-assets"},
+      "expect": {"status": 200, "equal": {"active_model_id": "granite-311m-r2"}}
+    },
+    {
+      "name": "Reject deletion of active weights",
+      "request": {"method": "POST", "path": "/v1/models/delete", "body": {"model_id": "granite-311m-r2", "variant": "quint8_avx2"}},
+      "expect": {"status": 409, "equal": {"code": "active_model"}}
+    },
+    {
+      "name": "Start a switch to installed candidate weights",
+      "request": {"method": "POST", "path": "/v1/models/switch", "body": {"model_id": "bge-base-zh-v1.5", "variant": "quantized"}},
+      "expect": {"status": 202},
+      "save": {"switch": "operation_id"}
+    },
+    {
+      "name": "Reject deletion of in-flight candidate weights",
+      "request": {"method": "POST", "path": "/v1/models/delete", "body": {"model_id": "bge-base-zh-v1.5", "variant": "quantized"}},
+      "expect": {"status": 409, "equal": {"code": "operation_in_progress"}}
+    },
+    {
+      "name": "Cancel the switch",
+      "request": {"method": "DELETE", "path": "/v1/operations/${switch}"},
+      "expect": {"status": 202, "equal": {"state": "cancelled"}}
+    },
+    {
+      "name": "Delete installed non-active weights",
+      "request": {"method": "POST", "path": "/v1/models/delete", "body": {"model_id": "bge-base-zh-v1.5", "variant": "quantized"}},
+      "expect": {"status": 200, "equal": {"model_id": "bge-base-zh-v1.5"}}
+    }
+  ]
+}

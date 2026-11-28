@@ -1,0 +1,95 @@
+# yaml-language-server: $schema=https://storage.googleapis.com/coderabbit_public_assets/schema.v2.json
+# Shared CodeRabbit review profile for risense-ai/respire and respire-core.
+language: en-US
+tone_instructions: >-
+  Prioritize correctness, four-layer boundary integrity, lock scope, data loss,
+  security, and English-only compliance. Cite concrete consequences and minimal fixes.
+
+reviews:
+  profile: assertive
+  request_changes_workflow: true
+  high_level_summary: true
+  poem: false
+  path_filters:
+    - '!**/node_modules/**'
+    - '!**/target/**'
+    - '!**/dist/**'
+    - '!**/vendor/**'
+    - '!**/packages/runtime-sdk-*/**'
+
+  path_instructions:
+    - path: '**/*'
+      instructions: |
+        1. Strictly enforce English-only docs, comments, identifiers, and strings across the repository; flag any CJK characters outside dedicated UI i18n locale/fixture paths as blocking defects.
+        2. Enforce single-file maintainability caps (<= 600 lines for code files, <= 400 lines for OpenSpec docs).
+
+    - path: 'apps/core/**/*.rs'
+      instructions: |
+        1. Keep Core purely in-memory: forbid filesystem, SQLite, keyring, HTTP, or network I/O crates/calls in production paths.
+        2. Preserve C ABI and Wire DTO forward compatibility (unknown fields ignored).
+        3. Never add new `.unwrap()` or `.expect()` in non-test Rust code.
+
+    - path: 'apps/runtime/**/*.rs'
+      instructions: |
+        1. Never add `.unwrap()` or `.expect()` in non-test Rust code.
+        2. Allow at most 1 streaming SHA-256 pass during model download/load; forbid `store.all()` for counting.
+        3. Forbid Clap secondary CLI parsers, TTY prompts, or IDE prompt injection logic inside Runtime.
+        4. Ensure every HTTP route stays synchronized with `contracts/runtime-api/openapi.yaml`.
+
+    - path: 'apps/cli/**/*.rs'
+      instructions: |
+        1. `apps/cli` MUST stay an ultra-thin client: forbid importing `storage`, `core-sdk`, `app`, `axum`, or `apps/runtime`/`apps/core` crates.
+        2. Never stop Runtime or write `Paused` during model downloads, non-active uninstalls, config updates, or read-only commands.
+        3. Negotiate strictly via `capabilities`, never by comparing version strings.
+
+    - path: 'apps/client2/**/*.go'
+      instructions: |
+        1. Strictly forbid importing `go-sqlite3` or any SQLite driver in `go.mod`.
+        2. Forbid rewriting Go-side account, space, model, or migration state machines or `cli.exec` argv tables.
+        3. Verify goroutine cancellation, HTTP header/read stall timeouts, and clean resource disposal.
+
+    - path: 'apps/client2/**/frontend/**/*.{js,html,css}'
+      instructions: |
+        1. Keep all user-visible text routed through `i18n` helpers (Chinese text belongs strictly in dedicated i18n bundles) and use `rem` sizing instead of fixed `px`.
+        2. Never re-introduce 700ms `/api/state` or 60s `tree-cure` polling; consume SSE streams for async tasks.
+
+    - path: 'openspec/**/*.md'
+      instructions: |
+        1. Keep non-archive files <= 400 lines, strictly in English.
+        2. Require `MUST`/`SHALL` requirements and `#### Scenario:` (`GIVEN`/`WHEN`/`THEN`) blocks in delta `spec.md` files.
+        3. Reference `§` sections or symbol names rather than brittle source line numbers.
+
+    - path: '.github/workflows/**'
+      instructions: |
+        1. Minimize `permissions` scopes; any job executing untrusted PR code (e.g., `ui-preview` `record`) MUST hold zero write permissions.
+        2. Never weaken architecture guardrails, Zero-CJK checks, `oasdiff` checks, or `ci-gate`.
+
+  auto_review:
+    enabled: true
+    auto_incremental_review: true
+    auto_pause_after_reviewed_commits: 0
+    drafts: false
+    base_branches:
+      - 'main'
+
+  finishing_touches:
+    docstrings:
+      enabled: false
+    unit_tests:
+      enabled: false
+    autofix:
+      enabled: false
+    fix_ci:
+      enabled: false
+    simplify:
+      enabled: false
+
+  pre_merge_checks:
+    title:
+      mode: warning
+      requirements: 'Use Conventional Commits: `type(scope): subject` (English only)'
+    description:
+      mode: warning
+
+chat:
+  auto_reply: true
