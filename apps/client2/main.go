@@ -15,7 +15,7 @@ import (
 	"respire-client2/internal/host"
 )
 
-var version = "2.0.0-dev.27"
+var version = "2.0.0-dev.28"
 
 func main() {
 	updater.HandleHelperMode()
