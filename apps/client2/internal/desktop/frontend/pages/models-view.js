@@ -1,5 +1,5 @@
 import { messages as i18nMessages } from "../ui/i18n/messages.js";
-import { $, h, bytes, date } from "../ui/core.js";
+import { $, h, bytes, number, date, currentRuntimeSwitch } from "../ui/core.js";
 import { phase } from "./overview.js";
 import {
   MODEL_OPTIONS,
@@ -85,6 +85,72 @@ const SWITCH_PHASES = {
   "switch-diary": i18nMessages.m3f110122999a31c4,
 };
 
+export function liveModelOperation(view, status) {
+  const profile = readProfileState(view.profileState).operation;
+  const snapshot = status?.summary?.model_operation;
+  const observed = currentRuntimeSwitch();
+  const runtime = observed ? {
+    ...observed.progress,
+    operation_id: observed.receipt.operation_id,
+    item: observed.progress?.item || observed.model,
+    state: observed.progress?.state || "pending",
+  } : view.runtimeProgress;
+  const runtimeID = runtime?.operation_id || runtime?.id;
+  const runtimeActive = runtime && (runtime.active ?? (runtime.state
+    ? ["pending", "running"].includes(runtime.state) : view.switchInFlight));
+  const currentSnapshot = snapshot?.active && snapshot !== view.profileStatus ? snapshot : null;
+  const id = [currentSnapshot?.id, profile.active && profile.id, runtimeID]
+    .find((value) => typeof value === "string" && value.trim());
+  const sameTask = (op) => op && (!op.id || op.id === id);
+  const activeProfile = profile.active && sameTask(profile) ? profile : null;
+  if (id && runtimeID === id && !runtimeActive && runtime?.state) return {};
+  if (!activeProfile && !sameTask(currentSnapshot) && !(runtimeActive && runtimeID === id)) return {};
+  const runtimeFields = runtimeID === id && runtimeActive ? runtime : null;
+  const op = { ...runtimeFields, ...(sameTask(currentSnapshot) ? currentSnapshot : null), ...activeProfile };
+  const runtimePhase = runtimeFields?.message || runtimeFields?.state;
+  if (runtimeFields?.state && !activeProfile && !runtimeFields.phase && (!op.phase || op.phase === runtimePhase)) {
+    op.phase = runtimeFields.state === "pending" ? "queued" : runtimePhase;
+    op.done = runtimeFields.done;
+    op.total = runtimeFields.total;
+  }
+  return { ...op, id, active: true };
+}
+
+export const cancellableModelID = (op) => op.active && op.cancellable !== false ? op.id : undefined;
+const modelPhase = (op) => SWITCH_PHASES[op.phase] || phase(op.phase);
+
+export function modelOperationProgress(op) {
+  const total = op.total > 0 && op.done != null;
+  const format = op.phase === "download" || (op.phase === "verify" && total) ? bytes : number;
+  const percent = total ? `${Math.round(op.done / op.total * 100)}%` : "";
+  const count = total ? `${format(op.done)} / ${format(op.total)} (${percent})`
+    : op.done != null ? format(op.done) : op.progress_percent == null ? "" : `${op.progress_percent}%`;
+  const elapsed = op.elapsed ?? op.elapsed_secs;
+  return `<div class="progress-label"><span>${h(modelPhase(op))}${op.item ? ` · ${h(op.item)}` : ""}</span><span>${h(count)}</span><span>${elapsed == null ? "" : h(elapsed + i18nMessages.m00fe8dda1fd70f64)}</span></div><progress ${total ? `value="${h(op.done)}" max="${h(op.total)}"` : op.progress_percent == null ? "" : `value="${h(op.progress_percent)}" max="100"`}></progress>`;
+}
+
+export function nextSwitchStallState(prevKey, prevTicks, op, limit = 600) {
+  const key = op.active ? [op.id ?? "", op.phase ?? "", op.done ?? "", op.total ?? "", op.progress_percent ?? ""].join("|") : "";
+  const ticks = key && key !== prevKey ? 0 : prevTicks + 1;
+  return { key, ticks, expired: ticks > limit };
+}
+
+export function modelCancelButton(root) {
+  const source = $('[data-advanced-panel] [data-model="cancel"]', root);
+  if (!source) return "";
+  const button = source.cloneNode(true);
+  button.hidden = true;
+  return button.outerHTML;
+}
+
+export function syncModelCancel(root, view, op) {
+  const id = cancellableModelID(op);
+  for (const button of root.querySelectorAll('[data-model="cancel"]')) {
+    if (!button.closest("[data-advanced-panel]")) button.hidden = !id;
+    button.disabled = !id || id === view.cancelPending;
+  }
+}
+
 export function createModelsView(view, { root, ctx, live }) {
   const activeSelection = () => view.runtimeActiveScope === activeModelScope(ctx.desktop?.health)
     ? activeVariantSelection(view.runtimeActive, view.legacyEngineState)
@@ -136,17 +202,7 @@ export function createModelsView(view, { root, ctx, live }) {
     if (view.switchInFlight && view.switchingVariant === variant.name) {
       if (!isProfileModel(view.modelID))
         return `${i18nMessages.m1e9762ef816d3fbb}`;
-      const operation = view.runtimeProgress ? {
-        phase: view.runtimeProgress.message || view.runtimeProgress.state,
-        done: view.runtimeProgress.progress_percent, total: 100,
-      } : ctx.status?.summary?.model_operation?.active
-        ? ctx.status.summary.model_operation : readProfileState(view.profileState).operation;
-      const phase =
-        SWITCH_PHASES[operation.phase] || operation.phase || i18nMessages.mdc9591e56d502b43;
-      const pct = operation.total
-        ? ` ${Math.round((operation.done / operation.total) * 100)}%`
-        : "";
-      return `${i18nMessages.mee98756ab8a33df2}${h(String(phase))}${pct}</strong>`;
+      return op.active ? modelOperationProgress(op) : h(i18nMessages.mdc9591e56d502b43);
     }
     const pct = op.total
       ? Math.min(100, Math.round((op.done / op.total) * 100))
@@ -167,9 +223,10 @@ export function createModelsView(view, { root, ctx, live }) {
     return i18nMessages.mdccec95b65e15ff0;
   }
   function renderVariants() {
+    const op = liveModelOperation(view, ctx.status);
+    syncModelCancel(root, view, op);
     const node = $("[data-variants]", root);
     if (!node || !view.inventory) return;
-    const op = ctx.status?.summary?.model_operation || {};
     const downloading = op.active ? variantFromItem(op.item) : "";
     const hint = $("[data-model-hint]", root);
     if (hint) hint.textContent = MODEL_HINTS[view.modelID] || MODEL_HINTS.m3;
@@ -190,10 +247,6 @@ export function createModelsView(view, { root, ctx, live }) {
         return `<tr><td><span class="variant-name"><strong>${h(variant.name)}</strong>${badge ? `<span class="hint">${badge}${variant.name === "fp16" ? i18nMessages.m52b8ee376f013c8e : ""}</span>` : ""}</span></td><td>${h(bytes(variant.size))}</td><td data-status="${h(variant.name)}">${variantStatus(variant, op, downloading, ctx.desktop?.task)}</td><td><span class="path-cell"><code title="${h(variant.path)}">${h(variant.path)}</code><button class="link-btn" data-open-dir="${h(variant.path)}${i18nMessages.m57c846016182bd26}${ops}</td></tr>`;
       })
       .join("")}</tbody></table>`;
-    const cancelBtn = $("[data-model=cancel]", root);
-    if (cancelBtn)
-      cancelBtn.disabled =
-        !op.active || !ctx.status?.summary?.model_operation?.id;
     renderBaseline();
   }
   function renderBaseline() {
@@ -243,12 +296,13 @@ export function createModelsView(view, { root, ctx, live }) {
   // Default state from live data: downloading, missing weights, switching,
   // or ready for the selected mode.
   function computePageState() {
-    const op = ctx.status?.summary?.model_operation || {};
+    const op = liveModelOperation(view, ctx.status);
     const task = ctx.desktop?.task || {};
+    if (view.switchInFlight || (op.active && !["download", "connect", "verify"].includes(op.phase)))
+      return PAGE_STATES.VERIFYING;
     if (op.active || modelTaskBusy(task)) return PAGE_STATES.DOWNLOADING;
     const variant = modeVariant(currentMode());
     if (!variant?.installed || !view.inventory?.tokenizer_installed) return PAGE_STATES.EMPTY;
-    if (view.switchInFlight) return PAGE_STATES.VERIFYING;
     if (!currentVariant(currentMode().variant)) return PAGE_STATES.EMPTY;
     if (currentMode().requiresGPU && activeSelection()?.engine === 'cpu') return PAGE_STATES.EMPTY;
     if (!view.lastVerifiedAt && ctx.desktop?.health?.inference?.phase !== 'ready') return PAGE_STATES.EMPTY;
@@ -296,30 +350,29 @@ export function createModelsView(view, { root, ctx, live }) {
       effectivePageState() === PAGE_STATES.DOWNLOADING ||
       effectivePageState() === PAGE_STATES.VERIFYING ||
       effectivePageState() === PAGE_STATES.READY;
-    node.innerHTML = `<div data-mode-progress hidden></div><button type="button" class="${config.buttonClass}" data-mode-apply${idle ? " disabled" : ""}>${h(config.buttonText)}</button>`;
+    node.innerHTML = `<div data-mode-progress hidden><div data-mode-progress-content></div>${modelCancelButton(root)}</div><button type="button" class="${config.buttonClass}" data-mode-apply${idle ? " disabled" : ""}>${h(config.buttonText)}</button>`;
     updateModeProgress();
   }
   function updateModeProgress() {
     const node = $("[data-mode-progress]", root);
     if (!node) return;
-    const op = ctx.status?.summary?.model_operation || {};
+    const op = liveModelOperation(view, ctx.status);
+    const content = $("[data-mode-progress-content]", node);
     const task = ctx.desktop?.task || {};
-    if (modelTaskBusy(task)) {
+    if (op.active) {
+      node.hidden = false;
+      content.innerHTML = modelOperationProgress(op);
+    } else if (modelTaskBusy(task)) {
       const pct = task.total
         ? Math.min(100, Math.round((task.done / task.total) * 100))
         : 0;
       node.hidden = false;
-      node.innerHTML = `<div class="progress-label"><span>${h(String(task.stage || ""))}</span><span>${pct}%</span></div><progress ${task.total ? `value="${h(task.done)}" max="${h(task.total)}"` : ""}></progress>`;
-    } else if (op.active) {
-      const pct = op.total
-        ? Math.min(100, Math.round((op.done / op.total) * 100))
-        : 0;
-      node.hidden = false;
-      node.innerHTML = `<div class="progress-label"><span>${h(String(op.phase || ""))} · ${h(String(op.item || ""))}</span><span>${pct}%</span></div><progress ${op.total ? `value="${h(op.done)}" max="${h(op.total)}"` : ""}></progress>`;
+      content.innerHTML = `<div class="progress-label"><span>${h(String(task.stage || ""))}</span><span>${pct}%</span></div><progress ${task.total ? `value="${h(task.done)}" max="${h(task.total)}"` : ""}></progress>`;
     } else {
       node.hidden = true;
-      node.innerHTML = "";
+      content.innerHTML = "";
     }
+    syncModelCancel(root, view, op);
   }
   function renderAdvancedVisibility() {
     const panelNode = $("[data-advanced-panel]", root);
@@ -354,7 +407,7 @@ export function createModelsView(view, { root, ctx, live }) {
   // replace buttons mid-click every 3 seconds.
   function updateVariantsProgress() {
     if (!view.inventory) return;
-    const op = ctx.status?.summary?.model_operation || {};
+    const op = liveModelOperation(view, ctx.status);
     const task = ctx.desktop?.task || {};
     const downloading = op.active ? variantFromItem(op.item) : "";
     for (const variant of view.inventory.variants) {

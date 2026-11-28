@@ -60,7 +60,7 @@ fn dispatch_loop_inner(
                 let admission = PROFILE_ADMISSION
                     .lock()
                     .unwrap_or_else(|error| error.into_inner());
-                if PROFILE_SWITCH_RUNNING.load(Ordering::Acquire) {
+                if model_switch_blocks_args(&job.args) {
                     let _ = job.reply.send(Err("model_switch_busy".into()));
                     continue;
                 }
@@ -133,7 +133,7 @@ fn dispatch_loop_inner(
                 let admission = PROFILE_ADMISSION
                     .lock()
                     .unwrap_or_else(|error| error.into_inner());
-                if PROFILE_SWITCH_RUNNING.load(Ordering::Acquire) {
+                if model_switch_blocks_args(&job.args) {
                     shared_exclusive().cancel_reservation();
                     let _ = job.reply.send(Err("model_switch_busy".into()));
                     continue;
@@ -260,6 +260,10 @@ fn dispatch_loop_inner(
                     let _ = job.reply.send(Err(QUEUE_EXPIRED.into()));
                     continue;
                 }
+                if model_switch_blocks_args(&job.args) {
+                    let _ = job.reply.send(Err("model_switch_busy".into()));
+                    continue;
+                }
                 idle_since = Instant::now();
                 let _scope_held = match SCOPE_EXECUTION.read() {
                     Ok(held) => held,
@@ -270,7 +274,7 @@ fn dispatch_loop_inner(
                 };
                 {
                     let gate = shared_exclusive();
-                    let _held = gate.acquire(true);
+                    let _held = (!is_status(&job.args)).then(|| gate.acquire(true));
                     if let Err(error) = validate_job_scope(&job.scope) {
                         let _ = job.reply.send(Err(error));
                         continue;
@@ -293,7 +297,7 @@ fn dispatch_loop_inner(
                         let _ = job.reply.send(captured);
                         continue;
                     }
-                } else if _store.is_none() && respire_app::auth::load_local_session().is_ok()
+                } else if _store.is_none() && !is_status(&job.args) && respire_app::auth::load_local_session().is_ok()
                     && !matches!(
                         command_name(&job.args),
                         Some("agent-config" | "memory-revision")
@@ -414,6 +418,7 @@ fn dispatch_loop_inner(
                 LIGHT_RUNNING.fetch_add(1, Ordering::AcqRel);
             }
             let status_job = is_status(&job.args);
+            let incumbent_read = (!status_job).then(IncumbentRead::start);
             if status_job {
                 RUNNING_STATUS.fetch_add(1, Ordering::AcqRel);
             }
@@ -424,6 +429,7 @@ fn dispatch_loop_inner(
                 .name("respire-read".into())
                 .stack_size(16 * 1024 * 1024)
                 .spawn(move || {
+                    let _incumbent = incumbent_read;
                     let _slot = RunningGuard {
                         status: status_job,
                         light: light_job,

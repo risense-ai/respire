@@ -1,6 +1,26 @@
 use super::*;
 
 #[test]
+fn switch_tasks_render_item_counts_and_elapsed_seconds() {
+    let indexing = model_task_text(&serde_json::json!({
+        "phase": "switch-index", "item": "granite", "done": 12, "total": 48,
+        "elapsed": 7, "elapsed_secs": 99
+    }));
+    assert!(indexing.contains(&task_phase("switch-index")));
+    assert!(indexing.contains("25.0% (12/48) granite 7"));
+    assert!(!indexing.contains("MB"));
+    assert!(!indexing.contains("99"));
+
+    let diaries = model_task_text(&serde_json::json!({
+        "phase": "switch-diary", "item": "granite", "done": 3, "total": 0,
+        "elapsed_secs": 9
+    }));
+    assert!(diaries.contains(&task_phase("switch-diary")));
+    assert!(diaries.contains("3 granite 9"));
+    assert!(!diaries.contains('%'));
+}
+
+#[test]
 fn recall_reference_label_covers_empty_results_without_changing_payload() {
     for (status, count) in [(Status::Skip, 0), (Status::Ok, 1)] {
         let result =

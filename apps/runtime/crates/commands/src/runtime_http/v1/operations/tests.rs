@@ -316,10 +316,10 @@ pub(super) fn production_router_fixture(test: &'static str) -> Result<()> {
             Ok(())
         });
     drop(stop);
-    dispatcher
+    let joined = dispatcher
         .join()
-        .map_err(|_| anyhow::anyhow!("fixture dispatcher panicked"))??;
-    result
+        .map_err(|_| anyhow::anyhow!("fixture dispatcher panicked"));
+    result.and_then(|()| joined?)
 }
 
 async fn request(app: &Router, method: &str, path: &str, token: Option<&str>) -> Result<Response> {

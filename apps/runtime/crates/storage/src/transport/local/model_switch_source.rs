@@ -43,18 +43,23 @@ fn meta(connection: &Connection, key: &str) -> Result<Option<String>> {
 }
 
 fn pending_task(connection: &Connection) -> Result<uuid::Uuid> {
+    let raw = pending_task_id(connection)?;
+    let id = uuid::Uuid::parse_str(&raw)?;
+    ensure!(
+        id.get_version_num() == 4 && id.to_string() == raw,
+        "model build admission identity is invalid"
+    );
+    Ok(id)
+}
+
+pub(super) fn pending_task_id(connection: &Connection) -> Result<String> {
     let raw = meta(connection, "embedding_pending_task_v1")?
         .context("model build admission is unavailable")?;
     let task: serde_json::Value = serde_json::from_str(&raw)?;
     let raw = task["id"]
         .as_str()
         .context("model build admission identity is unavailable")?;
-    let id = uuid::Uuid::parse_str(raw)?;
-    ensure!(
-        id.get_version_num() == 4 && id.to_string() == raw,
-        "model build admission identity is invalid"
-    );
-    Ok(id)
+    Ok(raw.to_owned())
 }
 
 #[cfg(unix)]
@@ -103,7 +108,7 @@ fn check_database_path(file: &DatabaseIdentity, path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn pending_target(connection: &Connection) -> Result<String> {
+pub(super) fn pending_target(connection: &Connection) -> Result<String> {
     let wire = meta(connection, "embedding_pending_selection_v1")?
         .context("model build target is unavailable")?;
     let target: Selection = serde_json::from_str(&wire)?;
@@ -124,6 +129,19 @@ pub struct ModelSwitchArtifact<'a> {
 pub const MODEL_SWITCH_MAX_PROMOTION_ROWS: usize = 512;
 pub const MODEL_SWITCH_MAX_PROMOTION_ROW_BYTES: usize = 256 * 1024;
 pub const MODEL_SWITCH_MAX_PROMOTION_BYTES: usize = 2 * 1024 * 1024;
+
+pub(super) const INSERT_INLINE_ARTIFACT: &str =
+    "INSERT OR REPLACE INTO core_artifacts(memory_id,model,source,artifact)
+     SELECT id,?2,ciphertext,?4 FROM memories WHERE id=?1 AND ciphertext=?3 AND deleted=0";
+
+pub(super) fn validate_inline_artifact(opaque: &[u8]) -> Result<()> {
+    ensure!(
+        !opaque.is_empty() && !opaque.starts_with(b"rsi1:"),
+        "expected inline opaque candidate artifact"
+    );
+    Ok(())
+}
+
 impl ModelSwitchSourceStamp {
     pub(super) fn check(&self, connection: &Connection, target: &Selection) -> Result<()> {
         ensure!(
@@ -322,10 +340,7 @@ pub(super) fn promote_inline(
     );
     let mut distinct = std::collections::HashSet::with_capacity(rows.len());
     let mut remaining = MODEL_SWITCH_MAX_PROMOTION_BYTES;
-    let mut insert = tx.prepare(
-        "INSERT OR REPLACE INTO core_artifacts(memory_id,model,source,artifact)
-         SELECT id,?2,ciphertext,?4 FROM memories WHERE id=?1 AND ciphertext=?3 AND deleted=0",
-    )?;
+    let mut insert = tx.prepare(INSERT_INLINE_ARTIFACT)?;
     for row in rows {
         ensure!(
             distinct.insert(row.id),
@@ -343,10 +358,7 @@ pub(super) fn promote_inline(
         remaining = remaining
             .checked_sub(bytes)
             .context("model promotion exceeds byte limit")?;
-        ensure!(
-            !row.opaque.is_empty() && !row.opaque.starts_with(b"rsi1:"),
-            "expected inline opaque candidate artifact"
-        );
+        validate_inline_artifact(row.opaque)?;
         ensure!(
             insert.execute(rusqlite::params![
                 row.id,

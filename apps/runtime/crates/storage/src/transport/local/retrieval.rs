@@ -151,7 +151,7 @@ impl LocalStore {
         self.index_missing_in_generation(&generation_key(model)?)
     }
 
-    fn index_missing_in_generation(&self, generation: &str) -> Result<bool> {
+    pub(super) fn index_missing_in_generation(&self, generation: &str) -> Result<bool> {
         Ok(self.connection.query_row(
             "SELECT EXISTS(SELECT 1 FROM memories m WHERE m.deleted=0 AND NOT EXISTS
              (SELECT 1 FROM core_artifacts r WHERE r.memory_id=m.id AND r.model=?1 AND r.source=m.ciphertext))",
@@ -373,12 +373,21 @@ impl LocalStore {
         }
         let missing: i64 = tx.query_row("SELECT COUNT(*) FROM memories m WHERE deleted=0 AND NOT EXISTS (SELECT 1 FROM core_artifacts a WHERE a.memory_id=m.id AND a.model=?1 AND a.source=m.ciphertext)",[&selection.generation],|row|row.get(0))?;
         anyhow::ensure!(missing == 0,"candidate main index is incomplete");
-        tx.execute("INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)", [respire_core_sdk::profiles::ACTIVE_SELECTION_KEY.to_owned(),serde_json::to_string(selection)?])?;
-        tx.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('retrieval_model',?1)", [&selection.model])?;
-        tx.execute("DELETE FROM meta WHERE key IN ('embedding_pending_selection_v1','embedding_pending_task_v1')", [])?;
+        write_active_selection(&tx, selection, &serde_json::to_string(selection)?)?;
         tx.commit()?;
         Ok(())
     }
+}
+
+pub(super) fn write_active_selection(
+    tx: &rusqlite::Transaction<'_>,
+    selection: &respire_core_sdk::profiles::Selection,
+    wire: &str,
+) -> Result<()> {
+    tx.execute("INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)", [respire_core_sdk::profiles::ACTIVE_SELECTION_KEY, wire])?;
+    tx.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('retrieval_model',?1)", [&selection.model])?;
+    tx.execute("DELETE FROM meta WHERE key IN ('embedding_pending_selection_v1','embedding_pending_task_v1')", [])?;
+    Ok(())
 }
 
 #[cfg(test)]

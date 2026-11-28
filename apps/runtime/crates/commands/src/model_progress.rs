@@ -215,7 +215,10 @@ pub fn update(phase: &str, item: &str, done: u64, total: Option<u64>) -> Result<
     Ok(())
 }
 
-pub(crate) fn switch_checkpoint(task_id: &str, phase: Option<(&str, &str, u64)>) -> Result<()> {
+pub(crate) fn switch_checkpoint(
+    task_id: &str,
+    phase: Option<(&str, &str, u64, Option<u64>)>,
+) -> Result<()> {
     let mut slot = CURRENT
         .lock()
         .map_err(|_| anyhow!("model progress lock poisoned"))?;
@@ -224,13 +227,12 @@ pub(crate) fn switch_checkpoint(task_id: &str, phase: Option<(&str, &str, u64)>)
         .filter(|progress| progress.id == task_id)
         .ok_or_else(|| anyhow!("model operation no longer admitted"))?;
     check_progress(progress)?;
-    if let Some((stage, item, done)) = phase {
-        if progress.phase != stage || progress.done != done {
-            progress.updated = Instant::now();
-        }
+    if let Some((stage, item, done, total)) = phase {
+        progress.updated = Instant::now();
         progress.phase = stage.to_owned();
         progress.item = item.to_owned();
         progress.done = done;
+        progress.total = total;
     }
     Ok(())
 }

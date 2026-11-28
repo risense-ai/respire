@@ -10,7 +10,22 @@ fn selected_model_mirror() -> Result<String> {
     Ok(respire_client_host::settings::mirror_from_env()?.unwrap_or_else(|| "auto".to_owned()))
 }
 
+fn cancellable_model_id(task: &Value) -> Option<&str> {
+    task["id"].as_str().filter(|id| {
+        !id.trim().is_empty() && task["active"] == true && task["cancellable"] != false
+    })
+}
+
 fn cancel_model(id: &str) -> Result<(), String> {
+    cancel_model_with(id, |id, cancel| {
+        crate::rpc::model_control(id, cancel).map_err(|error| error.to_string())
+    })
+}
+
+fn cancel_model_with(
+    id: &str,
+    mut control: impl FnMut(&str, bool) -> Result<Value, String>,
+) -> Result<(), String> {
     if id.is_empty() {
         return Ok(());
     }
@@ -18,8 +33,7 @@ fn cancel_model(id: &str) -> Result<(), String> {
     let mut cancellation_accepted = false;
     let mut cancel_sent = false;
     loop {
-        let progress = crate::rpc::model_control(id, !cancel_sent)
-            .map_err(|error| error.to_string())?;
+        let progress = control(id, !cancel_sent)?;
         cancel_sent = true;
         if progress["stale"] == true {
             // The original task finished after accepting cancellation. A newly
@@ -34,7 +48,7 @@ fn cancel_model(id: &str) -> Result<(), String> {
             return Ok(());
         }
         if started.elapsed() >= Duration::from_secs(45) {
-            return Err(t("\u{53d6}\u{6d88}\u{5c1a}\u{672a}\u{5b8c}\u{6210}\u{ff1b}\u{7b49}\u{5f85}\u{5f53}\u{524d}\u{7f51}\u{7edc}\u{8bfb}\u{53d6}\u{7ed3}\u{675f}\u{540e}\u{91cd}\u{8bd5}", "Cancellation is still pending; wait for the current network read before retrying"));
+            return Err(t("\u{53d6}\u{6d88}\u{5c1a}\u{672a}\u{5b8c}\u{6210}\u{3002}\u{8bf7}\u{67e5}\u{770b}\u{4efb}\u{52a1}\u{8fdb}\u{5ea6}\u{3002}", "Cancellation is still pending. Check the model task progress."));
         }
         std::thread::sleep(FAST);
     }
@@ -106,10 +120,10 @@ fn try_model_key(app: &mut App, code: KeyCode) -> Result<()> {
                     Some(3) => app.overlay = Overlay::RecallTest(recall_test::Form::new("fast")),
                     Some(4) => app.overlay = Overlay::RecallTest(recall_test::Form::new("quality")),
                     Some(5) => {
-                        if let Some(id) = app.live.model_progress["id"].as_str().filter(|_| app.live.model_progress["active"] == true) {
+                        if let Some(id) = cancellable_model_id(&app.live.model_progress) {
                             let id = id.to_owned();
-                            ask(app, t("\u{53d6}\u{6d88}\u{5f53}\u{524d}\u{6a21}\u{578b}\u{4efb}\u{52a1}\u{ff1f}\u{5df2}\u{5b8c}\u{6210}\u{7684}\u{6a21}\u{578b}\u{6587}\u{4ef6}\u{548c}\u{539f}\u{7d22}\u{5f15}\u{4f1a}\u{4fdd}\u{7559}\u{3002}", "Cancel the current model task? Completed files and the original index are kept."), ConfirmKind::CancelModel(id));
-                        } else { app.set_notice(t("\u{6ca1}\u{6709}\u{6b63}\u{5728}\u{8fd0}\u{884c}\u{7684}\u{6a21}\u{578b}\u{4efb}\u{52a1}", "No model task is running")); }
+                            ask(app, t("\u{53d6}\u{6d88}\u{5f53}\u{524d}\u{6a21}\u{578b}\u{4efb}\u{52a1}\u{ff1f}Runtime \u{4f1a}\u{5728}\u{5b89}\u{5168}\u{7684}\u{4f4d}\u{7f6e}\u{505c}\u{6b62}\u{3002}", "Cancel the current model task? Runtime will stop it when it is safe to do so."), ConfirmKind::CancelModel(id));
+                        } else { app.set_notice(t("\u{6ca1}\u{6709}\u{53ef}\u{53d6}\u{6d88}\u{7684}\u{6a21}\u{578b}\u{4efb}\u{52a1}", "No cancellable model task is running")); }
                     }
                     Some(6) => {
                         let id = app.live.model_progress["id"].as_str().unwrap_or("").to_owned();
@@ -367,7 +381,7 @@ fn run_confirm(app: &mut App, kind: ConfirmKind) {
         ConfirmKind::Sync => t("\u{6b63}\u{5728}\u{540c}\u{6b65}", "Syncing"),
         ConfirmKind::InstallM3 => t("\u{6b63}\u{5728}\u{5b89}\u{88c5}\u{6216}\u{6821}\u{9a8c} BGE-M3", "Installing or verifying BGE-M3"),
         ConfirmKind::UninstallM3 => t("\u{6b63}\u{5728}\u{5378}\u{8f7d} BGE-M3", "Uninstalling BGE-M3"),
-        ConfirmKind::CancelModel(_) => t("\u{6b63}\u{5728}\u{53d6}\u{6d88}\u{6a21}\u{578b}\u{4efb}\u{52a1}\u{ff0c}\u{7b49}\u{5f85}\u{5f53}\u{524d}\u{7f51}\u{7edc}\u{8bfb}\u{53d6}\u{7ed3}\u{675f}", "Cancelling model task; waiting for the current network read"),
+        ConfirmKind::CancelModel(_) => t("\u{6b63}\u{5728}\u{7b49}\u{5f85} Runtime \u{505c}\u{6b62}\u{6a21}\u{578b}\u{4efb}\u{52a1}", "Waiting for Runtime to stop the model task"),
         ConfirmKind::RestartM3(_, _) => t("\u{6b63}\u{5728}\u{53d6}\u{6d88}\u{65e7}\u{4efb}\u{52a1}\u{5e76}\u{91cd}\u{65b0}\u{5b89}\u{6392}\u{4e0b}\u{8f7d}", "Cancelling the old task and scheduling a new download"),
         ConfirmKind::Weights(_, _) => t("\u{6b63}\u{5728}\u{6821}\u{9a8c}\u{5e76}\u{52a0}\u{8f7d}\u{ff1b}\u{8bd5}\u{63a8}\u{7406}\u{6210}\u{529f}\u{540e}\u{4fdd}\u{5b58}", "Validating and loading; saving after trial inference"),
         ConfirmKind::InstallVariant(_, _) => t("\u{6b63}\u{5728}\u{4e0b}\u{8f7d}\u{6240}\u{9009}\u{6743}\u{91cd}\u{ff1b}\u{4e0d}\u{5207}\u{6362}\u{6a21}\u{578b}", "Downloading selected weights; current model unchanged"),
@@ -406,7 +420,7 @@ fn run_confirm(app: &mut App, kind: ConfirmKind) {
                 .and_then(|mirror| host_command(&["model", "install-m3", "--mirror", &mirror]))
                 .map(|_| t("BGE-M3 \u{5904}\u{7406}\u{7ed3}\u{675f}", "BGE-M3 step finished")),
             ConfirmKind::CancelModel(id) => cancel_model(&id)
-                .map(|_| t("\u{5df2}\u{53d6}\u{6d88}\u{6a21}\u{578b}\u{4efb}\u{52a1}", "Model task cancelled")),
+                .map(|_| t("\u{6a21}\u{578b}\u{4efb}\u{52a1}\u{5df2}\u{505c}\u{6b62}", "Model task stopped")),
             ConfirmKind::RestartM3(id, mirror) => cancel_model(&id)
                 .and_then(|_| host_command(&["model", "install-m3", "--mirror", &mirror]))
                 .map(|_| t("BGE-M3 \u{5b89}\u{88c5}\u{5b8c}\u{6210}", "BGE-M3 installation complete")),
