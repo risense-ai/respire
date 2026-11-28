@@ -160,6 +160,7 @@ function route() {
     else button.removeAttribute("aria-current");
   });
   view = definitions[page][1](root, ctx);
+  applyTranslations($("#view"));
   document.querySelector(".view-scroll").scrollTop = 0;
 }
 // The sidebar shows today's diary count from a periodic diary query.

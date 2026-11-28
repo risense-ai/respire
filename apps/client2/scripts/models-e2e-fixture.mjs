@@ -9,19 +9,27 @@ const { i18nMessages } = frontendSource;
 const frontend = fileURLToPath(new URL("../internal/desktop/frontend", import.meta.url));
 const types = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml", ".woff2": "font/woff2" };
 export const granite = {
-  "granite-97m-r2": { name: "standard", path: "onnx/model.onnx" },
-  "granite-311m-r2": { name: "quantized", path: "onnx/model_quint8_avx2.onnx" },
+  "granite-97m-r2": { name: "quint8_avx2", path: "onnx/model_quint8_avx2.onnx" },
+  "granite-311m-r2": { name: "quint8_avx2", path: "onnx/model_quint8_avx2.onnx" },
 };
+const MODEL_VARIANTS = {
+  "granite-311m-r2": [["quint8_avx2", 313421909], ["standard", 1247170481]],
+  "granite-97m-r2": [["quint8_avx2", 98247878], ["standard", 390004608]],
+  m3: [["quantized", 569694530], ["q4f16", 699932840], ["fp16", 1133992936], ["int8", 571000000], ["uint8", 571000000], ["q4", 1248237611], ["bnb4", 1229364419], ["fp32", 607298]],
+  "bge-base-zh-v1.5": [["quantized", 102868746], ["q4f16", 81549931], ["fp16", 203679052], ["int8", 102407793], ["uint8", 102407824], ["q4", 120342974], ["bnb4", 115035086], ["fp32", 406953171]],
+};
+const variantPath = (name) => (name === "standard" || name === "fp32" ? "onnx/model.onnx" : `onnx/model_${name}.onnx`);
 const baseline = { model: "m3", variant: "quantized", engine: "cpu" };
 
 export async function startModelsFixture({ scenario = {} } = {}) {
   const preferences = { onboardingCompleted: true, language: "en", modelMirror: "auto" };
   const health = { instance_id: "fixture", account_id: "account", generation: 1,
     capabilities: ["openapi.v1", "sse.operations.v1"], inference: { phase: "idle" } };
-  const installed = new Set(["m3"]);
+  const installed = new Map([["m3", new Set(["quantized"])]]);
+  const hasModel = (model) => (installed.get(model)?.size || 0) > 0;
   const jobs = new Map(), downloads = new Map(), runtime = new Map(), subscribers = new Map();
-  const switches = [], requests = [], cancellations = [];
-  let active = baseline, task = {}, rebuild, indexed = 1, sequence = 0;
+  const switches = [], requests = [], cancellations = [], probes = [], deletions = [];
+  let active = baseline, task = {}, rebuild, indexed = 1, sequence = 0, probeFails = false;
   const total = 20;
   const indexRunning = () => rebuild?.state === "running";
   const modelOperation = () => indexRunning()
@@ -45,12 +53,16 @@ export async function startModelsFixture({ scenario = {} } = {}) {
     response.on("close", () => subscribers.get(id).delete(response));
     writeFrame(response, entry);
   }
-  function progressDownload(model, percent, state = "running", file = granite[model].path) {
+  function progressDownload(model, percent, state = "running", file) {
     const download = [...downloads.values()].findLast(entry => entry.model === model && entry.state === "running");
     assert.ok(download, `No running download for ${model}`);
-    const { id } = download;
+    const { id, variant } = download;
+    file ||= variantPath(variant);
     download.state = state;
-    if (state === "completed") installed.add(model);
+    if (state === "completed") {
+      if (!installed.has(model)) installed.set(model, new Set());
+      installed.get(model).add(variant);
+    }
     if (download.managed) {
       const entry = { operation_id: id, kind: "model_download", state, progress_percent: percent, message: "Downloading model assets" };
       runtime.set(id, entry);
@@ -122,7 +134,7 @@ export async function startModelsFixture({ scenario = {} } = {}) {
     const reply = (result) => response.writeHead(200, { "Content-Type": "application/json" })
       .end(JSON.stringify({ ok: true, result }));
     switch (path) {
-      case "/api/state": return reply({ connected: true, version: "fixture", platform: "windows", health, preferences, task, ...scenario.state });
+      case "/api/state": return reply({ connected: true, version: "fixture", platform: "windows-amd64", health, preferences, task, ...scenario.state });
       case "/api/runtime-status":
         if (scenario.statusError) return response.writeHead(503, { "Content-Type": "application/json" })
           .end(JSON.stringify({ ok: false, error: scenario.statusError }));
@@ -138,15 +150,27 @@ export async function startModelsFixture({ scenario = {} } = {}) {
       }
       case "/api/model-variants": {
         const model = url.searchParams.get("model");
-        const variant = granite[model] || { name: "quantized", path: "onnx/model_quantized.onnx" };
-        return reply({ model, model_dir: `models/${model}`, tokenizer_installed: installed.has(model), cpu_container_ready: true,
-          variants: [{ ...variant, size: 102400, bytes: 102400, installed: installed.has(model) }] });
+        const defs = MODEL_VARIANTS[model] || [["quantized", 102400]];
+        const set = installed.get(model);
+        return reply({
+          model,
+          model_dir: `models/${model}`,
+          tokenizer_installed: hasModel(model),
+          cpu_container_ready: true,
+          variants: defs.map(([name, size]) => {
+            const rel = variantPath(name);
+            return {
+              name, size, bytes: size, installed: Boolean(set?.has(name)),
+              path: set?.has(name) ? `models/${model}/${rel}` : "",
+            };
+          }),
+        });
       }
       case "/api/model-profile-state": return reply({ catalog: { summary: { active } }, progress: { summary: { operation: modelOperation(), switch: { state: "ready" } } } });
       case "/api/model-download": {
         const { model, variant } = body;
-        assert.equal(variant, granite[model]?.name);
-        const download = { id: `download-${++sequence}`, model, state: "running", managed: model === "granite-311m-r2" };
+        assert.ok(MODEL_VARIANTS[model]?.some(([name]) => name === variant), `Unexpected download ${model}:${variant}`);
+        const download = { id: `download-${++sequence}`, model, variant, state: "running", managed: model === "granite-311m-r2" };
         downloads.set(download.id, download);
         if (download.managed) progressDownload(model, 40);
         else progressDownload(model, 25, "running", "tokenizer.json");
@@ -158,12 +182,37 @@ export async function startModelsFixture({ scenario = {} } = {}) {
       case "/api/task": return reply(task);
       case "/api/task-events": return subscribe(id, task.id === id && task, response);
       case "/api/model-switch": {
-        assert.ok(installed.has(body.model));
+        assert.ok(installed.get(body.model)?.has(body.variant));
         switches.push(body);
         active = body;
         const operation_id = `switch-${++sequence}`;
         runtime.set(operation_id, { operation_id, kind: "model_switch", state: "completed", progress_percent: 100 });
         return reply({ operation_id, stream: true });
+      }
+      case "/api/model-probe": {
+        probes.push(body);
+        const ep = body.engine === "gpu" ? "DirectML" : body.engine === "npu" ? "OpenVINO" : "CPUExecutionProvider";
+        if (probeFails) {
+          return reply({
+            ok: false, ...body, client_version: "fixture", os: "windows", arch: "amd64",
+            diagnostics: { ok: false, execution_provider: ep, error_code: "ep_unavailable", error: "Probe execution failed on device" },
+            runtime: { exit: 1 },
+          });
+        }
+        return reply({
+          ok: true, ...body, client_version: "fixture", os: "windows", arch: "amd64",
+          diagnostics: { ok: true, execution_provider: ep, dimensions: 384, vector_norm: 1.0, load_ms: 14.2, inference_ms: 5.8 },
+          runtime: { exit: 0 },
+        });
+      }
+      case "/api/model-delete": {
+        if (active.model === body.model && active.variant === body.variant) {
+          return response.writeHead(409, { "Content-Type": "application/json" })
+            .end(JSON.stringify({ ok: false, error: "model variant is active" }));
+        }
+        deletions.push(body);
+        installed.get(body.model)?.delete(body.variant);
+        return reply({ ...body, status: "deleted" });
       }
       case "/api/runtime-operation":
         if (request.method === "DELETE") progressDownload(downloads.get(id).model, 0, "cancelled");
@@ -193,7 +242,9 @@ export async function startModelsFixture({ scenario = {} } = {}) {
     server.listen(0, "127.0.0.1", resolve);
   });
   return {
-    url: `http://127.0.0.1:${server.address().port}/`, errors, requests, switches, cancellations, downloads, installed, health, preferences,
+    url: `http://127.0.0.1:${server.address().port}/`, errors, requests, switches, cancellations, downloads,
+    installed, probes, deletions, health, preferences,
+    setProbeFailure(value) { probeFails = Boolean(value); },
     get selection() { return active; },
     get rebuild() { return rebuild; },
     progressDownload,

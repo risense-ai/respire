@@ -103,7 +103,7 @@ for (const [width, height, colorScheme] of [[1180, 800, "light"], [800, 600, "da
     }
 
     for (const [route, panel] of [
-      ["overview", "[data-overview-metrics]"], ["models", "[data-status-card]"],
+      ["overview", "[data-overview-metrics]"], ["models", "[data-catalog-models]"],
       ["accounts", "[data-session] > .panel"], ["settings", ".panel:has([data-proxy])"],
     ]) {
       await navigate(route, panel);
@@ -206,10 +206,11 @@ for (const [width, height, colorScheme] of [[1180, 800, "light"], [800, 600, "da
       }
     }
 
-    await navigate("models", ".status-card.ready");
+    await navigate("models", '[data-catalog-model="granite-311m-r2"]');
+    await page.locator('[data-model-dock] [data-catalog-action]').first().waitFor();
     assert.ok(await page.locator("[data-live] details > summary").evaluate(summary =>
       summary.getBoundingClientRect().bottom <= summary.closest(".panel").getBoundingClientRect().bottom));
-    const modelsSlots = ["[data-status-card]", "[data-mode-selector]", "[data-mode-apply]", "[data-advanced]", "[data-recall]"];
+    const modelsSlots = ["[data-catalog-models]", "[data-variants]", "[data-model-dock]", "[data-inference-status]", "[data-recall]"];
     await stable(page, [...modelsSlots, "[data-live] details > summary"], async () => {
       scenario.status.retrieval_index = { state: "error", error: longText };
       await page.clock.fastForward(30000);
@@ -221,15 +222,14 @@ for (const [width, height, colorScheme] of [[1180, 800, "light"], [800, 600, "da
       await page.locator("[data-model-task-error]").waitFor({ state: "hidden" });
     });
     await stable(page, modelsSlots, async () => {
-      await page.locator("[data-mode-select=performance]").click();
-      await page.locator("[data-mode-select=performance].selected").waitFor();
-      await page.locator("[data-advanced-open] button").click();
+      await page.locator("[data-catalog-model=bge-base-zh-v1\\.5]").click();
+      await contains(page, "[data-variants]", "model_quantized.onnx");
+      await page.locator("[data-catalog-model=granite-97m-r2]").click();
+      await contains(page, "[data-variants]", "model.onnx");
     });
-    await stable(page, [...modelsSlots, "[data-mirror] button[type=submit]", "[data-variants]"], async () => {
+    await stable(page, [...modelsSlots, "[data-mirror] [name=mirror]"], async () => {
       await page.locator("[data-mirror] [name=mirror]").selectOption("custom");
       await page.locator("[name=mirror-custom]").waitFor();
-      await page.locator("[data-mirror] [name=model]").selectOption("granite-97m-r2");
-      await contains(page, "[data-variants]", "onnx/model.onnx");
     });
 
     await navigate("memories", '[data-select="test-memory"]');
@@ -281,11 +281,10 @@ for (const [width, height, colorScheme] of [[1180, 800, "light"], [800, 600, "da
     await stable(page, wizardSlots, async () => {
       await page.locator("[data-choice=granite-97m-r2]").click();
       await page.locator("[data-next-model]").click();
-      await page.locator("[data-weights] select").waitFor({ state: "attached" });
+      await page.locator("[data-weights] [data-choice]").first().waitFor();
     });
     await stable(page, wizardSlots, async () => {
-      await page.locator(".wizard-advanced summary").click();
-      await page.locator("[data-weights] select").selectOption("standard");
+      await page.locator('[data-weights] [data-choice="standard"]').click();
       await page.locator("[data-device-next]").click();
       await page.locator('.wizard-step[aria-current="step"]').filter({ hasText: /confirm/i }).waitFor();
     });

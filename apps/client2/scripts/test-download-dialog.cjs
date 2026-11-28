@@ -102,6 +102,8 @@ test("backgrounded host download keeps its observer and can reopen until complet
   f.click("background");
   f.streams[0].frame(completed);
   assert.equal(await f.done, true);
+  assert.deepEqual(f.requests.map(({ url }) => url), ["/api/model-download"]);
+  assert.deepEqual(JSON.parse(f.requests[0].opts.body), { model: "m3", variant: "quantized" });
   assert.equal(f.finished(), 1);
   assert.equal(f.activeDownloadSession(), null);
   assert.equal(f.streams[0].closed, true);

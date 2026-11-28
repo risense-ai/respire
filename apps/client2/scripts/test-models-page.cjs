@@ -4,8 +4,8 @@ const { posix } = require("node:path");
 const { i18nMessages, readFrontend } = require("./frontend-source.cjs");
 
 const small = "granite-97m-r2", large = "granite-311m-r2";
-const variants = { [small]: ["standard", "onnx/model.onnx"], [large]: ["quantized", "onnx/model_quint8_avx2.onnx"], m3: ["q4f16", "onnx/model_q4f16.onnx"] };
-const mirrorSelector = "[data-mirror] [name=mirror]";
+const variants = { [small]: ["quint8_avx2", "onnx/model_quint8_avx2.onnx"], [large]: ["quint8_avx2", "onnx/model_quint8_avx2.onnx"], m3: ["q4f16", "onnx/model_q4f16.onnx"] };
+const catalogClick = "[data-catalog-model], [data-catalog-variant], [data-catalog-engine], [data-catalog-action]";
 const taskContent = "[data-model-task-content]";
 const reopenButton = '[data-model="reopen-download"]';
 const cancelButton = '[data-model="cancel"]';
@@ -29,9 +29,13 @@ class Element {
   get textContent() { return this.children.length ? this.children.map(node => node.textContent).join("") : this.text; }
   replaceChildren(...nodes) { this.children = nodes; }
   setAttribute(name, value) { this.attributes.set(name, value); }
-  addEventListener(name, handler) { this.handlers.set(name, handler); }
+  addEventListener(name, handler) {
+    const previous = this.handlers.get(name);
+    this.handlers.set(name, event => { previous?.(event); return handler(event); });
+  }
   emit(name, target = this) { return this.handlers.get(name)({ target, currentTarget: target, preventDefault() {} }); }
   closest() { return null; }
+  focus() {}
   cloneNode() { return new Element(); }
   remove() { this.isConnected = false; }
   showModal() { this.open = true; }
@@ -77,11 +81,11 @@ function frontend(globals) {
   return load;
 }
 
-function fixture({ model = large, managed = true, installed = false, legacyInstalled = installed, active = null, rebuild } = {}) {
+function fixture({ model = large, managed = true, installed = false, active = null, rebuild } = {}) {
   const document = new Element(), dialogs = [], streams = [], requests = [], switches = [], patches = [], intervals = new Map();
-  const timers = new Map();
-  const [variant, filename] = variants[model];
-  const engineState = model === "m3" ? { model: "q4f16", engine: "cpu" } : { model: "fp16", engine: "gpu" };
+  const timers = new Map(), clipboard = [];
+  const [variant, filename] = variants[model] || ["quantized", "onnx/model_quantized.onnx"];
+  const engineState = { model: "quantized", engine: "cpu" };
   const storage = new Map([["respire-model", model]]);
   const ctx = { desktop: { connected: true, platform: "windows", preferences: { modelMirror: "auto" }, task: {},
     health: { instance_id: "fixture", account_id: "account", generation: 1, inference: { phase: "idle" }, capabilities: ["sse.operations.v1"] } },
@@ -91,9 +95,11 @@ function fixture({ model = large, managed = true, installed = false, legacyInsta
   let snapshot = { id: "download", busy: true, stage: `Downloading ${filename}`, done: 4096, total: 10240 };
   let runtime = { operation_id: "download", kind: "model_download", message: "Downloading model assets", state: "running", progress_percent: 40 };
   let job = rebuild;
-  let page, sequence = 0;
+  let page, sequence = 0, probeRuns = 0;
   const globals = {
     document, ctx, CSS: { escape: value => value },
+    FormData: class { *[Symbol.iterator]() {} },
+    navigator: { clipboard: { async writeText(text) { clipboard.push(text); } } },
     localStorage: { getItem: key => storage.get(key), setItem: (key, value) => storage.set(key, value) },
     CustomEvent: class { constructor(type, { detail }) { Object.assign(this, { type, detail }); } },
     setInterval: (callback, ms) => { intervals.set(++sequence, { callback, ms }); return sequence; },
@@ -115,21 +121,30 @@ function fixture({ model = large, managed = true, installed = false, legacyInsta
         case "/api/operations": result = job ? [job] : []; break;
         case "/api/operation": result = job; break;
         case "/api/operation-ack": result = true; break;
-        case "/api/model-variants":
-          result = { model, tokenizer_installed: installed,
-            variants: [{ name: variant, path: filename, installed: model === "m3" ? legacyInstalled : installed, size: 10240 }] };
-          if (model === "m3") result.variants.push(
-            { name: "quantized", path: "onnx/model_quantized.onnx", installed, size: 10240 },
-            { name: "fp16", path: "onnx/model_fp16.onnx", installed, size: 10240 },
-          );
+        case "/api/model-variants": {
+          const id = new URL(url, "http://fixture").searchParams.get("model");
+          const names = id.startsWith("granite-") ? ["quint8_avx2", "standard"] :
+            ["quantized", "fp16", "int8", "uint8", "q4", "q4f16", "bnb4", "fp32"];
+          result = { model: id, tokenizer_installed: id === model && installed,
+            variants: names.map(name => ({ name, path: `onnx/${["standard", "fp32"].includes(name) ? "model" : `model_${name}`}.onnx`,
+              installed: id === model && installed && name === variant, size: 10240 })) };
           break;
+        }
         case "/api/model-profile-state": result = { catalog: { summary: { active } }, progress: { summary: {
           operation: ctx.status.summary.model_operation || { active: false }, switch: { state: "ready" },
         } } }; break;
         case "/api/model-download":
-          assert.deepEqual(command, { model, variant });
+          assert.equal(command.model, model);
+          assert.ok([variant, "quantized"].includes(command.variant));
           result = { id: "download", runtime: managed, stream: managed };
           break;
+        case "/api/model-probe":
+          result = { ok: ++probeRuns === 1, os: "windows", arch: "amd64", client_version: "fixture-client",
+            diagnostics: { runtime_version: "fixture-runtime", weights_path: filename, inference_ms: 7, dimensions: 768,
+              vector_norm: 1, execution_provider: "CPUExecutionProvider", error: probeRuns > 1 ? "Provider error" : null } };
+          break;
+        case "/api/model-delete": installed = false; result = { status: "deleted" }; break;
+        case "/api/open-model-dir": result = "Opened"; break;
         case "/api/model-download-cancel": break;
         case "/api/task": result = snapshot; break;
         case "/api/runtime-operation": result = runtime; break;
@@ -170,7 +185,7 @@ function fixture({ model = large, managed = true, installed = false, legacyInsta
   ctx.modelInventory = kit.createModelInventory(() => ctx.desktop);
   let root, live, cancel;
   return {
-    ctx, dialogs, streams, requests, switches, patches, document, core, kit, intervals, pollIntervalMs, load,
+    ctx, dialogs, streams, requests, switches, patches, document, core, kit, intervals, pollIntervalMs, load, clipboard,
     get root() { return root; }, get live() { return live; }, get cancel() { return cancel; },
     mount() {
       page?.dispose();
@@ -179,7 +194,6 @@ function fixture({ model = large, managed = true, installed = false, legacyInsta
       cancel = live.querySelector(cancelButton);
       cancel.dataset.model = "cancel";
       root.lists = { [cancelButton]: [cancel] };
-      root.querySelector(mirrorSelector).options = ["auto", "https://hf-mirror.com", "custom"].map(value => ({ value }));
       page = load("pages/models.js").models(root, ctx);
       return flush();
     },
@@ -187,6 +201,7 @@ function fixture({ model = large, managed = true, installed = false, legacyInsta
       root.emit("click", { closest: candidate => candidate === selector ? node : null });
       return flush();
     },
+    pick(dataset) { return this.click(catalogClick, { dataset }); },
     dialogClick(name) {
       const dialog = dialogs.at(-1), button = dialog.querySelector(`[data-dl="${name}"]`);
       button.dataset.dl = name;
@@ -224,20 +239,24 @@ function fixture({ model = large, managed = true, installed = false, legacyInsta
 test("model mirror form saves built-in and trimmed custom URLs, and notices dismiss or clear", async () => {
   const f = fixture();
   await f.mount();
-  const form = f.root.querySelector("[data-mirror]"), mirror = f.root.querySelector(mirrorSelector);
+  const form = f.root.querySelector("[data-mirror]"), mirror = form.querySelector("[name=mirror]");
   for (const [selected, custom, expected] of [
     ["https://hf-mirror.com", "", "https://hf-mirror.com"],
     ["custom", " https://mirror.example.org ", "https://mirror.example.org"],
   ]) {
     mirror.value = selected;
-    mirror.emit("change");
-    assert.equal(f.root.querySelector("[data-mirror-custom]").hidden, selected !== "custom");
-    f.root.querySelector("[name=mirror-custom]").value = custom;
-    form.emit("submit");
+    await mirror.emit("change");
+    assert.equal(form.querySelector("[data-mirror-custom]").hidden, selected !== "custom");
+    if (selected === "custom") {
+      form.querySelector("[name=mirror-custom]").value = custom;
+      await form.emit("submit");
+    }
     await flush();
     assert.deepEqual(f.patches.at(-1), { modelMirror: expected });
-    assert.equal(f.root.querySelector("[data-mirror-state]").textContent, i18nMessages.m1f45e225299def52 + expected);
   }
+  form.querySelector("[name=mirror-custom]").value = "https://user:pass@mirror.example.org";
+  await form.emit("submit");
+  assert.equal(f.patches.length, 2);
   const notice = f.document.querySelector("#notice");
   f.core.notify("Dismiss me", true);
   const dismiss = notice.children.find(node => node.attributes.has("data-notice-dismiss"));
@@ -252,78 +271,102 @@ test("model mirror form saves built-in and trimmed custom URLs, and notices dism
   });
 });
 
-test("installed idle selection is ready, and the status tag follows the effective selection", async () => {
-  const f = fixture({ installed: true, active: { model: large, variant: "quantized", engine: "cpu" } });
+test("curated catalog uses the Granite default and shows a legacy selection read-only", async () => {
+  const legacy = "bge-m3-distill-8l";
+  const f = fixture({ model: legacy, active: { model: legacy, variant: "quantized", engine: "cpu" } });
   await f.mount();
-  assert.match(f.root.querySelector("[data-status-card]").innerHTML, /status-card ready/);
-  const { createModelsView } = f.load("pages/models-view.js");
-  const view = { modelID: large, lastVerifiedAt: null, engineState: { model: "fp16", engine: "gpu" },
-    runtimeActive: { model: "m3", variant: "quantized", engine: "cpu" }, runtimeActiveScope: f.kit.activeModelScope(f.ctx.desktop.health) };
-  const renderer = createModelsView(view, f);
-  const tag = () => f.root.querySelector("[data-status-card]").innerHTML.match(/class="mode-tag">([^<]+)/)[1];
-  renderer.renderDynamic(true);
-  assert.equal(tag(), `${i18nMessages.m2588b5b9bacc1df6} · CPU`);
-  view.runtimeActive = { model: "m3", variant: "quantized" };
-  renderer.renderDynamic(true);
-  assert.equal(tag(), `${i18nMessages.m2588b5b9bacc1df6} · —`);
-  view.runtimeActive = undefined;
-  renderer.renderDynamic(true);
-  assert.equal(tag(), `${i18nMessages.m4fbe6bf6f691659f} · GPU`);
+  const cards = f.root.querySelector("[data-catalog-models]").innerHTML;
+  const grid = f.root.querySelector("[data-variants]");
+  assert.deepEqual([...cards.matchAll(/data-catalog-model="([^"]+)"/g)].map(match => match[1]),
+    [large, small, "m3", "bge-base-zh-v1.5"]);
+  assert.match(cards, /data-catalog-model="granite-311m-r2" aria-pressed="true"/);
+  assert.equal(f.kit.DEFAULT_MODEL, large);
+  assert.equal(f.kit.defaultVariantForModel(small), "quint8_avx2");
+  assert.equal(f.kit.defaultVariantForModel("m3"), "quantized");
+  assert.ok(f.root.querySelector("[data-legacy-model]").innerHTML.includes(legacy));
+  assert.equal((grid.innerHTML.match(/data-catalog-variant/g) || []).length, 2);
+  await f.pick({ catalogModel: "m3" });
+  assert.equal((grid.innerHTML.match(/data-catalog-variant/g) || []).length, 8);
+  assert.match(grid.innerHTML, /data-catalog-variant="quantized" aria-pressed="true"/);
 });
 
-test("legacy M3 on CPU is ready in balanced mode only with its active weights installed", async () => {
-  const installed = fixture({ model: "m3", installed: true, active: null });
-  await installed.mount();
-  const card = installed.root.querySelector("[data-status-card]");
-  assert.match(card.innerHTML, /status-card ready/);
-  await installed.click("[data-mode-select]", { dataset: { modeSelect: "performance" } });
-  assert.match(card.innerHTML, /status-card empty/);
+test("active weights stay protected when choosing another engine, and probe can re-test", async () => {
+  const f = fixture({ installed: true, active: { model: large, variant: "quantized", engine: "cpu" } });
+  await f.mount();
+  const dock = f.root.querySelector("[data-model-dock]");
+  assert.match(dock.innerHTML, /data-catalog-action="enabled" disabled/);
+  await f.pick({ catalogAction: "open" });
+  assert.deepEqual(f.requests.at(-1).command, { path: "onnx/model_quint8_avx2.onnx" });
+  assert.match(dock.innerHTML, /DirectML/);
+  await f.pick({ catalogEngine: "npu" });
+  assert.match(dock.innerHTML, /data-catalog-engine="npu" aria-pressed="true"/);
+  assert.match(dock.innerHTML, /data-catalog-action="delete" disabled/);
+  await f.pick({ catalogAction: "probe" });
+  const modal = f.dialogs.at(-1);
+  const status = modal.querySelector("[data-probe-status]");
+  const log = modal.querySelector("[data-probe-log]");
+  assert.deepEqual(f.requests.at(-1).command, { model: large, variant: "quint8_avx2", engine: "npu" });
+  assert.equal(status.dataset.result, "pass");
+  assert.match(log.textContent, /fixture-runtime|execution_provider/);
+  const issue = new URL(modal.querySelector("[data-probe-issue]").href);
+  assert.equal(issue.pathname, "/risense-ai/respire/issues/new");
+  assert.doesNotMatch(issue.searchParams.get("body"), /model_quint8_avx2\.onnx/);
+  await modal.querySelector("[data-probe-retry]").emit("click");
+  await flush();
+  assert.equal(status.dataset.result, "fail");
+  assert.match(log.textContent, /Provider error/);
+  await modal.querySelector("[data-probe-copy]").emit("click");
+  assert.deepEqual(f.clipboard, [log.textContent]);
+  modal.querySelector("[data-probe-close]").emit("click");
+  assert.equal(modal.isConnected, false);
+  assert.deepEqual(f.switches, []);
+});
 
-  const missing = fixture({ model: "m3", installed: true, legacyInstalled: false, active: null });
-  await missing.mount();
-  assert.match(missing.root.querySelector("[data-status-card]").innerHTML, /status-card empty/);
+test("deleting an inactive variant requires confirmation and refreshes its download status", async () => {
+  const f = fixture({ installed: true });
+  await f.mount();
+  await f.pick({ catalogAction: "delete" });
+  const dialog = f.dialogs.at(-1);
+  assert.equal(f.requests.some(({ path }) => path === "/api/model-delete"), false);
+  await dialog.querySelector("form").emit("submit");
+  await flush();
+  const request = f.requests.find(({ path }) => path === "/api/model-delete");
+  assert.deepEqual(request.command, { model: large, variant: "quint8_avx2" });
+  assert.match(f.root.querySelector("[data-model-dock]").innerHTML, /data-catalog-action="download"/);
 });
 
 for (const model of [small, large]) {
   for (const managed of [false, true]) {
-    test(`${model} displays matching row and task progress via ${managed ? "Runtime SSE" : "host task"}`, async () => {
+    test(`${model} displays task progress via ${managed ? "Runtime SSE" : "host task"}`, async () => {
       const f = fixture({ model, managed });
       const [variant, filename] = variants[model];
       await f.mount();
-      assert.ok(f.root.querySelector("[data-variants]").innerHTML.includes(filename));
+      assert.ok(f.root.querySelector("[data-variants]").innerHTML.includes(filename.split("/").at(-1)));
       assert.equal(f.kit.variantFromItem("onnx/model_quantized.onnx", f.ctx.modelInventory.get(model)), "");
       assert.equal(f.kit.taskMatchesVariant({ busy: true, stage: "model_quantized.onnx" }, { name: variant, path: filename }), false);
-      const session = f.kit.openDownloadModal({ model, variant });
-      await flush();
-      const row = f.root.querySelector(`[data-status="${variant}"]`);
-      const button = f.root.querySelector(`[data-model="download"][data-variant="${variant}"]`);
-      if (!managed) {
-        f.task("running", "tokenizer.json");
-        assert.match(row.innerHTML, /40%/);
-        assert.equal(button.disabled, true);
-        f.task("running", "onnx/model_quantized.onnx");
-        assert.doesNotMatch(row.innerHTML, /40%/);
-        assert.equal(button.disabled, false);
-      }
+      await f.pick({ catalogAction: "download" });
+      const session = f.kit.activeDownloadSession();
+      assert.equal(session.variant, variant);
+      const dock = f.root.querySelector("[data-model-dock]");
       if (managed) f.frame(); else f.task();
       const panel = f.live.querySelector(taskContent).innerHTML;
-      assert.match(f.live.innerHTML, /data-model-task-progress><div data-model-task-content>/);
+      assert.match(f.root.innerHTML, /data-model-task-progress><div data-model-task-content>/);
       assert.match(panel, managed ? /40%.*value="40" max="100"/ : /4\.0 KiB \/ 10\.0 KiB.*value="4096" max="10240"/);
-      assert.match(row.innerHTML, /40%/);
-      assert.equal(button.disabled, true);
+      assert.match(dock.innerHTML, /data-catalog-action="download" disabled/);
       if (managed) f.frame("completed"); else f.task("completed");
       assert.equal(await session.done, true);
-      await f.ctx.refresh();
-      assert.equal(button.disabled, false);
+      await flush();
+      assert.match(dock.innerHTML, /data-catalog-action="enable"/);
+      assert.deepEqual(f.switches, []);
     });
   }
 }
 
 for (const outcome of ["completed", "cancelled", "failed"]) {
-  test(`backgrounded primary action settles ${outcome} and switches only on completion`, async () => {
+  test(`backgrounded download settles ${outcome} without switching`, async () => {
     const f = fixture();
     await f.mount();
-    await f.click("[data-mode-apply]");
+    await f.pick({ catalogAction: "download" });
     const session = f.kit.activeDownloadSession(), [stream] = f.streams;
     f.frame();
     await f.dialogClick("background");
@@ -346,11 +389,15 @@ for (const outcome of ["completed", "cancelled", "failed"]) {
     assert.equal(f.kit.activeDownloadSession(), null);
     assert.equal(stream.closed, true);
     await flush();
+    assert.deepEqual(f.switches, []);
+    const dock = f.root.querySelector("[data-model-dock]");
     if (outcome === "completed") {
-      assert.deepEqual(f.switches, [{ model: large, variant: "quantized", engine: "cpu" }]);
+      assert.match(dock.innerHTML, /data-catalog-action="enable"/);
+      await f.pick({ catalogAction: "enable" });
+      assert.deepEqual(f.switches, [{ model: large, variant: "quint8_avx2", engine: "cpu" }]);
       await f.completeSwitch();
-      assert.match(f.root.querySelector("[data-status-card]").innerHTML, /status-card ready/);
-    } else assert.deepEqual(f.switches, []);
+      assert.match(dock.innerHTML, /data-catalog-action="enabled" disabled/);
+    } else assert.match(dock.innerHTML, /data-catalog-action="download"/);
   });
 }
 
@@ -399,7 +446,7 @@ for (const [path, outcome] of [
 ]) {
   test(`wizard ${path} download ${outcome}`, async () => {
     const f = fixture(), root = new Element();
-    const wizard = { state: { model: large, variant: "quantized", device: "cpu" } };
+    const wizard = { state: { model: large, variant: "quint8_avx2", device: "cpu" } };
     const { renderExecute } = f.load("onboarding/wizard-model.js").modelSteps(wizard, { root, ctx: f.ctx, frame: () => "" });
     renderExecute(root.querySelector(".wizard-body"));
     await flush();

@@ -24,7 +24,7 @@ const fusionLabel = (key) =>
   FUSION_NUMERIC.find(([name]) => name === key)?.[1] || key;
 const fusionModeName = (mode) =>
   FUSION_MODES.find(([id]) => id === mode)?.[1] || mode;
-export function bindModelSettings({ root, ctx, fusion, currentMirror, load }) {
+export function bindModelSettings({ root, ctx, fusion, load }) {
   // Host configuration is not proof of the resident Runtime's loaded settings.
   // Keep editing saved values available while marking unverified state explicitly.
   function renderFusion() {
@@ -116,19 +116,6 @@ export function bindModelSettings({ root, ctx, fusion, currentMirror, load }) {
     }
     return { text: i18nMessages.m82b0706e1ca5642b, warning: true };
   }
-  $("[data-mirror]", root).addEventListener("submit", (event) => {
-    event.preventDefault();
-    action($("[type=submit]", event.target), async () => {
-      const mirror = currentMirror();
-      await ctx.savePreferences({ modelMirror: mirror || "auto" });
-      $("[data-mirror-state]", root).textContent =
-        i18nMessages.m1f45e225299def52 + (mirror || "auto");
-      notify(i18nMessages.m9b49b31f2416becd);
-    });
-  });
-  $("[data-mirror] [name=mirror]", root).addEventListener("change", (event) => {
-    $("[data-mirror-custom]", root).hidden = event.target.value !== "custom";
-  });
   $("[data-recall]", root).addEventListener("submit", (event) => {
     event.preventDefault();
     action($("[type=submit]", event.target), async () => {

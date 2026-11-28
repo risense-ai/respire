@@ -58,60 +58,19 @@ export const MODEL_CARDS = [
   { id: "granite-97m-r2", title: "Granite 97M R2", detail: i18nMessages.m8bf18719af6ce02b },
 ];
 
-export const graniteVariant = (model) =>
-  ({ "granite-311m-r2": "quantized", "granite-97m-r2": "standard" })[model];
+export const DEFAULT_MODEL = "granite-311m-r2";
+export const graniteVariant = (model) => model?.startsWith("granite-") ? "quint8_avx2" : undefined;
+export const defaultVariantForModel = (model) => graniteVariant(model) || "quantized";
+
+export const CURATED_MODELS = [
+  { id: DEFAULT_MODEL, repo: "ibm-granite/granite-embedding-311m-multilingual-r2", dims: 768, context: 32768, variantCount: 2, tag: i18nMessages.modelTagMultilingual },
+  { id: "granite-97m-r2", repo: "ibm-granite/granite-embedding-97m-multilingual-r2", dims: 384, context: 32768, variantCount: 2, tag: i18nMessages.modelTagCompact },
+  { id: "m3", repo: "Xenova/bge-m3", dims: 1024, context: 512, variantCount: 8, tag: i18nMessages.modelTagMultilingual },
+  { id: "bge-base-zh-v1.5", repo: "Xenova/bge-base-zh-v1.5", dims: 768, context: 512, variantCount: 8, tag: i18nMessages.modelTagChinese },
+].map((model) => ({ ...MODEL_CARDS.find(({ id }) => id === model.id), ...model }));
 
 // Weight per device: CPU stays quantized; GPU prefers fp16.
 export const DEVICE_VARIANTS = { cpu: "quantized", gpu: "fp16" };
-
-// Scenario modes for the models page: three intent cards instead of the raw
-// variant/engine matrix. Subtitles are static fallbacks; the page overrides
-// them with live inventory sizes so numbers never go stale.
-export const MODEL_MODES = [
-  {
-    id: "lite",
-    title: i18nMessages.ma711f2f1e55164f2,
-    subtitle: "~540 MB",
-    description: i18nMessages.m5fc5a35765ed7cc0,
-    variant: "quantized",
-    engine: "cpu",
-    requiresGPU: false,
-  },
-  {
-    id: "balanced",
-    title: i18nMessages.m2588b5b9bacc1df6,
-    subtitle: "~540 MB",
-    description: i18nMessages.me7627beca34d848e,
-    variant: "quantized",
-    engine: "cpu",
-    requiresGPU: false,
-    recommended: true,
-  },
-  {
-    id: "performance",
-    title: i18nMessages.m4fbe6bf6f691659f,
-    subtitle: "~1 GB",
-    description: i18nMessages.m9905ca942c82a151,
-    variant: "fp16",
-    engine: "auto",
-    requiresGPU: true,
-  },
-];
-
-// Map an active weight back to the mode card that represents it; used when
-// an existing installation has no stored mode preference yet.
-export function modeForVariant(variant) {
-  return variant === "fp16" ? "performance" : "balanced";
-}
-
-export function performanceAvailable(platform) {
-  return engineAvailable(platform, "gpu");
-}
-
-export function detectBestEngine(platform) {
-  if (engineAvailable(platform, "gpu")) return "gpu";
-  return "cpu";
-}
 
 export const DEVICES = [
   {
@@ -130,7 +89,8 @@ export const isProfileModel = (model) => model !== "m3";
 
 export function variantFilename(variant) {
   return (variant?.path && String(variant.path).split(/[/\\]/).pop()) ||
-    (variant?.name ? `model_${variant.name}.onnx` : "");
+    (["standard", "fp32"].includes(variant?.name) ? "model.onnx" :
+      variant?.name ? `model_${variant.name}.onnx` : "");
 }
 
 function matchesFilename(item, filename) {
@@ -147,11 +107,9 @@ export function variantFromItem(item, inventory) {
   return inventory?.variants?.find((entry) => matchesFilename(item, variantFilename(entry)))?.name || "";
 }
 
-// GPU still goes through the runtime's inference probe when applied.
 export function engineAvailable(platform, engine) {
   if (engine === "cpu") return true;
-  if (engine === "gpu") return /^(windows|darwin)/.test(platform || "");
-  return false;
+  return (engine === "gpu" || engine === "npu") && /^(windows|darwin|linux)\b/.test(platform || "");
 }
 
 export function createModelInventory(getDesktop) {
@@ -227,7 +185,9 @@ export function activeVariantSelection(active, legacy) {
   }
   if (!active?.model) return null;
   const model = canonicalModelID(active.model);
-  return { model, variant: active.variant || graniteVariant(model), engine: active.engine };
+  const variant = !active.variant || (active.variant === "quantized" && graniteVariant(model))
+    ? defaultVariantForModel(model) : active.variant;
+  return { model, variant, engine: active.engine };
 }
 
 export function marksActiveVariant(active, model, variant, engine) {

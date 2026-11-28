@@ -1,6 +1,6 @@
 const { test } = require("node:test");
 const assert = require("node:assert/strict");
-const { readFrontend } = require("./frontend-source.cjs");
+const { readFrontend, i18nMessages } = require("./frontend-source.cjs");
 
 function fixture({ replies = [] } = {}) {
   const streams = [], events = [], requests = [], timers = [];
@@ -135,11 +135,11 @@ function loadFunctions(file, dependencies, exports) {
 
 function modelControls(f) {
   const { $, h, bytes, number } = loadFunctions("ui/core.js", {}, "$, h, bytes, number");
-  const { readProfileState } = loadFunctions("pages/model-kit.js", {}, "readProfileState");
+  const { readProfileState } = loadFunctions("pages/model-kit.js", { i18nMessages }, "readProfileState");
   const { activeDownloadSession } = loadFunctions("pages/model-download-modal.js", {}, "activeDownloadSession");
-  return loadFunctions("pages/models-view.js", { $, h, bytes, number, readProfileState,
+  return loadFunctions("pages/models-view.js", { i18nMessages, $, h, bytes, number, readProfileState,
     activeDownloadSession, currentRuntimeSwitch: f.currentRuntimeSwitch, phase: value => value },
-  "liveModelOperation, modelOperationProgress, modelCancelButton, syncModelCancel, cancellableModelID, nextSwitchStallState");
+  "liveModelOperation, modelOperationProgress, syncModelCancel, cancellableModelID, nextSwitchStallState");
 }
 
 test("advancing switch progress keeps the poll alive beyond 600 ticks", () => {
@@ -170,9 +170,16 @@ test("unchanged switch progress expires at idle tick 601", () => {
   assert.deepEqual(state, { key: "switch|switch-index|4||", ticks: 601, expired: true });
 });
 
-test("model cancel markup is empty without an advanced cancel button", () => {
-  const { modelCancelButton } = modelControls(fixture());
-  assert.equal(modelCancelButton({ querySelector: () => null }), "");
+test("model cancel button stays hidden until an active cancellable operation appears", () => {
+  const { syncModelCancel } = modelControls(fixture());
+  const button = { hidden: false, disabled: false };
+  const root = { querySelector: () => button };
+  syncModelCancel(root, {}, { active: false });
+  assert.equal(button.hidden, true);
+  assert.equal(button.disabled, true);
+  syncModelCancel(root, {}, { active: true, id: "op-1", cancellable: true });
+  assert.equal(button.hidden, false);
+  assert.equal(button.disabled, false);
 });
 
 test("fresh switch profile renders indexed items and elapsed time over a stale status snapshot", () => {
@@ -199,23 +206,29 @@ test("overview uses the shared progress formatter for active model operations", 
 
 test("the three-second profile poll publishes fresh counts and stops at idle", async () => {
   const controls = modelControls(fixture());
-  const { readProfileState } = loadFunctions("pages/model-kit.js", {}, "readProfileState");
+  const { readProfileState, profileStateSettled } = loadFunctions("pages/model-kit.js", { i18nMessages }, "readProfileState, profileStateSettled");
   const source = readFrontend("pages/models.js");
-  const polling = source.slice(source.indexOf("  function syncProfilePolling("), source.indexOf("  async function refreshM3Inventory("));
+  const acceptSrc = source.slice(source.indexOf("  function acceptProfileState("), source.indexOf("  async function load("));
+  const polling = source.slice(source.indexOf("  function syncProfilePolling("), source.indexOf("  async function runIndexedAction("));
   const snapshot = { active: true, id: "switch", phase: "queued", done: 0 };
   const operation = { active: true, id: "switch", phase: "switch-index", done: 4, total: 10, elapsed: 6 };
-  const ctx = { status: { summary: { model_operation: snapshot } } };
-  const view = { modelID: "granite" };
+  const ctx = { status: { summary: { model_operation: snapshot } }, refresh: async () => {} };
+  const view = { modelID: "granite-311m-r2", profileSwitchPending: false, switchInFlight: false, indexInFlight: false };
   let tick, interval;
-  const start = new Function("view", "ctx", "fetchProfileState", "readProfileState", "activeModelScope", "acceptRuntimeActive",
-    "setInterval", "clearInterval", "liveModelOperation", "notify", `
-    let disposed = false, profileRefreshing = false;
+  const start = new Function("view", "ctx", "fetchProfileState", "readProfileState", "profileStateSettled",
+    "setInterval", "clearInterval", "liveModelOperation", "nextSwitchStallState", "i18nMessages", "notify", `
+    let disposed = false, profileRefreshing = false, switchTimer;
+    let switchProgress = { key: "", ticks: 0 };
+    const scope = () => "scope";
+    const isCurrent = (owner) => !disposed && owner === scope();
+    ${acceptSrc}
     ${polling}
     function update() { syncProfilePolling(liveModelOperation(view, ctx.status)); }
     return update;
-  `)(view, ctx, async () => ({ progress: { summary: { operation: { ...operation } } } }),
-    readProfileState, () => "scope", () => {},
-    (fn, ms) => { tick = fn; interval = ms; return 1; }, id => { assert.equal(id, 1); tick = null; }, controls.liveModelOperation, assert.fail);
+  `)(view, ctx, async () => ({ progress: { summary: { operation: { ...operation }, switch: { state: "pending" } } } }),
+    readProfileState, profileStateSettled,
+    (fn, ms) => { tick = fn; interval = ms; return 1; }, id => { assert.equal(id, 1); tick = null; switchTimer = null; },
+    controls.liveModelOperation, controls.nextSwitchStallState, i18nMessages, assert.fail);
   start();
   assert.equal(interval, 3000);
   await tick();
@@ -227,19 +240,20 @@ test("the three-second profile poll publishes fresh counts and stops at idle", a
   assert.equal(tick, null);
 });
 
-test("both direct cancel buttons and Advanced Settings use the active operation ID", async () => {
+test("model cancel button uses the active operation ID across snapshots and streams", async () => {
   const f = fixture();
   const controls = modelControls(f);
   const snapshot = { active: true, id: "status-task" };
   const profile = { active: true, id: "profile-task" };
-  const buttons = [false, false, true].map(advanced => ({ dataset: { model: "cancel" }, closest: () => advanced }));
-  const root = { querySelectorAll: () => buttons, addEventListener: (_, fn) => { root.click = fn; } };
+  const button = { dataset: { model: "cancel" }, hidden: false, disabled: false };
+  const root = { querySelector: () => button, addEventListener: (_, fn) => { root.click = fn; } };
   const calls = [];
   const { bindModelActions } = loadFunctions("pages/models-actions.js", {
-    ...controls, action: (_, run) => run(), execute: async (...args) => { calls.push(args); },
+    ...controls, i18nMessages, action: (_, run) => run(), execute: async (...args) => { calls.push(args); },
+    reopenActiveDownloadModal: () => {},
   }, "bindModelActions");
 
-  const observed = f.observeRuntimeSwitch({ operation_id: "receipt-task", stream: true }, { model: "granite" });
+  const observed = f.observeRuntimeSwitch({ operation_id: "receipt-task", stream: true }, { model: "granite-311m-r2" });
   const receiptOperation = controls.liveModelOperation({}, {});
   assert.equal(receiptOperation.id, "receipt-task");
   f.streams[0].frame("completed", "completed", "receipt-task");
@@ -254,13 +268,12 @@ test("both direct cancel buttons and Advanced Settings use the active operation 
     [{ runtimeProgress: { id: "finished", state: "completed" } }, {}, undefined],
   ]) {
     controls.syncModelCancel(root, view, controls.liveModelOperation(view, status));
-    assert.deepEqual(buttons.map(button => button.disabled), [!id, !id, !id]);
-    assert.deepEqual(buttons.slice(0, 2).map(button => button.hidden), [!id, !id]);
+    assert.equal(button.disabled, !id);
+    assert.equal(button.hidden, !id);
     bindModelActions(view, { root, ctx: { status }, refreshProfileState: async () => {} });
-    root.click({ target: { closest: selector => selector === "[data-model]" ? buttons[0] : null } });
+    root.click({ target: { closest: selector => selector === "[data-model]" ? button : null } });
     await new Promise(resolve => setImmediate(resolve));
   }
   assert.deepEqual(calls, ["status-task", "profile-task", "runtime-task", "receipt-task"].map(id => ["model_cancel", { id }]));
-  assert.match(readFrontend("pages/models.js"), /data-model-task-progress[^\n]+modelCancelButton\(root\)/);
-  assert.match(readFrontend("pages/models-view.js"), /data-mode-progress hidden[^\n]+modelCancelButton\(root\)/);
+  assert.match(readFrontend("pages/models.js"), /data-model-task-progress[\s\S]*data-model="cancel"/);
 });
