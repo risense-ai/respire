@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import {exactBytes, minimumBytes, payload, wire} from '../../referee/test-cases/plugin-rpc/transport.mjs';
+import {exactBytes, minimumBytes, payload, wire} from '../../test-cases/plugin-rpc/transport.mjs';
 
 // The pinned target accepts only /v1 and /rpc. Keep MCP separate and
 // address only the already-owned fixture listener, with no redirects.

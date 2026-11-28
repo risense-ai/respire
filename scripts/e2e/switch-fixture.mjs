@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 import {mkdir, readFile, writeFile} from 'node:fs/promises';
 import {join} from 'node:path';
-import {probeReadiness} from '../../referee/test-cases/targets.mjs';
+import {probeReadiness} from '../../test-cases/targets.mjs';
 import {setTimeout as delay} from 'node:timers/promises';
 
 const graph = Buffer.from(

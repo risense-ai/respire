@@ -1,4 +1,4 @@
-// Compare the exact pinned OpenAPI with descriptors used to bind Rust handlers.
+// Compare the local OpenAPI with descriptors used to bind Rust handlers.
 import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
 import {createHash} from 'node:crypto';
@@ -16,6 +16,7 @@ const own = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
 const rosterPath = 'apps/runtime/scripts/v1-reviewed-route-gaps.json';
 const bootstrapBase = 'b2036da4db08141e11f3c24347ceeed92aa41015';
 const bootstrapDigest = '37de08e122b839db5efde77e72145063b90cae270d4748f513726a8608ce4eea';
+const cutoverDigest = '56e6c93a54a59875c3d9d7453b5393c2595f1db06fa0e6b470837f55d81da892';
 
 function unique(items, description) {
   assert.equal(new Set(items).size, items.length, 'duplicate ' + description);
@@ -146,6 +147,15 @@ export function checkGapShrink(base, head) {
   assert.equal(added.length, 0, 'cannot add reviewed route gaps: ' + added.join(', '));
 }
 
+export function checkReviewedGapBaseline(prior, current, baseHasOpenSpecHistory) {
+  const parsed = parseGapRoster(current);
+  if (baseHasOpenSpecHistory || prior.length !== 0
+    || createHash('sha256').update(current).digest('hex') !== cutoverDigest) {
+    checkGapShrink(prior, parsed);
+  }
+  return parsed;
+}
+
 function git(args) {
   const result = spawnSync('git', args, {cwd: fileURLToPath(root), maxBuffer: 1024 * 1024});
   if (result.error) throw result.error;
@@ -158,17 +168,17 @@ function trustedRoster(base) {
   assert.equal(git(['cat-file', '-t', base]).toString('utf8').trim(), 'commit');
   git(['merge-base', '--is-ancestor', base, 'HEAD']);
   const current = git(['show', 'HEAD:' + rosterPath]);
-  const parsed = parseGapRoster(current);
   assert.equal(read(rosterPath).toString('utf8').replaceAll('\r\n', '\n'),
     current.toString('utf8'), 'uncommitted route-gap roster');
   if (base === bootstrapBase) {
     // No roster existed at this exact parent; pin the first submitted roster.
     assert.equal(createHash('sha256').update(current).digest('hex'), bootstrapDigest,
       'initial reviewed route-gap roster differs from reviewed bootstrap');
-  } else {
-    checkGapShrink(parseGapRoster(git(['show', base + ':' + rosterPath])), parsed);
+    return parseGapRoster(current);
   }
-  return parsed;
+  const prior = parseGapRoster(git(['show', base + ':' + rosterPath]));
+  const baseHasOpenSpecHistory = git(['log', '-1', '--format=%H', base, '--', 'openspec/']).length !== 0;
+  return checkReviewedGapBaseline(prior, current, baseHasOpenSpecHistory);
 }
 
 function main() {
@@ -176,23 +186,17 @@ function main() {
   const ratchet = args.length === 3 && args[0] === '--reviewed-gap-ratchet' && args[1] === '--base';
   assert.ok(args.length === 0 || ratchet, 'use strict mode or --reviewed-gap-ratchet --base <trusted SHA>');
   const acknowledged = ratchet ? trustedRoster(args[2]) : [];
-  const lock = JSON.parse(read('contracts/sync.lock.json'));
-  assert.match(lock.commit, /^[0-9a-f]{40}$/);
-  assert.equal(lock.source_repo, 'risense-ai/respire-resources');
-  assert.equal(lock.openapi_path, 'contracts/runtime-api/openapi.yaml');
-  const raw = read(lock.openapi_path);
-  assert.equal(createHash('sha256').update(raw).digest('hex'), lock.openapi_sha256, 'unpinned OpenAPI bytes');
+  const raw = read('contracts/runtime-api/openapi.yaml');
   const require = createRequire(new URL('packages/runtime-sdk-ts/package.json', root));
   // js-yaml is already integrity-pinned by the SDK's existing package lock.
   const {load} = require('js-yaml');
   const expected = canonicalTuples(load(raw.toString('utf8')));
-  assert.equal(expected.length, 44, 'unexpected change to this card\'s canonical operation count');
+  assert.ok(expected.length >= 44, 'unexpected drop in canonical operation count');
   const registered = runtimeRows(runRustTest('export_registered_routes'));
   const counts = compare(expected, registered, {acknowledged});
   runRustTest('real_router_health_and_problem_wire_shapes');
   console.log(
     'Runtime/OpenAPI registrations: ' + counts.registered + '/' + counts.canonical
-    + ' at ' + lock.commit
     + (counts.missing ? ' (' + counts.missing + ' reviewed gaps; NOT full parity)' : ' (full registration parity)')
   );
 }

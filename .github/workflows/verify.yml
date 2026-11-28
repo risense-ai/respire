@@ -50,12 +50,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Checkout trusted governance scripts from respire-resources
+      - name: Checkout trusted governance scripts from main
         uses: actions/checkout@v4
         with:
-          repository: risense-ai/respire-resources
           ref: main
-          path: _resources
+          path: _trusted
           persist-credentials: false
 
       - name: Setup Node.js
@@ -68,7 +67,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
         run: |
-          node _resources/process/scripts/respire-process.mjs verify-merge \
+          node _trusted/process/scripts/respire-process.mjs verify-merge \
             "risense-ai/respire#${PR_NUMBER}" \
             --verdict-only \
             --publish-status
@@ -80,12 +79,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Checkout trusted governance scripts from respire-resources
+      - name: Checkout trusted governance scripts from main
         uses: actions/checkout@v4
         with:
-          repository: risense-ai/respire-resources
           ref: main
-          path: _resources
+          path: _trusted
           persist-credentials: false
 
       - name: Setup Node.js
@@ -97,7 +95,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.RESPIRE_BOT_TOKEN || github.token }}
         run: |
-          node _resources/process/scripts/respire-process.mjs evidence-register \
+          node _trusted/process/scripts/respire-process.mjs evidence-register \
             --repo risense-ai/respire \
             --sha "${{ github.sha }}" \
             --run-id "${{ github.run_id }}"
