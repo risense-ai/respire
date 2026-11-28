@@ -577,6 +577,8 @@ include!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/rpc_serve/parts/model_switch.
 include!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/rpc_serve/parts/job.rs"));
 
 include!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/rpc_serve/parts/dispatch_validated.rs"));
+#[path = "rpc_serve/parts/model_probe.rs"]
+mod model_probe;
 
 include!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/rpc_serve/parts/deferred_reply.rs"));
 

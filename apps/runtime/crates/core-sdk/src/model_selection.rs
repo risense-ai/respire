@@ -135,16 +135,26 @@ fn read_opened(mut file: std::fs::File, path: &Path, size: u64, hash: &str) -> R
 }
 
 pub(crate) fn verify(path: &Path, size: u64, hash: &str) -> Result<()> {
-    let mut file = open_pinned(path, size)?;
+    copy_verified(path, size, hash, std::io::sink())
+}
+
+pub(crate) fn copy_verified(path: &Path, size: u64, hash: &str, mut destination: impl Write) -> Result<()> {
+    let file = open_pinned(path, size)?;
+    let mut input = file.take(size.saturating_add(1));
     let mut digest = Sha256::new();
     let mut buffer = vec![0u8; 1 << 20];
+    let mut copied = 0u64;
     loop {
-        let count = file.read(&mut buffer)?;
+        let count = input.read(&mut buffer)?;
         if count == 0 {
             break;
         }
+        copied += count as u64;
+        anyhow::ensure!(copied <= size, "model resource changed while reading: {}", path.display());
         digest.update(&buffer[..count]);
+        destination.write_all(&buffer[..count])?;
     }
+    anyhow::ensure!(copied == size, "model resource changed while reading: {}", path.display());
     check_digest(path, digest.finalize(), hash)
 }
 pub(crate) fn validate(engine: Engine, variant: ModelVariant) -> Result<()> {

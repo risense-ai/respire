@@ -164,7 +164,7 @@ fn locked_response(request: &RpcRequest) -> Option<RpcResponse> {
         && !core_config_method(&request.method)
         && !(request.method == "cli.exec" && command_name(&request.args) == Some("status"))
         && !matches!(request.method.as_str(), "runtime.status" | "runtime.stop" | "runtime.result"
-            | "cli.progress" | "model.progress")
+            | "cli.progress" | "model.progress" | "model.probe")
     {
         return Some(error_response(request, "runtime_locked", "supply private key material from the CLI or Client2 before accessing the library"));
     }

@@ -19,6 +19,8 @@ fn profile(id: &str) -> ModelProfile {
         onnx: json!({"input_ids":"input_ids"}),
         weights: Some(asset.clone()),
         tokenizer: Some(asset),
+        companions: Vec::new(),
+        isolate_engines: false,
     }
 }
 

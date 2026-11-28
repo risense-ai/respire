@@ -150,12 +150,15 @@ func TestDownloadModelSucceedsAfterOriginError(t *testing.T) {
 	defer second.Close()
 	originalMirrors := modelMirrors
 	originalSpec := modelFileSpecs["quantized"]
+	originalTokenizer := modelCatalog[2].Tokenizer
 	t.Cleanup(func() {
 		modelMirrors = originalMirrors
 		modelFileSpecs["quantized"] = originalSpec
+		modelCatalog[2].Tokenizer = originalTokenizer
 	})
 	modelMirrors = []string{first.URL, second.URL}
 	modelFileSpecs["quantized"] = spec
+	modelCatalog[2].Tokenizer = spec
 	manager := &Manager{DataRoot: t.TempDir(), modelHTTPClient: second.Client()}
 	if err := manager.DownloadModel(context.Background(), "m3", "quantized", "auto"); err != nil {
 		t.Fatalf("download from the second origin: %v", err)

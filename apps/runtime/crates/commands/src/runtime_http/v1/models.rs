@@ -24,9 +24,9 @@ pub(super) fn active_assets(store: &LocalStore) -> V1Result<serde_json::Value> {
     selection.validate().map_err(|_| unavailable())?;
     let mut paths = Vec::new();
     if matches!(selection.backend_profile.backend.as_str(), "onnx" | "mlx") {
-        for resource in [selection.profile.weights, selection.profile.tokenizer] {
-            paths.push(resource.ok_or_else(unavailable)?.path);
-        }
+        paths.push(selection.profile.weights.ok_or_else(unavailable)?.path);
+        paths.push(selection.profile.tokenizer.ok_or_else(unavailable)?.path);
+        paths.extend(selection.profile.companions.into_iter().map(|resource| resource.path));
     }
     let mut active_paths = Vec::new();
     for path in paths {
@@ -69,13 +69,14 @@ struct EngineAvailability {
 pub(super) fn catalog(store: &LocalStore) -> Result<ModelCatalogResponse> {
     let mut registry = embedding::registry()?;
     let active_model_id = match store.active_selection()? {
-        Some(selection) => {
+        Some(selection) if selection.model != "bge-m3-distill-8l" => {
             registry
                 .models
                 .entry(selection.model.clone())
                 .or_insert(selection.profile);
             selection.model
         }
+        Some(selection) => selection.model,
         None => store.retrieval_model()?,
     };
     Ok(project_catalog(active_model_id, &registry))
@@ -88,6 +89,9 @@ fn project_catalog(active_model_id: String, registry: &Registry) -> ModelCatalog
         .map(|(id, model)| {
             let display_name = match id.as_str() {
                 "m3" => "BGE-M3",
+                "granite-311m-r2" => "Granite 311M R2",
+                "granite-97m-r2" => "Granite 97M R2",
+                "bge-base-zh-v1.5" => "BGE Base Chinese v1.5",
                 "bge-small-zh-v1.5" => "BGE Small Chinese v1.5",
                 "m3-mlx" => "BGE-M3 MLX",
                 id => id,

@@ -107,7 +107,7 @@ pub fn run_capabilities() -> Result<()> {
                 "memory_metadata_flags": true,
                 "memory_metadata_gate_default": false,
                 "rerank": false,
-                "model": {"install": false, "install_rerank": false, "profile_contract":1, "transport_contract":1, "methods":["model.catalog","model.configure","model.switch","model.resume","model.progress"], "selection_scope":"library"}
+                "model": {"install": false, "install_rerank": false, "profile_contract":1, "transport_contract":1, "methods":["model.catalog","model.configure","model.switch","model.resume","model.progress","model.probe"], "selection_scope":"library"}
             }
         }), Vec::new()))
 }

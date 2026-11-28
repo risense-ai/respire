@@ -4,8 +4,11 @@ use super::*;
         pub(super) profiling: Option<std::path::PathBuf>,
         pub(super) device_options: bool,
         pub(super) native: Option<crate::profiles::NativeProfile>,
-        pub(super) cache: std::path::PathBuf,
+        pub(super) cache: Option<std::path::PathBuf>,
         pub(super) error: Option<anyhow::Error>,
+        pub(super) external_data_dir: Option<tempfile::TempDir>,
+        #[cfg(target_os = "linux")]
+        pub(super) linux_accelerator: Option<crate::onnx::Engine>,
     }
 
     pub(crate) struct ProbeOptions(SessionOptionsContext);
@@ -16,8 +19,11 @@ use super::*;
                 profiling: crate::env::var_os("RSRS_ORT_PROFILE").map(std::path::PathBuf::from),
                 device_options: cfg!(windows),
                 native,
-                cache: crate::onnx::host_cache_dir(),
+                cache: Some(crate::onnx::host_cache_dir()),
                 error: None,
+                external_data_dir: None,
+                #[cfg(target_os = "linux")]
+                linux_accelerator: None,
             })
         }
 
@@ -106,6 +112,21 @@ use super::*;
             #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
             let _ = environment;
             let api = unsafe { &*api.cast::<ort_sys::OrtApi>() };
+            #[cfg(target_os = "linux")]
+            if let Some(engine) = context.linux_accelerator {
+                unsafe { crate::linux_ep::configure(options.cast(), api, environment.cast(), engine) }?;
+            }
+            if let Some(directory) = &context.external_data_dir {
+                let directory = std::ffi::CString::new(directory.path().to_str().context("ONNX external data path must be UTF-8")?)?;
+                let status = unsafe { (api.AddSessionConfigEntry)(
+                    options.cast(), c"session.model_external_initializers_file_folder_path".as_ptr(), directory.as_ptr(),
+                ) };
+                if !status.0.is_null() {
+                    let message = unsafe { std::ffi::CStr::from_ptr((api.GetErrorMessage)(status.0)) }.to_string_lossy().into_owned();
+                    unsafe { (api.ReleaseStatus)(status.0) };
+                    anyhow::bail!("configure ONNX external data: {message}");
+                }
+            }
             if let Some(native) = &context.native {
                 if native.provider == "CPUExecutionProvider" {
                     anyhow::ensure!(
@@ -191,16 +212,15 @@ use super::*;
                 anyhow::ensure!(!environment.is_null(), "invalid Core native environment");
                 let name = unsafe { (api.EpDevice_EpName)(device.cast()) };
                 anyhow::ensure!(!name.is_null(), "missing Core selected provider name");
-                let openvino = unsafe { std::ffi::CStr::from_ptr(name) }.to_bytes()
-                    == b"OpenVINOExecutionProvider";
+                let cache = context.cache.as_ref().filter(|_| unsafe { std::ffi::CStr::from_ptr(name) }.to_bytes()
+                    == b"OpenVINOExecutionProvider");
                 let cache_key = std::ffi::CString::new("cache_dir")?;
-                if openvino {
-                    std::fs::create_dir_all(&context.cache)?;
-                }
-                let cache_path =
-                    std::ffi::CString::new(context.cache.to_string_lossy().as_bytes())?;
+                let cache_path = cache.map(|path| -> Result<_> {
+                    std::fs::create_dir_all(path)?;
+                    Ok(std::ffi::CString::new(path.to_string_lossy().as_bytes())?)
+                }).transpose()?;
                 let keys = [cache_key.as_ptr()];
-                let values = [cache_path.as_ptr()];
+                let values = [cache_path.as_ref().map_or(ptr::null(), |path| path.as_ptr())];
                 let selected = [device.cast::<ort_sys::OrtEpDevice>()];
                 let status = unsafe {
                     (api.SessionOptionsAppendExecutionProvider_V2)(
@@ -208,13 +228,13 @@ use super::*;
                         environment.cast(),
                         selected.as_ptr(),
                         1,
-                        if openvino { keys.as_ptr() } else { ptr::null() },
-                        if openvino {
+                        if cache.is_some() { keys.as_ptr() } else { ptr::null() },
+                        if cache.is_some() {
                             values.as_ptr()
                         } else {
                             ptr::null()
                         },
-                        usize::from(openvino),
+                        usize::from(cache.is_some()),
                     )
                 };
                 if !status.0.is_null() {

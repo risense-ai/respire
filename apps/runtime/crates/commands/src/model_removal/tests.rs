@@ -94,11 +94,12 @@ impl Fixture {
             onnx: serde_json::Value::Null,
             weights: Some(resource("model_quantized.onnx")?),
             tokenizer: Some(resource("tokenizer.json")?),
+            companions: Vec::new(),
+            isolate_engines: false,
         };
-        Ok(Registry {
-            models: [(model.id.clone(), model)].into_iter().collect(),
-            backends: Default::default(),
-        })
+        let mut registry = Registry::default();
+        registry.models.insert(model.id.clone(), model);
+        Ok(registry)
     }
 
     fn selection(&self) -> Result<profiles::Selection> {

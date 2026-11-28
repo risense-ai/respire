@@ -2235,6 +2235,7 @@ dependencies = [
  "chrono",
  "dirs",
  "libloading",
+ "ort",
  "ort-sys",
  "respire_core_ffi",
  "respire_protocol 2.0.0-dev.17",
@@ -2242,6 +2243,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tempfile",
+ "tokenizers",
  "ureq 2.12.1",
  "zip",
 ]

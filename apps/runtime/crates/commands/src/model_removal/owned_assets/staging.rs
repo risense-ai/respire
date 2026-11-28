@@ -180,7 +180,7 @@ mod tests {
     use crate::model_removal::secure_temp;
     use std::{io::Read, time::Duration};
 
-    const FIXTURE_MODEL: &str = "bge-small-zh-v1.5";
+    const FIXTURE_MODEL: &str = "bge-base-zh-v1.5";
 
     fn owner(profile: &Path) -> Binding {
         Binding {

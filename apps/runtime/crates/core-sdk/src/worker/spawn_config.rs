@@ -65,6 +65,13 @@ pub(super) fn command(
         command
             .current_dir(root)
             .env("RESPIRE_PRIVATE_CORE_CANDIDATE", "1");
+        #[cfg(windows)]
+        command.env("RESPIRE_CANDIDATE_PROVIDER_ROOT", crate::onnx::settings_dir());
+        for name in ["RSRS_CORE_TEST_MODE", "RSRS_INTRA_THREADS"] {
+            if let Some(value) = crate::env::var_os(name) {
+                command.env(name, value);
+            }
+        }
         for name in [
             "RSRS_DATA_DIR",
             "HOME",

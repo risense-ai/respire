@@ -55,7 +55,7 @@ func (m *Manager) requestScope(ctx context.Context) (*runtimeScope, error) {
 
 func legacyRPCUsesReceipt(method any) bool {
 	switch method {
-	case "runtime.status", "assets.status", "model.catalog", "model.progress", "cli.progress", "runtime.result":
+	case "runtime.status", "assets.status", "model.catalog", "model.progress", "model.probe", "cli.progress", "runtime.result":
 		return false
 	default:
 		return true
@@ -79,10 +79,20 @@ func (m *Manager) legacyRPCRequest(ctx context.Context, request map[string]any) 
 			}
 		}
 	}
-	return m.localRequest(ctx, http.MethodPost, "/api/rpc", request)
+	client := m.localClient
+	if request["method"] == "model.probe" {
+		probeClient := *client
+		probeClient.Timeout = ModelProbeTimeout
+		client = &probeClient
+	}
+	return localRequest(ctx, client, m.Endpoint, http.MethodPost, "/api/rpc", request)
 }
 
 func (m *Manager) localRequest(ctx context.Context, method, path string, body any) (json.RawMessage, error) {
+	return localRequest(ctx, m.localClient, m.Endpoint, method, path, body)
+}
+
+func localRequest(ctx context.Context, client *http.Client, endpoint, method, path string, body any) (json.RawMessage, error) {
 	var input io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -91,7 +101,7 @@ func (m *Manager) localRequest(ctx context.Context, method, path string, body an
 		}
 		input = bytes.NewReader(b)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, m.Endpoint+path, input)
+	req, err := http.NewRequestWithContext(ctx, method, endpoint+path, input)
 	if err != nil {
 		return nil, err
 	}
@@ -99,7 +109,7 @@ func (m *Manager) localRequest(ctx context.Context, method, path string, body an
 	if method == http.MethodGet && path == "/api/health" {
 		req.Header.Set("X-Respire-Health", "runtime-v1")
 	}
-	res, err := m.localClient.Do(req)
+	res, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}

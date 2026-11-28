@@ -117,8 +117,5 @@ fn rank(
                 }
             })
     };
-    match selection {
-        Some(selection) => profiles::scoped(selection, run),
-        None => run(),
-    }
+    profiles::scoped(selection, run)
 }
