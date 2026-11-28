@@ -25,6 +25,7 @@ jobs:
       cli: ${{ steps.detect.outputs.cli }}
       client2: ${{ steps.detect.outputs.client2 }}
       contracts: ${{ steps.detect.outputs.contracts }}
+      resources: ${{ steps.detect.outputs.resources }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -50,6 +51,7 @@ jobs:
             echo "cli=true" >> "$GITHUB_OUTPUT"
             echo "client2=true" >> "$GITHUB_OUTPUT"
             echo "contracts=true" >> "$GITHUB_OUTPUT"
+            echo "resources=true" >> "$GITHUB_OUTPUT"
             exit 0
           }
 
@@ -88,13 +90,17 @@ jobs:
           cli=false
           client2=false
           contracts=false
+          resources=false
 
           if match_path '^apps/core/'; then core=true; fi
           if match_path '^apps/runtime/'; then runtime=true; fi
           if match_path '^apps/cli/'; then cli=true; fi
           if match_path '^apps/client2/'; then client2=true; fi
-          if match_path '^(contracts/|packages/|\.github/workflows/ci\.yml$|scripts/(check-guardrails|sync-contracts(\.test)?)\.mjs$)'; then
+          if match_path '^(contracts/|packages/|\.github/workflows/ci\.yml$|scripts/check-guardrails\.mjs$)'; then
             contracts=true
+          fi
+          if match_path '^(openspec/|prototypes/|test-cases/|process/|LESSONS\.md$|\.github/agents\.yml$|contracts/|\.github/workflows/ci\.yml$)'; then
+            resources=true
           fi
 
           echo "core=$core" >> "$GITHUB_OUTPUT"
@@ -102,6 +108,7 @@ jobs:
           echo "cli=$cli" >> "$GITHUB_OUTPUT"
           echo "client2=$client2" >> "$GITHUB_OUTPUT"
           echo "contracts=$contracts" >> "$GITHUB_OUTPUT"
+          echo "resources=$resources" >> "$GITHUB_OUTPUT"
 
   guardrails:
     name: guardrails
@@ -169,14 +176,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          persist-credentials: false
-
-      - name: Checkout contract source
-        uses: actions/checkout@v4
-        with:
-          repository: risense-ai/respire-resources
-          ref: main
-          path: contract-source
           fetch-depth: 0
           persist-credentials: false
 
@@ -184,10 +183,28 @@ jobs:
         with:
           node-version: "22"
 
-      - name: Verify contract snapshot and lock
+      - name: Check Runtime API compatibility and golden fixtures
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
-          node scripts/sync-contracts.mjs --check contract-source
-          node --test scripts/sync-contracts.test.mjs
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          trap 'rm -rf -- "$tmp"' EXIT
+          asset=oasdiff_1.39.0_linux_amd64.tar.gz
+          curl --fail --silent --show-error --location "https://github.com/oasdiff/oasdiff/releases/download/v1.39.0/$asset" --output "$tmp/$asset"
+          echo "71a85930728f367a2086077b7ae1411319421549d18473a3e8258b6451520433  $tmp/$asset" | sha256sum --check
+          tar -xzf "$tmp/$asset" -C "$tmp" oasdiff
+          export PATH="$tmp:$PATH"
+          spec=contracts/runtime-api/openapi.yaml
+          oasdiff validate "$spec" --allow-external-refs=false --fail-on INFO
+          oasdiff flatten "$spec" --allow-external-refs=false --format json > "$RUNNER_TEMP/flattened.json"
+          node process/scripts/validate-runtime-fixtures.mjs "$RUNNER_TEMP/flattened.json"
+          if [[ "$GITHUB_EVENT_NAME" == pull_request ]]; then
+            [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]]
+            git show "$BASE_SHA:$spec" > "$tmp/base.yaml"
+            oasdiff breaking "$tmp/base.yaml" "$spec" --allow-external-refs=false --fail-on ERR
+          fi
 
       - name: Generate and test the Rust SDK
         run: |
@@ -216,6 +233,29 @@ jobs:
           npm run check
           npm test
 
+  openspec-resources-ci:
+    name: openspec-resources-ci
+    needs: detect-changes
+    if: needs.detect-changes.outputs.resources == 'true' || needs.detect-changes.outputs.contracts == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Validate OpenSpec and test process and fixtures
+        run: |
+          node process/scripts/validate-openspec.mjs
+          node --test process/scripts/respire-process.test.mjs process/scripts/lessons-audit.test.mjs
+          node --test prototypes/mock-api/*.test.mjs
+          node test-cases/runner.test.mjs
 
   core-ci:
     name: core-ci
@@ -564,7 +604,7 @@ jobs:
 
   ci-gate:
     name: ci-gate
-    needs: [detect-changes, guardrails, contract-check, core-ci, runtime-ci, cli-ci, client2-ci]
+    needs: [detect-changes, guardrails, contract-check, openspec-resources-ci, core-ci, runtime-ci, cli-ci, client2-ci]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -575,13 +615,14 @@ jobs:
           DETECT: ${{ needs.detect-changes.result }}
           GUARDRAILS: ${{ needs.guardrails.result }}
           CONTRACTS: ${{ needs.contract-check.result }}
+          RESOURCES: ${{ needs.openspec-resources-ci.result }}
           CORE: ${{ needs.core-ci.result }}
           RUNTIME: ${{ needs.runtime-ci.result }}
           CLI: ${{ needs.cli-ci.result }}
           CLIENT2: ${{ needs.client2-ci.result }}
         run: |
           set -euo pipefail
-          for name in DETECT GUARDRAILS CONTRACTS CORE RUNTIME CLI CLIENT2; do
+          for name in DETECT GUARDRAILS CONTRACTS RESOURCES CORE RUNTIME CLI CLIENT2; do
             val="${!name}"
             echo "$name=$val"
             if [ "$val" = "success" ]; then
