@@ -33,7 +33,7 @@ class Element {
     const previous = this.handlers.get(name);
     this.handlers.set(name, event => { previous?.(event); return handler(event); });
   }
-  emit(name, target = this) { return this.handlers.get(name)({ target, currentTarget: target, preventDefault() {} }); }
+  emit(name, target = this) { return this.handlers.get(name)({ target, currentTarget: target, preventDefault() {}, stopPropagation() {} }); }
   closest() { return null; }
   focus() {}
   cloneNode() { return new Element(); }
@@ -335,6 +335,63 @@ test("deleting an inactive variant requires confirmation and refreshes its downl
   assert.match(f.root.querySelector("[data-model-dock]").innerHTML, /data-catalog-action="download"/);
 });
 
+test("twin cards show serving telemetry, shadow progress and a three-entry activity timeline", async () => {
+  const f = fixture({ installed: true, active: { model: large, variant: "quint8_avx2", engine: "npu" } });
+  const inference = { foreground: { active: true, capacity: 32 }, background: { active: false, capacity: 32 }, queued: 3, worker_pid: 263 };
+  const index = { state: "ready" };
+  Object.assign(f.ctx.desktop.health, { inference, rpc: { recent_timing_micros: [[1000, 2000], [2000, 5000]] } });
+  f.ctx.status.summary = { indexed_count: 6, local_alive: 8, retrieval_index: index };
+  await f.mount();
+  const liveCard = f.live.querySelector("[data-inference-status]");
+  assert.match(liveCard.innerHTML, /data-models-live-card/);
+  assert.match(liveCard.innerHTML, /Granite 311M R2[\s\S]*quint8_avx2[\s\S]*NPU[\s\S]*\(1\)/);
+  assert.match(liveCard.innerHTML, /768 [\s\S]*model_quint8_avx2\.onnx[^\n]*10\.0 KiB/);
+  assert.match(liveCard.innerHTML, /1 \/ 32[\s\S]*0 \/ 32[\s\S]*263[\s\S]*7\.0 ms[\s\S]*5\.0 ms/);
+  assert.match(liveCard.innerHTML, /<svg[^>]+viewBox="0 0 100 24"/);
+  assert.match(liveCard.innerHTML, /6 \/ 8 \(75%\)/);
+  assert.match(f.root.innerHTML, /data-models-tasks-card[\s\S]*data-copy-snapshot[\s\S]*data-recent-activity/);
+  const twinCards = f.root.innerHTML.split('<section class="panel model-catalog">', 1)[0];
+  assert.doesNotMatch(twinCards, /<details|<pre>/);
+  assert.match(f.live.querySelector(taskContent).innerHTML, /class="model-status-cells model-readiness"/);
+
+  for (const phase of ["switch-verify", "switch-load", "switch-index"]) {
+    f.ctx.status.summary.model_operation = { id: "shadow", active: true, phase, done: 2, total: 8 };
+    await f.ctx.refresh();
+  }
+  const task = f.live.querySelector(taskContent).innerHTML;
+  assert.match(task, /aria-current="step">3\./);
+  assert.match(task, /2 \/ 8 \(25%\)/);
+  assert.ok(task.includes(i18nMessages.modelIncumbentReady));
+  assert.ok(liveCard.innerHTML.includes(i18nMessages.modelBuildingShadow));
+  assert.match(liveCard.innerHTML, /6 \/ 8 \(75%\)[\s\S]*2 \/ 8 \(25%\)/);
+  assert.equal(f.cancel.textContent, i18nMessages.modelCancelSwitch);
+  await f.live.querySelector("[data-copy-snapshot]").emit("click");
+  assert.deepEqual(JSON.parse(f.clipboard[0]), { inference, index, model: f.ctx.status.summary.model_operation });
+  assert.equal(f.document.querySelector("#notice").children[0].textContent, i18nMessages.modelSnapshotCopied);
+
+  f.ctx.status.summary.model_operation = { id: "shadow", active: true, phase: "switch-diary" };
+  await f.ctx.refresh();
+  await f.mount();
+  const timeline = f.live.querySelector("[data-activity-entries]").innerHTML;
+  assert.equal(timeline.match(/<time datetime=/g).length, 3);
+  assert.ok(timeline.includes(i18nMessages.modelPipelineSwitch));
+  assert.ok(!timeline.includes(`<span>${i18nMessages.modelPipelineVerify}</span>`));
+});
+
+test("serving card follows the Runtime selection independently of the selected catalog family", async () => {
+  for (const [active, title, dims] of [
+    [null, "BGE-M3", 1024],
+    [{ model: small, variant: "quint8_avx2", engine: "gpu" }, "Granite 97M R2", 384],
+    [{ model: "bge-base-zh-v1.5", variant: "quantized", engine: "cpu" }, "BGE-base-zh-v1.5", 768],
+  ]) {
+    const f = fixture({ active });
+    await f.mount();
+    const html = f.live.querySelector("[data-inference-status]").innerHTML;
+    assert.ok(html.includes(`<strong>${title}</strong>`));
+    assert.ok(html.includes(dims.toLocaleString()));
+  }
+});
+
 for (const model of [small, large]) {
   for (const managed of [false, true]) {
     test(`${model} displays task progress via ${managed ? "Runtime SSE" : "host task"}`, async () => {
@@ -351,7 +408,14 @@ for (const model of [small, large]) {
       if (managed) f.frame(); else f.task();
       const panel = f.live.querySelector(taskContent).innerHTML;
       assert.match(f.root.innerHTML, /data-model-task-progress><div data-model-task-content>/);
-      assert.match(panel, managed ? /40%.*value="40" max="100"/ : /4\.0 KiB \/ 10\.0 KiB.*value="4096" max="10240"/);
+      assert.match(panel, managed ? /40%[\s\S]*value="40" max="100"/ : /4\.0 KiB \/ 10\.0 KiB \(40%\)[\s\S]*value="4096" max="10240"/);
+      assert.ok(panel.includes(i18nMessages.modelMirrorOrigin));
+      if (managed) {
+        f.ctx.status.summary.model_operation = { id: "download", active: true, phase: "download", item: "tokenizer.json", done: 4096, total: 10240 };
+        await f.ctx.refresh();
+        assert.match(f.live.querySelector(taskContent).innerHTML, /tokenizer\.json[\s\S]*4\.0 KiB \/ 10\.0 KiB \(40%\)/);
+        delete f.ctx.status.summary.model_operation;
+      }
       assert.match(dock.innerHTML, /data-catalog-action="download" disabled/);
       if (managed) f.frame("completed"); else f.task("completed");
       assert.equal(await session.done, true);
@@ -381,8 +445,10 @@ for (const outcome of ["completed", "cancelled", "failed"]) {
     assert.equal(session.element.querySelector("[data-dl-bytes]").textContent, "40%");
     await f.dialogClick("background");
     if (outcome === "cancelled") {
-      await f.click("[data-model]", { dataset: { model: "reopen-download" } });
-      await f.dialogClick("cancel");
+      session.element.querySelector('[data-dl="cancel"]').click = () => f.dialogClick("cancel");
+      assert.equal(f.cancel.textContent, i18nMessages.modelCancelDownload);
+      assert.equal(f.cancel.hidden, false);
+      await f.cancel.emit("click");
       assert.ok(f.requests.some(request => request.method === "DELETE" && request.url === "/api/runtime-operation?id=download"));
     } else f.frame(outcome);
     assert.equal(await session.done, outcome === "completed");
@@ -421,7 +487,8 @@ test("remounted page tracks a running rebuild, renders counts and cancels its te
   await f.mount();
   await f.mount();
   assert.deepEqual([...f.intervals.values()].map(interval => interval.ms), [3000]);
-  assert.match(f.live.querySelector(taskContent).innerHTML, /<progress\s*>/);
+  assert.match(f.live.querySelector(taskContent).innerHTML, /<progress\b[^>]*>/);
+  assert.doesNotMatch(f.live.querySelector(taskContent).innerHTML, /\bvalue=/);
   f.ctx.status.summary = { retrieval_index: { running: true }, indexed_count: 4, local_alive: 10,
     model_operation: { id: "rebuild", active: true, phase: "index", done: 4, total: 10 } };
   await [...f.intervals.values()][0].callback();
@@ -430,6 +497,7 @@ test("remounted page tracks a running rebuild, renders counts and cancels its te
   assert.match(f.live.querySelector(taskContent).innerHTML, /value="4" max="10"/);
   assert.equal(f.cancel.hidden, false);
   assert.equal(f.cancel.disabled, false);
+  assert.equal(f.cancel.textContent, i18nMessages.modelCancelRebuild);
   await f.click("[data-model]", f.cancel);
   await f.tick(120);
   assert.ok(f.requests.some(({ command }) => command?.name === "model_cancel"));

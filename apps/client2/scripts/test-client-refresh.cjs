@@ -150,7 +150,7 @@ async function test(name, fn) { await fn(); console.log(`PASS ${++count}: ${name
     assert.match(overview, /updateConnectionIndicator\(connection, state\.connected\)/);
     const start = overview.indexOf('export function updateConnectionIndicator(');
     const updateIndicator = new Function('t', overview.slice(start + 'export '.length,
-      overview.indexOf('const ENGINE_NAMES', start)) + '\nreturn updateConnectionIndicator;')(i18n.t);
+      overview.indexOf('export function overview(', start)) + '\nreturn updateConnectionIndicator;')(i18n.t);
     for (const lang of ['en', 'zh']) {
       i18n.setLanguage(lang);
       const indicator = new Element();
@@ -247,6 +247,93 @@ async function test(name, fn) { await fn(); console.log(`PASS ${++count}: ${name
     assert.equal(fusion.requestId, null);
     assert.equal(save.disabled, false);
     assert.deepEqual(calls, ['agent_set', ['operation-recover', {id:'desktop-original'}], ['operation-recover', {id:'desktop-original'}]]);
+  });
+  const { overviewModelStatus, overviewModelsPanel } = await import('../internal/desktop/frontend/pages/overview-models.js');
+  const { readProfileState } = await import('../internal/desktop/frontend/pages/model-kit.js');
+  const { modelOperationProgress } = await import('../internal/desktop/frontend/pages/models-view.js');
+  await test('Overview retries a failed active selection read on the next update', async () => {
+    const source = read('pages/overview.js');
+    const load = source.slice(source.indexOf('  async function loadProfileSelection('), source.indexOf('  function update()'));
+    let requests = 0, renders = 0;
+    const active = { model: 'granite-311m-r2' };
+    const profile = { catalog: { details: { active } } };
+    const { loadProfileSelection, selection } = new Function('activeModelScope', 'ctx', 'root', 'fetchProfileState', 'readProfileState', 'update',
+      `let profileRequest, profileSelection; ${load} return { loadProfileSelection, selection: () => profileSelection };`)(
+      () => 'scope', {}, { isConnected: true }, async () => ++requests === 1 ? null : profile, readProfileState, () => renders++);
+    const state = { connected: true, health: { capabilities: ['model.catalog.v2'] } };
+    await loadProfileSelection(state);
+    assert.equal(selection(), undefined);
+    assert.equal(renders, 0);
+    await loadProfileSelection(state);
+    assert.equal(selection(), active);
+    assert.equal(renders, 1);
+    await loadProfileSelection(state);
+    assert.equal(requests, 2);
+  });
+  await test('Overview resolves serving profile models and legacy engine snapshots', () => {
+    const cases = [
+      ['granite-311m-r2', 'quantized', 'quint8_avx2', 'Granite 311M R2', 'cpu', 768, 32768],
+      ['granite-97m-r2', 'fp32', 'fp32', 'Granite 97M R2', 'npu', 384, 32768],
+      ['bge-base-zh-v1.5', 'fp16', 'fp16', 'BGE-base-zh-v1.5', 'gpu', 768, 512],
+      ['m3', 'quantized', 'quantized', 'BGE-M3', 'cpu', 1024, 512],
+    ];
+    for (const [model, variant, expectedVariant, title, engine, dims, context] of cases) {
+      const { active } = readProfileState({ catalog: { details: { active: { model, variant, engine } } } });
+      const legacy = { model_profile: model, variant, engine };
+      for (const [selection, snapshot] of [[active, { variant: 'fp16', engine: 'gpu' }], [null, legacy]]) {
+        const markup = overviewModelStatus({ connected: true, engine: snapshot }, {}, selection, {}).details;
+        assert.ok(markup.includes(`${title} \u00b7 ${expectedVariant}`), model);
+        assert.ok(markup.includes(`class="badge">${engine.toUpperCase()}</span>`), model);
+        assert.ok(markup.includes(`${dims.toLocaleString()} <span>dims</span>`), model);
+        assert.ok(markup.includes(`${context.toLocaleString()} <span>token context</span>`), model);
+        if (model !== 'm3') assert.doesNotMatch(markup, /BGE-M3/);
+      }
+    }
+    const legacy = overviewModelStatus({ connected: true, engine: { variant: 'fp16', engine: 'gpu' } }, {}, null, {});
+    assert.match(legacy.details, /BGE-M3 \u00b7 fp16/);
+    assert.doesNotMatch(overviewModelStatus({ connected: true }, {}, null, {}).details, /BGE-M3/);
+    const pending = overviewModelStatus({ connected: true, engine: { variant: 'fp16', engine: 'gpu' } }, {}, undefined, {});
+    assert.doesNotMatch(pending.details, /BGE-M3/);
+  });
+  await test('Overview index KPI and Models & Index show coverage, telemetry and live progress', () => {
+    const overview = read('pages/overview.js');
+    assert.match(overview, /data-overview-details[\s\S]*overviewModelsPanel\(\)/);
+    const metrics = overview.match(/metricsRoot\.innerHTML = (.*\$\{modelStatus\.metric\})/);
+    assert.equal((metrics?.[1].match(/\$\{metric\(/g) || []).length, 3);
+    assert.match(overview, /if \(button\.dataset\.go\) ctx\.navigate\(button\.dataset\.go\)/);
+    assert.match(overviewModelsPanel(), /<h2>Models &amp; Index<\/h2>.*data-go="models">Model Settings \u2192<\/button>/);
+    const state = { connected: true, health: { inference: {
+      foreground: { active: true, capacity: 32 }, background: { active: 2 },
+    }, rpc: { recent_timing_micros: [[9000, 2500], [7000, 4000]] } } };
+    const summary = { indexed_count: 9, local_alive: 12, retrieval_index: { state: 'ready' } };
+    const active = { model: 'granite-311m-r2', variant: 'quint8_avx2', engine: 'cpu' };
+    const ready = overviewModelStatus(state, summary, active, {});
+    assert.match(ready.metric, /Index Status.*>Ready<\/span>/);
+    assert.match(ready.metric, />9 \/ 12 \(75%\)<\/strong><progress .*max="100" value="75"/);
+    assert.match(ready.metric, /<small>Granite 311M R2 \u00b7 quint8_avx2<\/small>/);
+    assert.equal((ready.details.match(/<dt>/g) || []).length, 3);
+    assert.match(ready.details, /<dt>Foreground<\/dt><dd>1 \/ 32<\/dd>/);
+    assert.match(ready.details, /<dt>Background<\/dt><dd>2<\/dd>/);
+    assert.match(ready.details, /<dt>Index Coverage<\/dt><dd>9 \/ 12 \(75%\)<\/dd>/);
+    assert.match(ready.details, /<strong>3\.25 ms<\/strong>/);
+    assert.match(ready.details, /overview-model-strip[^\n]*>Ready</);
+    assert.match(overview, /overviewModelStatus\(state, s, profileSelection, op, operationProgress\)/);
+    const renderOperation = op => overviewModelStatus(state, summary, active, op, modelOperationProgress(op));
+    const switching = renderOperation({ active: true, phase: 'switch-index', done: 3, total: 12 });
+    assert.match(switching.metric, />Shadow Indexing</);
+    assert.match(switching.details, /overview-model-strip[^\n]*<progress value="3" max="12">/);
+    const streamed = renderOperation({ active: true, phase: 'running', done: 55, total: 100 });
+    assert.match(streamed.metric, />Shadow Indexing</);
+    assert.match(streamed.details, /<progress value="55" max="100">/);
+    const download = renderOperation({ active: true, phase: 'download', progress_percent: 40 });
+    assert.match(download.details, /overview-model-strip[^\n]*<progress value="40" max="100">/);
+    const busy = overviewModelStatus({ ...state, task: { busy: true, stage: 'model.onnx', done: 1024, total: 2048 } }, summary, active, {});
+    assert.match(busy.details, /1\.0 KiB \/ 2\.0 KiB \(50%\).*<progress value="1024" max="2048">/);
+    const failed = overviewModelStatus(state, { ...summary, retrieval_index: { state: 'failed', error: '<index error>' } }, active, {});
+    assert.match(failed.metric, />Error</);
+    assert.match(failed.metric, /&lt;index error&gt;/);
+    const paused = overviewModelStatus(state, { ...summary, retrieval_index: { state: 'paused', scheduled: true } }, active, {});
+    assert.match(paused.metric, />Paused</);
   });
   console.log(`${count} focused refresh tests passed; browser/native UIA not exercised.`);
 })().catch(error => { console.error(error); process.exitCode = 1; });

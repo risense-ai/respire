@@ -1,7 +1,8 @@
 import { messages as i18nMessages } from "../ui/i18n/messages.js";
 import { h, bytes, number, currentRuntimeSwitch } from "../ui/core.js";
 import { phase } from "./overview.js";
-import { readProfileState, activeDownloadSession } from "./model-kit.js";
+import { readProfileState, activeDownloadSession, variantFilename } from "./model-kit.js";
+import { statusCells, statusProgress } from "./models-status.js";
 
 const SWITCH_PHASES = {
   queued: i18nMessages.md6f766f2adf53227,
@@ -20,15 +21,22 @@ export function runtimeDownloadOperation() {
   if (progress && ["pending", "running"].includes(progress.state)) {
     return { id: transfer.id, active: true, phase: "download", cancellable: false,
       downloadModel: transfer.model, downloadVariant: transfer.variant,
-      item: progress.message, progress_percent: progress.progress_percent };
+      item: progress.message, done: progress.done, total: progress.total,
+      progress_percent: progress.progress_percent };
   }
 }
 
 export function liveModelOperation(view, status) {
   const download = runtimeDownloadOperation();
-  if (download) return download;
-  const profile = readProfileState(view.profileState).operation;
   const snapshot = status?.summary?.model_operation;
+  if (download) {
+    if (download.id && snapshot?.id === download.id && snapshot.active && snapshot.phase === "download") {
+      return { ...download, done: snapshot.done ?? download.done, total: snapshot.total ?? download.total,
+        item: snapshot.item || download.item };
+    }
+    return download;
+  }
+  const profile = readProfileState(view.profileState).operation;
   const observed = currentRuntimeSwitch();
   const runtime = observed ? {
     ...observed.progress,
@@ -70,16 +78,72 @@ export function modelOperationProgress(op) {
   return `<div class="progress-label"><span>${h(modelPhase(op))}${op.item ? `<span> · ${h(op.item)}</span>` : ""}</span><span>${h(count)}</span><span>${elapsed == null ? "" : h(elapsed + i18nMessages.m00fe8dda1fd70f64)}</span></div><progress ${total ? `value="${h(op.done)}" max="${h(op.total)}"` : op.progress_percent == null ? "" : `value="${h(op.progress_percent)}" max="100"`}></progress>`;
 }
 
-export function downloadTaskProgress(task) {
-  const total = task.total > 0;
-  const count = total ? `${bytes(task.done)} / ${bytes(task.total)}` : task.done > 0 ? bytes(task.done) : "";
-  return `<div class="progress-label"><span>${h(task.stage)}</span><span>${h(count)}</span></div><progress ${total ? `value="${h(task.done)}" max="${h(task.total)}"` : ""}></progress>`;
+const PIPELINE = [i18nMessages.modelPipelineVerify, i18nMessages.modelPipelineProbe,
+  i18nMessages.modelPipelineShadow, i18nMessages.modelPipelineSwitch];
+
+export function switchStep(op) {
+  if (["switch-diary", "switch-commit", "commit", "switch"].includes(op.phase)) return 3;
+  if (["switch-index", "shadow-index"].includes(op.phase)) return 2;
+  if (["switch-load", "switch-probe", "probe"].includes(op.phase)) return 1;
+  if (SWITCH_PHASES[op.phase] || op.phase === "verify") return 0;
+  const percent = op.progress_percent;
+  return percent >= 80 ? 3 : percent >= 20 ? 2 : percent >= 15 ? 1 : 0;
 }
 
-export function indexTaskProgress(state, status) {
-  const count = `${number(status.indexed_count)} / ${number(status.local_alive)}`;
-  const measured = typeof status.indexed_count === "number" && status.local_alive > 0;
-  return `<div class="progress-label"><span>${h(state)}</span><span>${h(count)}</span></div><progress ${measured ? `value="${h(status.indexed_count)}" max="${h(status.local_alive)}"` : ""}></progress>`;
+export function downloadTaskProgress({ task, op, session, variant, mirror }) {
+  const label = session?.label || op.downloadModel;
+  const reportedFile = /(?:^|[/\\\s])([\w.-]+\.(?:onnx|ort|json)(?:_data)?)$/i.exec(op.item || task?.stage || "")?.[1];
+  const filename = reportedFile || variantFilename(variant || { name: session?.variant || op.downloadVariant });
+  const target = [label, filename].filter(Boolean).join(" · ") || task?.stage || op.item;
+  return `<p><strong>${h(target || i18nMessages.modelDownload)}</strong></p>
+    ${statusProgress(i18nMessages.modelDownload, op.done ?? task?.done, op.total ?? task?.total ?? variant?.size,
+      { format: bytes, percent: op.progress_percent })}
+    <p><span>${h(i18nMessages.modelMirrorOrigin)}</span> · <span>${h(mirror)}</span></p>`;
+}
+
+export function modelTaskState({ op, session, task, index, view, status, workerReady, weightsReady, servingIndex, variant, mirror }) {
+  if (op.phase === "download" || session || task) {
+    return { kind: "download", label: i18nMessages.modelDownload, cancelLabel: i18nMessages.modelCancelDownload,
+      markup: downloadTaskProgress({ task, op, session, variant, mirror }) };
+  }
+  if ((op.active && !/^index(?:-|$)/.test(op.phase || "")) || view.switchInFlight) {
+    const step = switchStep(op);
+    const pipeline = `<ol class="model-task-pipeline">${PIPELINE.map((label, position) =>
+      `<li${step === position ? ' aria-current="step"' : ""}>${position + 1}. <span>${h(label)}</span></li>`).join("")}</ol>`;
+    const progress = step === 2 && ["switch-index", "shadow-index"].includes(op.phase)
+      ? statusProgress(PIPELINE[2], op.done, op.total) : statusProgress(PIPELINE[step], undefined, undefined, { percent: op.progress_percent });
+    return { kind: "switch", step, label: PIPELINE[step], cancelLabel: i18nMessages.modelCancelSwitch,
+      markup: `${pipeline}${progress}${servingIndex ? `<p>${h(i18nMessages.modelIncumbentReady)}</p>` : ""}` };
+  }
+  if (op.active || index.running || index.scheduled || view.indexInFlight) {
+    const label = index.scheduled && !index.running ? i18nMessages.m2fcab8f67ceeae3e : i18nMessages.m0a53c8de45a1ed4a;
+    return { kind: "rebuild", label, cancelLabel: i18nMessages.modelCancelRebuild,
+      markup: statusProgress(label, op.done ?? status.indexed_count, op.total ?? status.local_alive) };
+  }
+  const readiness = (ready, unavailable) => ready === undefined ? "—" : ready ? i18nMessages.modelReady : unavailable;
+  return { kind: "idle", label: i18nMessages.modelOnlineIdle, markup: `<dl class="model-status-cells model-readiness">
+    ${statusCells([
+      [i18nMessages.modelTileWeights, readiness(weightsReady, i18nMessages.modelNotDownloaded)],
+      [i18nMessages.modelTileWorker, readiness(workerReady, i18nMessages.me6fc5eb8c3b83c01)],
+      [i18nMessages.modelTileSwitchLock, view.mutating ? i18nMessages.modelLocked : servingIndex ? i18nMessages.modelUnlocked : "—"],
+    ])}</dl>` };
+}
+
+export function modelActivityTimeline() {
+  let previous = "idle:", previousID;
+  const entries = [];
+  return (task, id) => {
+    const key = [task.kind, task.step].join(":");
+    if ((key !== previous || (id && previousID && id !== previousID)) && (task.kind !== "idle" || entries.length)) {
+      entries.unshift({ when: new Date(), label: task.label });
+      entries.length = Math.min(entries.length, 3);
+    }
+    previous = key;
+    previousID = id;
+    return entries.length ? `<ol>${entries.map(({ when, label }) => `<li>
+      <time datetime="${when.toISOString()}">${h(when.toLocaleTimeString())}</time><span>${h(label)}</span></li>`).join("")}</ol>`
+      : `<p>${h(i18nMessages.modelNoRecentActivity)}</p>`;
+  };
 }
 
 export function nextSwitchStallState(prevKey, prevTicks, op, limit = 600) {

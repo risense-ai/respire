@@ -139,8 +139,24 @@ function modelControls(f) {
   const { activeDownloadSession } = loadFunctions("pages/model-download-modal.js", {}, "activeDownloadSession");
   return loadFunctions("pages/models-view.js", { i18nMessages, $, h, bytes, number, readProfileState,
     activeDownloadSession, currentRuntimeSwitch: f.currentRuntimeSwitch, phase: value => value },
-  "liveModelOperation, modelOperationProgress, syncModelCancel, cancellableModelID, nextSwitchStallState");
+  "liveModelOperation, modelOperationProgress, syncModelCancel, cancellableModelID, nextSwitchStallState, switchStep");
 }
+
+test("latency uses Runtime queue and execution timings with a flat empty baseline", () => {
+  const { rpcLatency } = loadFunctions("pages/models-status.js", {}, "rpcLatency");
+  assert.deepEqual(rpcLatency([]), { latest: undefined, average: undefined, points: "1,23.00 99,23.00" });
+  const timings = rpcLatency([[250, 750], null, [1000, 2000]]);
+  assert.equal(timings.latest, 3);
+  assert.equal(timings.average, 2);
+  assert.equal(timings.points, "1.00,15.67 99.00,1.00");
+});
+
+test("switch phases take precedence over SSE percentages", () => {
+  const { switchStep } = modelControls(fixture());
+  assert.deepEqual(["switch-verify", "switch-load", "switch-index", "switch-diary"].map(phase =>
+    switchStep({ phase, progress_percent: 90 })), [0, 1, 2, 3]);
+  assert.deepEqual([5, 15, 20, 80].map(progress_percent => switchStep({ phase: "running", progress_percent })), [0, 1, 2, 3]);
+});
 
 test("advancing switch progress keeps the poll alive beyond 600 ticks", () => {
   const { nextSwitchStallState } = modelControls(fixture());
@@ -216,19 +232,19 @@ test("the three-second profile poll publishes fresh counts and stops at idle", a
   const view = { modelID: "granite-311m-r2", profileSwitchPending: false, switchInFlight: false, indexInFlight: false };
   let tick, interval;
   const start = new Function("view", "ctx", "fetchProfileState", "readProfileState", "profileStateSettled",
-    "setInterval", "clearInterval", "liveModelOperation", "nextSwitchStallState", "i18nMessages", "notify", `
+    "setInterval", "clearInterval", "liveModelOperation", "nextSwitchStallState", "i18nMessages", "notify", "activeDownloadSession", `
     let disposed = false, profileRefreshing = false, switchTimer;
     let switchProgress = { key: "", ticks: 0 };
     const scope = () => "scope";
     const isCurrent = (owner) => !disposed && owner === scope();
     ${acceptSrc}
     ${polling}
-    function update() { syncProfilePolling(liveModelOperation(view, ctx.status)); }
+    function update() { syncProfilePolling(); }
     return update;
   `)(view, ctx, async () => ({ progress: { summary: { operation: { ...operation }, switch: { state: "pending" } } } }),
     readProfileState, profileStateSettled,
     (fn, ms) => { tick = fn; interval = ms; return 1; }, id => { assert.equal(id, 1); tick = null; switchTimer = null; },
-    controls.liveModelOperation, controls.nextSwitchStallState, i18nMessages, assert.fail);
+    controls.liveModelOperation, controls.nextSwitchStallState, i18nMessages, assert.fail, () => null);
   start();
   assert.equal(interval, 3000);
   await tick();

@@ -24,7 +24,9 @@ const baseline = { model: "m3", variant: "quantized", engine: "cpu" };
 export async function startModelsFixture({ scenario = {} } = {}) {
   const preferences = { onboardingCompleted: true, language: "en", modelMirror: "auto" };
   const health = { instance_id: "fixture", account_id: "account", generation: 1,
-    capabilities: ["openapi.v1", "sse.operations.v1"], inference: { phase: "idle" } };
+    capabilities: ["openapi.v1", "sse.operations.v1"],
+    inference: { phase: "idle", foreground: { active: 1, capacity: 2 }, background: { active: 0, capacity: 1 }, queued: 0, worker_pid: 4242 },
+    rpc: { executing_until_reply: 0, queued_or_cancelled_pending_removal: 0, recent_timing_micros: [[1200, 7000], [1400, 8000], [1100, 6500], [1500, 8700], [1300, 7600]] } };
   const installed = new Map([["m3", new Set(["quantized"])]]);
   const hasModel = (model) => (installed.get(model)?.size || 0) > 0;
   const jobs = new Map(), downloads = new Map(), runtime = new Map(), subscribers = new Map();

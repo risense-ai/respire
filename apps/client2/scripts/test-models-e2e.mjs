@@ -186,6 +186,33 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     await page.locator('[data-catalog-action="enabled"]:disabled').waitFor();
     await page.locator('[data-catalog-action="open"]').waitFor();
     assert.deepEqual(fixture.selection, { model: large, variant: "quint8_avx2", engine: "npu" });
+
+    assert.equal(await page.locator("[data-live] details, [data-live] pre").count(), 0);
+    await page.locator("[data-models-live-card] .model-latency-sparkline polyline").waitFor();
+    await text(page, "[data-models-live-card]", "Granite 311M R2");
+    await text(page, "[data-models-live-card]", "NPU");
+    await text(page, "[data-models-live-card]", "4,242");
+    const twinHeights = await page.evaluate(() => [
+      document.querySelector("[data-models-live-card]").getBoundingClientRect().height,
+      document.querySelector("[data-models-tasks-card]").getBoundingClientRect().height,
+    ]);
+    assert.equal(twinHeights[0], twinHeights[1]);
+
+    const copiedBefore = await page.evaluate(() => window.__copied.length);
+    await page.locator("[data-copy-snapshot]").click();
+    await text(page, "#notice", "Snapshot copied");
+    const copiedSnapshot = await page.evaluate((idx) => JSON.parse(window.__copied[idx]), copiedBefore);
+    assert.ok("inference" in copiedSnapshot && "index" in copiedSnapshot && "model" in copiedSnapshot);
+
+    await page.locator("nav [data-page=overview]").click();
+    await page.waitForURL("**/#overview");
+    await text(page, "[data-overview-metrics] .index-kpi", "Granite 311M R2 · quint8_avx2");
+    await text(page, "[data-overview-metrics] .index-kpi", "1 / 20 (5%)");
+    await text(page, "[data-overview-model-content]", "Granite 311M R2 · quint8_avx2");
+    await text(page, "[data-overview-model-content]", "NPU");
+    await text(page, "[data-overview-model-content]", "ms");
+    await page.locator('[data-overview-details] [data-go="models"]').click();
+    await page.waitForURL("**/#models");
   });
 
   test("reindex updates within five seconds, cancels after navigation, and onboarding defaults to granite-311m-r2", async t => {
