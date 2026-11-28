@@ -129,15 +129,16 @@ test("a remounted model page reuses the pending stream and its terminal receipt"
 });
 
 function loadFunctions(file, dependencies, exports) {
-  const source = readFrontend(file).replace(/^import [\s\S]*?;\r?\n/gm, "").replace(/^export /gm, "");
+  const source = readFrontend(file).replace(/^(?:import [\s\S]*?|export \{[^\n]*\} from [^\n]*);\r?\n/gm, "").replace(/^export /gm, "");
   return new Function(...Object.keys(dependencies), `${source}\nreturn {${exports}};`)(...Object.values(dependencies));
 }
 
 function modelControls(f) {
   const { $, h, bytes, number } = loadFunctions("ui/core.js", {}, "$, h, bytes, number");
   const { readProfileState } = loadFunctions("pages/model-kit.js", {}, "readProfileState");
+  const { activeDownloadSession } = loadFunctions("pages/model-download-modal.js", {}, "activeDownloadSession");
   return loadFunctions("pages/models-view.js", { $, h, bytes, number, readProfileState,
-    currentRuntimeSwitch: f.currentRuntimeSwitch, phase: value => value },
+    activeDownloadSession, currentRuntimeSwitch: f.currentRuntimeSwitch, phase: value => value },
   "liveModelOperation, modelOperationProgress, modelCancelButton, syncModelCancel, cancellableModelID, nextSwitchStallState");
 }
 
@@ -191,7 +192,7 @@ test("fresh switch profile renders indexed items and elapsed time over a stale s
 
 test("overview uses the shared progress formatter for active model operations", () => {
   const source = readFrontend("pages/overview.js");
-  assert.match(source, /import \{ modelOperationProgress \} from "\.\/models-view\.js"/);
+  assert.match(source, /import \{ modelOperationProgress, runtimeDownloadOperation \} from "\.\/models-view\.js"/);
   assert.match(source, /op\.active \? modelOperationProgress\(op\) : ""/);
   assert.doesNotMatch(source, /bytes\(op\.done\)/);
 });

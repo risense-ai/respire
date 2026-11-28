@@ -1,16 +1,8 @@
 import { messages as i18nMessages } from "../ui/i18n/messages.js";
 import {
-  $,
-  h,
-  bytes,
   summary,
   execute,
-  action,
-  notify,
   api,
-  ApiTransportError,
-  watchRuntimeOperation,
-  cancelRuntimeOperation,
   observeRuntimeSwitch,
 } from "../ui/core.js";
 
@@ -136,9 +128,23 @@ export const DEVICES = [
 
 export const isProfileModel = (model) => model !== "m3";
 
-export function variantFromItem(item) {
-  const match = /model_([a-z0-9]+)\.onnx/.exec(item || "");
-  return match ? match[1] : "";
+export function variantFilename(variant) {
+  return (variant?.path && String(variant.path).split(/[/\\]/).pop()) ||
+    (variant?.name ? `model_${variant.name}.onnx` : "");
+}
+
+function matchesFilename(item, filename) {
+  if (!filename) return false;
+  const escaped = filename.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(?:^|[^a-zA-Z0-9_.-])${escaped}(?:$|[^a-zA-Z0-9_.-])`).test(item || "");
+}
+
+export function taskMatchesVariant(task, variant) {
+  return Boolean(task?.busy) && matchesFilename(task.stage, variantFilename(variant));
+}
+
+export function variantFromItem(item, inventory) {
+  return inventory?.variants?.find((entry) => matchesFilename(item, variantFilename(entry)))?.name || "";
 }
 
 // GPU still goes through the runtime's inference probe when applied.
@@ -290,260 +296,7 @@ export async function waitForProfileSwitch({ onTick, timeoutMs = 15 * 60_000 } =
   return { settled: true, failed: true, details: {}, timeout: true };
 }
 
-const DOWNLOAD_WATCH_MS = 61 * 60_000;
-const DOWNLOAD_STREAM_IDLE_MS = 10_000;
-const TEMPORARY_TASK_STATUSES = new Set([408, 429, 502, 503, 504]);
-
-// Download progress modal: live bytes, pause / resume / cancel, result.
-// Resolves `done` with true only when the task reached the completed stage.
-export function openDownloadModal({
-  model,
-  variant,
-  label,
-  getMirror,
-  onDone,
-} = {}) {
-  const element = document.createElement("dialog");
-  element.className = "dialog";
-  const subject = variant === "baseline" ? i18nMessages.m93017b92d469c248 : variant;
-  element.innerHTML = `${i18nMessages.ma3ef29eb6519fe60}${h(label)} · ${h(subject)}${i18nMessages.mb853f3b54b0293e1}`;
-  document.body.append(element);
-  element.showModal();
-  const stageNode = $("[data-dl-stage]", element),
-    bytesNode = $("[data-dl-bytes]", element),
-    bar = $("[data-dl-bar]", element),
-    errorNode = $("[data-dl-error]", element);
-  const buttons = {
-    pause: $('[data-dl="pause"]', element),
-    resume: $('[data-dl="resume"]', element),
-    cancel: $('[data-dl="cancel"]', element),
-    retry: $('[data-dl="retry"]', element),
-    dismiss: $('[data-dl="dismiss"]', element),
-  };
-  // The wizard awaits this; the models page ignores it and refreshes on close.
-  let resolveDone;
-  const done = new Promise((resolve) => {
-    resolveDone = resolve;
-  });
-  function setMode(mode) {
-    for (const [name, button] of Object.entries(buttons))
-      button.hidden = true;
-    if (mode === "downloading") buttons.pause.hidden = false, buttons.cancel.hidden = false;
-    else if (mode === "paused") buttons.resume.hidden = false, buttons.cancel.hidden = false;
-    else if (mode === "done") buttons.dismiss.hidden = false;
-    else if (mode === "failed") buttons.retry.hidden = false, buttons.dismiss.hidden = false;
-    else if (mode === "cancelled") buttons.retry.hidden = false, buttons.dismiss.hidden = false;
-  }
-  let paused = false;
-  let timer = null;
-  let stream = null;
-  let taskID = "";
-  let runtimeDownload = false;
-  let request = null;
-  let watchDeadline = 0;
-  let pollFailures = 0;
-  function stopUpdates() {
-    clearTimeout(timer);
-    const activeStream = stream;
-    stream = null;
-    activeStream?.close();
-    request?.abort();
-  }
-  async function start() {
-    paused = false;
-    taskID = "";
-    pollFailures = 0;
-    errorNode.hidden = true;
-    setMode("downloading");
-    const mirror = getMirror?.() || "auto";
-    try {
-      const receipt = await api("model-download", {
-        model, variant, ...(mirror !== "auto" ? { mirror } : {}),
-      });
-      if (!receipt?.id) throw new Error("Missing download receipt");
-      taskID = receipt.id;
-      runtimeDownload = Boolean(receipt.runtime);
-      if (runtimeDownload) {
-        if (!element.open) return;
-        const watcher = watchRuntimeOperation(receipt, (operation) => {
-          stageNode.textContent = operation.message || operation.state;
-          if (typeof operation.progress_percent === "number") {
-            bar.max = 100; bar.value = operation.progress_percent;
-          }
-        });
-        stream = watcher;
-        buttons.pause.hidden = true;
-        try {
-          await watcher.done;
-          stopUpdates();
-          setMode("done");
-          bar.value = bar.max = 100;
-          resolveDone(true);
-          onDone?.();
-        } catch (error) {
-          if (!element.open) return;
-          if (error.cancelled) { stopUpdates(); setMode("cancelled"); resolveDone(false); }
-          else failWatch(error.message);
-        }
-        return;
-      }
-      watchDeadline = performance.now() + DOWNLOAD_WATCH_MS;
-    } catch (error) {
-      if (!element.open) return;
-      stageNode.textContent = i18nMessages.m7e24b28fccaf9e1e;
-      errorNode.textContent = error.message;
-      errorNode.hidden = false;
-      setMode("failed");
-      return;
-    }
-    if (!element.open) return;
-    if (typeof EventSource === "undefined") return poll();
-    const id = taskID;
-    let source;
-    try {
-      source = new EventSource("/api/task-events?id=" + encodeURIComponent(id));
-    } catch {
-      return poll();
-    }
-    stream = source;
-    const fallback = () => {
-      if (stream !== source) return;
-      stopUpdates();
-      if (canWatch(id)) poll();
-    };
-    const armWatchdog = (idleMs) => {
-      clearTimeout(timer);
-      timer = setTimeout(fallback, Math.min(idleMs, remainingWatch()));
-    };
-    // Some native bridges buffer the first frame until EOF. Even after a frame
-    // arrives, switch to snapshots if the stream ceases making progress.
-    armWatchdog(2000);
-    source.onmessage = (event) => {
-      if (stream !== source || !canWatch(id)) return;
-      let task;
-      try {
-        task = JSON.parse(event.data);
-      } catch {
-        fallback();
-        return;
-      }
-      if (!validTask(task, id)) return fallback();
-      receive(task);
-      if (stream === source) armWatchdog(DOWNLOAD_STREAM_IDLE_MS);
-    };
-    source.onerror = fallback;
-  }
-  function validTask(task, id) {
-    return task?.id === id && typeof task.busy === "boolean";
-  }
-  function receive(task) {
-    stageNode.textContent = task.stage || "";
-    bytesNode.textContent = task.total
-      ? `${bytes(task.done)} / ${bytes(task.total)}`
-      : "";
-    if (task.total) {
-      bar.value = task.done;
-      bar.max = task.total;
-    }
-    if (task.busy) return;
-    stopUpdates();
-    if (task.stage === i18nMessages.meb0c326b60ae897a) {
-      paused = true;
-      setMode("paused");
-      stageNode.textContent = i18nMessages.m807d77097ff13314;
-    } else if (task.stage === i18nMessages.mc0b3fbff51ccc40b) {
-      setMode("done");
-      stageNode.textContent = i18nMessages.m1e60d41bd478c07a;
-      bar.value = bar.max = task.total || 1;
-      resolveDone(true);
-      onDone?.();
-    } else if (task.stage === i18nMessages.ma37778f17c5f3ee5) {
-      setMode("cancelled");
-      stageNode.textContent = i18nMessages.ma37778f17c5f3ee5;
-      resolveDone(false);
-    } else {
-      stageNode.textContent = i18nMessages.m8a03e35ad323e387;
-      failWatch(task.error || i18nMessages.m45f5dfb2c9262c74);
-    }
-  }
-  function failWatch(message) {
-    stopUpdates();
-    setMode("failed");
-    errorNode.textContent = message;
-    errorNode.hidden = false;
-    resolveDone(false);
-  }
-  function remainingWatch() {
-    return Math.max(0, watchDeadline - performance.now());
-  }
-  function canWatch(id) {
-    if (!element.open || id !== taskID) return false;
-    if (remainingWatch() > 0) return true;
-    failWatch(i18nMessages.m23dfe4404e8a5ebe);
-    return false;
-  }
-  async function poll() {
-    const id = taskID;
-    if (!canWatch(id)) return;
-    const abort = new AbortController();
-    request = abort;
-    const timeout = setTimeout(() => abort.abort(), Math.min(5000, remainingWatch()));
-    try {
-      const task = await api("task?id=" + encodeURIComponent(id), undefined, abort.signal);
-      if (!canWatch(id)) return;
-      if (!validTask(task, id)) {
-        failWatch(i18nMessages.m23dfe4404e8a5ebe);
-        return;
-      }
-      pollFailures = 0;
-      receive(task);
-      if (!task.busy) return;
-    } catch (error) {
-      if (!canWatch(id)) return;
-      const temporary = abort.signal.aborted || error instanceof ApiTransportError
-        || TEMPORARY_TASK_STATUSES.has(error.status);
-      if (!temporary || ++pollFailures >= 3) {
-        failWatch(error.status ? error.message : i18nMessages.m23dfe4404e8a5ebe);
-        return;
-      }
-    } finally {
-      clearTimeout(timeout);
-      if (request === abort) request = null;
-    }
-    if (canWatch(id)) timer = setTimeout(poll, Math.min(700, remainingWatch()));
-  }
-  element.addEventListener("click", (event) => {
-    const button = event.target.closest("[data-dl]");
-    if (!button || button.hidden) return;
-    const act = button.dataset.dl;
-    if ((act === "pause" || act === "cancel") && !taskID) return;
-    if (act === "pause")
-      action(button, async () => {
-        await api("model-download-cancel", { id: taskID, pause: true });
-      });
-    else if (act === "resume" || act === "retry") action(button, start);
-    else if (act === "cancel")
-      action(button, async () => {
-        if (runtimeDownload) await cancelRuntimeOperation(taskID);
-        else if (!paused) await api("model-download-cancel", { id: taskID, pause: false });
-        element.close();
-      });
-    else if (act === "dismiss") element.close();
-  });
-  element.addEventListener(
-    "close",
-    () => {
-      stopUpdates();
-      // Closing the modal does not stop the download; an unresolved `done`
-      // settles false so the awaiting wizard can recover from task state.
-      resolveDone(false);
-      onDone?.();
-    },
-    { once: true },
-  );
-  start();
-  return { element, done };
-}
+export { activeDownloadSession, openDownloadModal, reopenActiveDownloadModal } from "./model-download-modal.js";
 
 // notifyFallback surfaces the runtime's real post-probe engine when the
 // selected device failed verification; the wizard and models page share it so

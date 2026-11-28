@@ -560,11 +560,7 @@ jobs:
       - name: Run Client2 frontend regressions
         if: steps.manifest.outputs.exists == 'true'
         working-directory: apps/client2
-        run: |
-          node scripts/test-account-session-state.cjs
-          node scripts/test-client-refresh.cjs
-          node --test scripts/test-download-dialog.cjs
-          node scripts/test-settings-proxy.cjs
+        run: node scripts/run-frontend-ci.mjs
 
   ci-gate:
     name: ci-gate

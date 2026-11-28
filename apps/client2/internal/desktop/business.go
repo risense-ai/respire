@@ -379,7 +379,7 @@ func (d *desktop) businessRoute(w http.ResponseWriter, r *http.Request) bool {
 // carries a matching JSON field for each, so the two lists cannot drift.
 var preferencePatchKeys = []string{
 	"autoRuntime", "autoUpdate", "runtimeChannel", "clientChannel",
-	"layout", "theme", "language", "proxyMode", "clientUpdateInterval", "runtimeUpdateInterval",
+	"layout", "theme", "language", "modelMirror", "proxyMode", "clientUpdateInterval", "runtimeUpdateInterval",
 	"clientAutoUpdate", "clientAutoRestart", "runtimeAutoUpdate", "runtimeAutoRestart",
 	"sidebarWidth", "memoryIndexWidth",
 	"onboardingVersion", "onboardingCompleted", "onboardingStep", "onboardingSyncChoice",
@@ -396,6 +396,7 @@ func preferencePatchTargets(p *host.Preferences) map[string]any {
 		"layout":                &p.Layout,
 		"theme":                 &p.Theme,
 		"language":              &p.Language,
+		"modelMirror":           &p.ModelMirror,
 		"proxyMode":             &p.ProxyMode,
 		"clientUpdateInterval":  &p.ClientUpdateInterval,
 		"runtimeUpdateInterval": &p.RuntimeUpdateInterval,
@@ -431,6 +432,11 @@ func patchPreferences(base host.Preferences, body []byte) (host.Preferences, err
 			return base, err
 		}
 	}
+	mirror, err := host.NormalizeModelMirror(p.ModelMirror)
+	if err != nil {
+		return base, err
+	}
+	p.ModelMirror = mirror
 	return p, nil
 }
 

@@ -1,5 +1,5 @@
 import { messages as i18nMessages } from "../ui/i18n/messages.js";
-import { $, all, h, bytes, execute, confirm, notify } from "../ui/core.js";
+import { $, all, h, bytes, api, execute, confirm, notify } from "../ui/core.js";
 import { t } from "../ui/i18n.js";
 import {
   MODEL_CARDS,
@@ -9,7 +9,9 @@ import {
   DEVICES,
   engineAvailable,
   isProfileModel,
+  activeDownloadSession,
   openDownloadModal,
+  reopenActiveDownloadModal,
   applyEngineChoice,
 } from "../pages/model-kit.js";
 
@@ -237,6 +239,8 @@ export function modelSteps(wizard, {
         },
       ).join("")}</ol><div class="wizard-execute-status" data-execute-status></div><div class="actions" data-execute-actions></div>`,
     );
+    if (activeDownloadSession()?.model === wizard.state.model)
+      executeActions([[i18nMessages.mDownloadShowProgress, "reopen-download"]]);
     if (!wizard.executeStarted && !wizard.state.executing) {
       wizard.executeStarted = true;
       runExecute("download");
@@ -278,7 +282,8 @@ export function modelSteps(wizard, {
     all("[data-exec]", area).forEach((button) =>
       button.addEventListener("click", () => {
         const action = button.dataset.exec;
-        if (action === "retry-download") runExecute("download");
+        if (action === "reopen-download") reopenActiveDownloadModal();
+        else if (action === "retry-download") runExecute("download");
         else if (action === "retry-enable") runExecute("enable");
         else if (action === "retry-index") runExecute("index");
         else if (action === "exit-models") exitToModels();
@@ -367,19 +372,22 @@ export function modelSteps(wizard, {
       downloads.unshift("tokenizer");
     }
     for (const [index, variant] of downloads.entries()) {
-      const { element, done } = openDownloadModal({
+      const modal = openDownloadModal({
         model: wizard.state.model,
         variant,
         label: modelLabel(wizard.state.model),
         getMirror: () => "auto",
       });
-      const ok = await done;
-      // Follow a download whose modal was closed without resubmitting it.
-      if (!ok && !(await trackRunningDownload())) {
+      executeActions([[i18nMessages.mDownloadShowProgress, "reopen-download"]]);
+      const ok = await modal.done;
+      executeActions([]);
+      if (!wizard.state) return false;
+      if (!ok && !(modal.state === "closed" && await trackRunningDownload(modal))) {
         failure("download", i18nMessages.m98556c16632dcfad);
         return false;
       }
-      if (index + 1 < downloads.length) element.close();
+      if (!wizard.state) return false;
+      if (index + 1 < downloads.length && modal.element.open) modal.element.close();
     }
     try {
       inventory = await ctx.modelInventory.load(wizard.state.model);
@@ -400,17 +408,31 @@ export function modelSteps(wizard, {
     return true;
   }
 
-  // Reopen-resume path: a download may still be running after the wizard or
-  // the modal was closed; follow the client task state to its end.
-  async function trackRunningDownload() {
+  async function trackRunningDownload(modal) {
+    let receipt;
+    try {
+      receipt = await modal.receipt;
+    } catch (error) {
+      failure("download", error.message);
+      return false;
+    }
+    if (!receipt?.id) return false;
     for (let rounds = 0; rounds < 7200; rounds++) {
       if (!wizard.state) return false; // wizard closed by skip: stop tracking
       await ctx.refresh();
-      const task = ctx.desktop?.task || {};
-      if (!task.busy) return task.stage === i18nMessages.mc0b3fbff51ccc40b;
-      executeStatus(
-        `${task.stage || i18nMessages.me2fc571a4cf00ceb}${task.total ? ` · ${bytes(task.done)} / ${bytes(task.total)}` : ""}`,
-      );
+      if (receipt.runtime) {
+        const live = ctx.status?.summary?.model_operation;
+        const op = await api("runtime-operation?id=" + encodeURIComponent(receipt.id));
+        if (!["pending", "running"].includes(op.state)) return op.state === "completed";
+        const percent = op.progress_percent;
+        const stage = op.message || (live?.id === receipt.id && live.phase) || i18nMessages.me2fc571a4cf00ceb;
+        executeStatus(`${stage}${typeof percent === "number" ? ` · ${Math.round(percent)}%` : ""}`);
+      } else {
+        const snapshot = ctx.desktop?.task;
+        const task = snapshot?.id === receipt.id ? snapshot : await api("task?id=" + encodeURIComponent(receipt.id));
+        if (!task.busy) return task.stage === i18nMessages.mc0b3fbff51ccc40b;
+        executeStatus(`${task.stage || i18nMessages.me2fc571a4cf00ceb}${task.total > 0 ? ` · ${bytes(task.done)} / ${bytes(task.total)}` : ""}`);
+      }
       await new Promise((resolve) => setTimeout(resolve, 1500));
     }
     return false;

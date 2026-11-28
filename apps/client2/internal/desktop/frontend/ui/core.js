@@ -31,10 +31,22 @@ export function rows(envelope, key) {
 }
 export const raw = (value) => JSON.stringify(value, null, 2);
 export function notify(message, error = false) {
-  const node = $("#notice");
-  node.textContent = message;
+  const node = typeof document === "undefined" ? null : document.querySelector?.("#notice");
+  if (!node) return;
+  node.textContent = message || "";
   node.hidden = !message;
-  node.classList.toggle("error", error);
+  node.classList.toggle("error", Boolean(message && error));
+  if (!message || !document.createElement) return;
+  const text = document.createElement("span");
+  text.textContent = message;
+  const dismiss = document.createElement("button");
+  dismiss.type = "button";
+  dismiss.className = "notice-dismiss";
+  dismiss.setAttribute("data-notice-dismiss", "");
+  dismiss.setAttribute("aria-label", i18nMessages.mNoticeDismiss);
+  dismiss.textContent = "×";
+  dismiss.addEventListener("click", () => notify(""));
+  node.replaceChildren(text, dismiss);
 }
 export class ApiTransportError extends TypeError {}
 
@@ -136,7 +148,7 @@ export function observeRuntimeSwitch(receipt, selection, onProgress) {
 }
 
 const pending = new Map();
-export const isPending = (name) => [...pending.values()].includes(name);
+export const isPending = (name) => [...pending.values()].some((entry) => entry.name === name);
 export async function execute(
   name,
   args = {},
@@ -155,13 +167,25 @@ export async function execute(
   return waitForOperation(job, onProgress);
 }
 
-export async function waitForOperation(job, onProgress) {
+export function waitForOperation(job, onProgress) {
+  let entry = pending.get(job.id);
+  if (entry) {
+    if (onProgress) entry.listeners.add(onProgress);
+    return entry.done;
+  }
+  const listeners = new Set(onProgress ? [onProgress] : []);
+  entry = { name: job.name, listeners };
+  pending.set(job.id, entry);
+  entry.done = observeDesktopOperation(job, listeners);
+  return entry.done;
+}
+
+async function observeDesktopOperation(job, listeners) {
   const { id, name } = job;
-  pending.set(id, name);
   try {
     let rounds = 0;
     while (job.state === "running") {
-      onProgress?.(job);
+      for (const listener of listeners) listener(job);
       await pause(rounds++ < 5 ? 120 : 500);
       job = await api("operation?id=" + encodeURIComponent(id));
     }
@@ -201,6 +225,7 @@ export async function action(button, fn) {
   if (button.disabled) return;
   button.disabled = true;
   try {
+    if (typeof document !== "undefined" && document.querySelector?.("#notice")) notify("");
     return await fn();
   } catch (error) {
     notify(error.message, true);

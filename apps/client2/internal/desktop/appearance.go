@@ -7,6 +7,9 @@ import (
 )
 
 func (d *desktop) applyAppearance() {
+	if d.window == nil && d.tray == nil {
+		return
+	}
 	application.InvokeAsync(func() {
 		theme := d.m.Preferences().Theme
 		dark := theme == "dark" || theme == "system" && d.app.Env.IsDarkMode()

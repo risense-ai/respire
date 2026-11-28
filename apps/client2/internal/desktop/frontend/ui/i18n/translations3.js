@@ -1,4 +1,11 @@
 export const translations3 = [
+  ["转到后台", "Background"],
+  ["显示进度", "Show progress"],
+  ["已有模型下载正在进行。", "A model download is already running."],
+  ["已索引 / 本机记忆", "Indexed / local memories"],
+  ["重建记忆索引", "Rebuilding the memory index"],
+  ["加载模型", "Loading the model"],
+  ["关闭通知", "Dismiss notice"],
   ["本机 Runtime 已就绪", "The local Runtime is ready."],
   ["客户端会自动下载并启动本机 Runtime", "The client downloads and starts the local Runtime automatically."],
   ["登录或注册账户", "Sign in or create an account"],
