@@ -527,7 +527,10 @@ jobs:
       # These fixtures use disposable profiles and synthetic images, not a Runtime bundle.
       - name: Test isolated Runtime resolution and lifecycle
         run: |
-          for suite in rpc::runtime_resolution_tests:: autostart::lifecycle::tests::; do
+          for suite in rpc::runtime_resolution_tests:: autostart::lifecycle::tests:: autostart::identity_write_control::tests::; do
+            if [[ "$suite" == autostart::identity_write_control::tests:: ]]; then
+              suite="autostart::supervise::launch_authorization::identity_write_control::tests::"
+            fi
             cargo +1.95.0 test --locked -p respire --features client2-host-prototype --lib "$suite"
           done
 

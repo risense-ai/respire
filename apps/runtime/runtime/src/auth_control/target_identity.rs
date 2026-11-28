@@ -76,20 +76,15 @@ mod tests {
     }
 
     #[test]
-    fn completion_rejects_a_replacement_generation() -> Result<()> {
+    fn completion_accepts_two_matching_observations() -> Result<()> {
         let mut first = None;
         check_completion_observation(&mut first, serde_json::from_value(serving())?)?;
         check_completion_observation(&mut first, serde_json::from_value(serving())?)?;
-        let mut replacement = serving();
-        replacement["generation"] = json!(2);
-        assert!(check_completion_observation(&mut first, serde_json::from_value(replacement)?).is_err());
         Ok(())
     }
 
     #[test]
     fn second_observation_must_match_verified_serving_identity() -> Result<()> {
-        let expected: Health = serde_json::from_value(serving())?;
-        assert!(same_serving_target(&expected, &expected));
         for (key, new) in [
             ("store_ready", json!(false)),
             ("pid", json!(28)),
@@ -104,9 +99,14 @@ mod tests {
             ("image_sha256", json!("changed-digest")),
             ("runtime_version", json!("changed-version")),
         ] {
+            let mut first = None;
+            check_completion_observation(&mut first, serde_json::from_value(serving())?)?;
             let mut replacement = serving();
             replacement[key] = new;
-            assert!(!same_serving_target(&expected, &serde_json::from_value(replacement)?), "{key}");
+            assert!(
+                check_completion_observation(&mut first, serde_json::from_value(replacement)?).is_err(),
+                "accepted a change to {key} on the second observation"
+            );
         }
         Ok(())
     }

@@ -220,9 +220,7 @@ fn control_write(operation: HostIdentityWriteOperation) -> Result<HostIdentityWr
             }
             if matches!(original.operation, HostIdentityWriteOperation::Logout { .. }) {
                 if let Some(drained) = owner.as_ref() {
-                    anyhow::ensure!(restored.instance_id != drained.instance_id
-                        && (restored.pid != drained.pid || restored.process_start_id != drained.process_start_id),
-                        "logout restart matched the drained Runtime");
+                    ensure_fresh_logout_restart(drained, &restored)?;
                 }
                 logout_restart = Some(LogoutRestartV1::observe(&original, &restored)?);
             }
@@ -253,6 +251,18 @@ fn control_write(operation: HostIdentityWriteOperation) -> Result<HostIdentityWr
         };
         error.context(original.recovery())
     })
+}
+
+fn ensure_fresh_logout_restart(
+    drained: &crate::net_rpc::Health,
+    restored: &crate::net_rpc::Health,
+) -> Result<()> {
+    anyhow::ensure!(
+        restored.instance_id != drained.instance_id
+            && (restored.pid != drained.pid || restored.process_start_id != drained.process_start_id),
+        "logout restart matched the drained Runtime"
+    );
+    Ok(())
 }
 
 /// Process-local receipt. Recovery must observe a fresh restart on the query-only path.

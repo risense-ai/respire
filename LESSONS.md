@@ -66,3 +66,11 @@
 - **Root Cause**: Some text could not wrap, and some flex and grid items could not shrink to fit their columns.
 - **Guardrail Target**: Run `test-desktop-text-overflow-e2e.mjs` through `run-frontend-ci.mjs` to check local text bounds and page widths at 1180, 1024, and 800 pixels in Chromium, including onboarding cards.
 - **Status**: The Client2 frontend CI runner includes the regression test.
+
+### L-010: Session Completion Verification Across Process & Restart Boundaries
+<!-- respire-lessons-audit: category=session-completion -->
+
+- **Symptom**: Private account completion, login merge confirmation, and CLI logout restart checks could accept stale or swapped serving Runtime identities if completion checkpoints were not re-verified across callback and restart boundaries.
+- **Root Cause**: Partial or single-point checks allowed identity, target profile, generation, or pending operation state to drift between admission, merge offer, live health verification, and maintenance handoff without permanent regression coverage in CI.
+- **Guardrail Target**: Enforce Runtime `target_identity`, `merge_offer`, and `registration` failure-mode tests alongside CLI `autostart::supervise::launch_authorization::identity_write_control::tests::` executed unconditionally in `.github/workflows/ci.yml` (`cli-ci`) and asserted by `apps/cli/scripts/test-account-rejection-source.py`.
+- **Status**: Active across Runtime test suites, CLI regression suites, and `cli-ci`.

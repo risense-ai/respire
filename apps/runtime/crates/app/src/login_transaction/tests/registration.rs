@@ -34,15 +34,26 @@
 
     #[test]
     fn registration_commits_and_rolls_back_without_runtime_credential_custody() -> Result<()> {
-        registration_fixture(false)
+        registration_fixture(RegistrationFinish::Rollback)
     }
 
     #[test]
     fn committed_registration_journal_accepts_the_old_reader() -> Result<()> {
-        registration_fixture(true)
+        registration_fixture(RegistrationFinish::Complete)
     }
 
-    fn registration_fixture(complete: bool) -> Result<()> {
+    #[test]
+    fn registration_completion_preserves_recovery_when_second_live_verification_fails() -> Result<()> {
+        registration_fixture(RegistrationFinish::RejectReplacement)
+    }
+
+    enum RegistrationFinish {
+        Rollback,
+        Complete,
+        RejectReplacement,
+    }
+
+    fn registration_fixture(finish: RegistrationFinish) -> Result<()> {
         let isolated = crate::test_lock::Isolate::new()?;
         let _keyring = crate::migration::memory_keyring_for_test();
         let root = isolated.path().canonicalize()?;
@@ -102,7 +113,7 @@
             active.backends.is_empty() && active.pass_backends.is_empty()));
         let durable = String::from_utf8(std::fs::read(recovery_path())?)?;
         assert!(!durable.contains(&secret) && !durable.contains("synthetic-host-password"));
-        if complete {
+        if !matches!(finish, RegistrationFinish::Rollback) {
             drop(ownership);
             // Start at the already-published checkpoint to isolate local completion.
             let mut journal = load_journal()?;
@@ -113,6 +124,27 @@
             assert!(super::control_account_complete(&root, &root, &identity, &wrong, &id,
                 None, None, |_| panic!("foreign operation reached live verification")).is_err());
             assert_eq!(std::fs::read(recovery_path())?, before);
+            if matches!(finish, RegistrationFinish::RejectReplacement) {
+                let mut calls = 0;
+                let replacement_error = "serving Runtime changed between live verifications";
+                let result = super::control_account_complete(&root, &root, &identity, &id, &id,
+                    None, None, |receipt| {
+                        assert_eq!(receipt.operation_id, id);
+                        calls += 1;
+                        anyhow::ensure!(calls == 1, "{replacement_error}");
+                        Ok(())
+                    });
+                assert_eq!(calls, 2);
+                let error = result.err().context("completion accepted a replacement Runtime")?;
+                assert_eq!(error.to_string(), replacement_error);
+                let journal = load_journal()?;
+                assert!(journal.operations[0].phase == AuthPhase::AwaitingVerification);
+                assert_eq!(journal.active.as_ref().and_then(|active| active.operation_id.as_deref()),
+                    Some(id.as_str()));
+                assert_eq!(std::fs::read(recovery_path())?, before);
+                assert_eq!(std::fs::read(root.join("session.json"))?, bytes);
+                return Ok(());
+            }
             let mut calls = 0;
             let result = super::control_account_complete(&root, &root, &identity, &id, &id,
                 None, None, |receipt| {

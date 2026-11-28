@@ -375,15 +375,60 @@ fn full_logout_and_revoke_receipts_match_the_resulting_local_session() -> Result
     Ok(())
 }
 
+fn logout_runtime() -> Result<crate::net_rpc::Health> {
+    Ok(serde_json::from_value(json!({
+        "server":"runtime", "bin":"rsrs-runtime", "pid":42, "v":1,
+        "process_start_id":"linux-starttime-42", "instance_id":"first", "generation":3
+    }))?)
+}
+
+#[test]
+fn logout_restart_requires_a_new_instance_and_process_identity() -> Result<()> {
+    let drained = logout_runtime()?;
+    for (instance_id, pid, process_start_id, fresh) in [
+        ("second", 43, drained.process_start_id.as_str(), true),
+        ("second", drained.pid, "linux-starttime-43", true),
+        (drained.instance_id.as_str(), 43, "linux-starttime-43", false),
+        ("second", drained.pid, drained.process_start_id.as_str(), false),
+    ] {
+        let restored = crate::net_rpc::Health {
+            instance_id: instance_id.into(),
+            pid,
+            process_start_id: process_start_id.into(),
+            ..drained.clone()
+        };
+        assert_eq!(
+            ensure_fresh_logout_restart(&drained, &restored).map_err(|error| error.to_string()),
+            if fresh { Ok(()) } else { Err("logout restart matched the drained Runtime".into()) },
+            "instance {instance_id}, PID {pid}, start {process_start_id}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn logout_restart_observes_only_a_sent_serving_logout() -> Result<()> {
+    let owner = logout_runtime()?;
+    let mut context = original(Path::new("profile"));
+    context.was_serving = true;
+    assert!(LogoutRestartV1::observe(&context, &owner).is_err());
+    context.sent = true;
+    context.was_serving = false;
+    assert!(LogoutRestartV1::observe(&context, &owner).is_err());
+    context.was_serving = true;
+    context.operation = HostIdentityWriteOperation::SessionRevoke {
+        session_id: "other-session".into(),
+    };
+    assert!(LogoutRestartV1::observe(&context, &owner).is_err());
+    Ok(())
+}
+
 #[test]
 fn logout_restart_is_bound_to_the_original_and_the_live_generation() -> Result<()> {
     let mut context = original(Path::new("profile"));
     context.was_serving = true;
     context.sent = true;
-    let owner: crate::net_rpc::Health = serde_json::from_value(json!({
-        "server":"runtime", "bin":"rsrs-runtime", "pid":42, "v":1,
-        "process_start_id":"linux-starttime-42", "instance_id":"first", "generation":3
-    }))?;
+    let owner = logout_runtime()?;
     let legacy_bytes = concat!(
         r#"{"schema_version":1,"root":"profile","profile":"profile","#,
         r#""operation_id":"9c63f43a-a7bc-4820-92c1-ce966406c087","#,
@@ -402,13 +447,21 @@ fn logout_restart_is_bound_to_the_original_and_the_live_generation() -> Result<(
         };
         assert!(observed()?.confirm(&context, &serde_json::from_value(replacement)?).is_err());
     }
-    for field in ["operation_id", "key", "profile"] {
+    for (field, replacement) in [
+        ("operation_id", json!("other")),
+        ("key", json!("other")),
+        ("profile", json!("other")),
+        ("root", json!("other")),
+        ("operation", json!(HostIdentityWriteOperation::Logout { full: true })),
+        ("source_identity", json!(HostAuthIdentity::Bound {
+            account_id: "synthetic-account".into(),
+            session_sha256: "a".repeat(64),
+        })),
+    ] {
         let mut foreign = serde_json::to_value(&context)?;
-        foreign[field] = json!("other");
-        assert!(observed()?.confirm(&serde_json::from_value(foreign)?, &owner).is_err());
+        foreign[field] = replacement;
+        assert!(observed()?.confirm(&serde_json::from_value(foreign)?, &owner).is_err(), "{field}");
     }
     assert_eq!(serde_json::to_vec(&context)?, legacy_bytes);
-    context.was_serving = false;
-    assert!(LogoutRestartV1::observe(&context, &owner).is_err());
     Ok(())
 }
