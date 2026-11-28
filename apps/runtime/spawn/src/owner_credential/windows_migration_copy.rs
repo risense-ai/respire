@@ -26,7 +26,7 @@ impl MigrationCopy {
         let parent_handle =
             pinned_base_with_sharing(parent, FILE_SHARE_READ | FILE_SHARE_WRITE, true)?;
         let user = CurrentUser::query_managed()?;
-        user.verify_managed_base(parent_handle.as_raw_handle())?;
+        user.verify_legacy_profile_owner(parent_handle.as_raw_handle())?;
         let descriptor = user.descriptor()?;
         let handle = relative_open(
             parent_handle.as_raw_handle(),

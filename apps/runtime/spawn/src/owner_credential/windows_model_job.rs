@@ -24,7 +24,7 @@ impl ModelJobRoot {
     ) -> io::Result<Self> {
         let parent = pinned_base_with_sharing(base, SHARE, true)?;
         let user = CurrentUser::query_managed()?;
-        user.verify_managed_base(parent.as_raw_handle())?;
+        user.verify_legacy_profile_owner(parent.as_raw_handle())?;
         use crate::owner_credential::model_job::{job_name, limit, SLOTS};
         let name = job_name()?;
         let mut claim = None;
@@ -63,7 +63,7 @@ impl ModelJobRoot {
             .ok_or_else(|| denied("model job has no base"))?;
         let current = pinned_base_with_sharing(base, SHARE, true)?;
         let user = CurrentUser::query_managed()?;
-        user.verify_managed_base(current.as_raw_handle())?;
+        user.verify_legacy_profile_owner(current.as_raw_handle())?;
         if model_stage::identity(current.as_raw_handle())?
             != model_stage::identity(self._base.as_raw_handle())?
         {

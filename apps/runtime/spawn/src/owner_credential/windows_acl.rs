@@ -136,7 +136,7 @@ impl CurrentUser {
         self.owner_descriptor("OICI")
     }
 
-    fn owner_descriptor(&self, inheritance: &str) -> io::Result<Descriptor> {
+    fn sid_string(&self) -> io::Result<String> {
         let mut raw = null_mut();
         // SAFETY: Valid SID retained by CurrentUser; conversion allocates a bounded SID string.
         win(unsafe { ConvertSidToStringSidW(self.sid(), &mut raw) })?;
@@ -146,14 +146,26 @@ impl CurrentUser {
             len += 1;
         }
         check(len < MAX_SID_WIDE, "Windows owner SID was too long")?;
-        let sid = String::from_utf16(unsafe { std::slice::from_raw_parts(sid.0.cast(), len) })
-            .map_err(|_| denied("invalid Windows owner SID"))?;
+        String::from_utf16(unsafe { std::slice::from_raw_parts(sid.0.cast(), len) })
+            .map_err(|_| denied("invalid Windows owner SID"))
+    }
+
+    fn owner_descriptor(&self, inheritance: &str) -> io::Result<Descriptor> {
+        let sid = self.sid_string()?;
         // O sets the actual owner, D:P disables inherited access. Only the
         // current native SID receives an ACE; children get descriptors afresh.
         let sddl = wide(OsStr::new(&format!(
             "O:{sid}D:P(A;{inheritance};FA;;;{sid})"
         )))?;
         Descriptor::from_wide(&sddl)
+    }
+
+    #[cfg(test)]
+    pub(super) fn legacy_fixture_descriptor(&self) -> io::Result<Descriptor> {
+        let sid = self.sid_string()?;
+        Descriptor::from_wide(&wide(OsStr::new(&format!(
+            "O:{sid}D:P(A;OICI;FA;;;{sid})(A;OICI;0x1301bf;;;BU)"
+        )))?)
     }
 
     pub(super) fn verify_handle(&self, handle: HANDLE, private: bool) -> io::Result<()> {
@@ -164,18 +176,19 @@ impl CurrentUser {
         self.verify_handle_as(handle, None, self.managed_admin_default)
     }
 
-    /// Restoration creates its own protected child; it does not broaden or
-    /// require rewriting the existing profile's discretionary ACL.
     pub(super) fn verify_legacy_profile_owner(&self, handle: HANDLE) -> io::Result<()> {
+        self.verify_legacy_owner(&descriptor_from_handle(handle)?)
+    }
+
+    fn verify_legacy_owner(&self, descriptor: &Descriptor) -> io::Result<()> {
         use windows_sys::Win32::Security::GetSecurityDescriptorOwner;
-        let descriptor = descriptor_from_handle(handle)?;
         let mut owner = null_mut();
         let mut ignored = 0;
         win(unsafe { GetSecurityDescriptorOwner(descriptor.0 .0, &mut owner, &mut ignored) })?;
         let admins = KnownSid::new(WinBuiltinAdministratorsSid)?;
         check(
             owner_matches(same(self.sid(), owner), false, self.managed_admin_default, same(admins.ptr(), owner)),
-            "Windows restore profile does not belong to the operating system user",
+            "Windows profile does not belong to the operating system user",
         )
     }
     pub(super) fn verify_new_managed_directory(&self, handle: HANDLE) -> io::Result<()> {
@@ -451,6 +464,8 @@ mod tests {
     fn acl_denies_everyone_wrong_owner_and_inheritance() -> io::Result<()> {
         let user = CurrentUser::query()?;
         user.verify_descriptor(&user.descriptor()?, Some(0), false)?;
+        let wrong_owner = Descriptor::from_wide(&wide(OsStr::new("O:BUD:P(A;;FA;;;BU)"))?)?;
+        assert!(CurrentUser::query_managed()?.verify_legacy_owner(&wrong_owner).is_err());
         for s in [
             "O:SYD:P(A;;FA;;;SY)",
             "O:SYD:P(A;;FA;;;WD)",

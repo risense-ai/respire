@@ -237,6 +237,10 @@ fn dispatch_loop_inner(
                 }
                 Err(error) => {
                     eprintln!("runtime library initialization after unlock failed: {error:#}");
+                    let _ = std::io::Write::flush(&mut std::io::stderr());
+                    respire_logging::error(format_args!(
+                        "runtime library initialization after unlock failed: {error:#}"
+                    ));
                     let _ = respire_app::auth::clear_runtime_session();
                 }
             }

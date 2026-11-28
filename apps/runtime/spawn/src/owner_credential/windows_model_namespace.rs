@@ -17,7 +17,9 @@ pub fn provision_model_namespace(installation: &Path, profile_key: &str) -> io::
     let descriptor = user.managed_directory_descriptor()?;
     let mut retained = pinned_base_with_sharing(installation, SHARE_ALL, true)?;
     for name in ["runtime", "model-assets-v1", profile_key] {
-        retained = open_or_create(retained.as_raw_handle(), name, &user, &descriptor)?;
+        retained = open_or_create(
+            retained.as_raw_handle(), name, &user, &descriptor, name == "runtime",
+        )?;
     }
     Ok(())
 }
@@ -27,6 +29,7 @@ fn open_or_create(
     name: &str,
     user: &CurrentUser,
     descriptor: &Descriptor,
+    allow_legacy_base: bool,
 ) -> io::Result<OwnedHandle> {
     let name = OsStr::new(name);
     let open = || {
@@ -62,6 +65,8 @@ fn open_or_create(
     checked_directory(directory.as_raw_handle())?;
     if created {
         user.verify_new_managed_directory(directory.as_raw_handle())?;
+    } else if allow_legacy_base {
+        user.verify_legacy_profile_owner(directory.as_raw_handle())?;
     } else {
         user.verify_managed_base(directory.as_raw_handle())?;
     }
