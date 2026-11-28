@@ -1,4 +1,14 @@
 fn dispatch_validated(request: RpcRequest, tx: &Sender<Job>) -> RpcResponse {
+    if request.method == "model.probe" {
+        if !maintenance_control_method(&request.method) && business_paused() {
+            return error_response(
+                &request,
+                "runtime_maintenance",
+                "runtime maintenance rejected business execution",
+            );
+        }
+        return model_probe::respond(&request);
+    }
     let operation = if !matches!(
         request.method.as_str(),
         "runtime.result"
@@ -154,7 +164,9 @@ fn dispatch_validated(request: RpcRequest, tx: &Sender<Job>) -> RpcResponse {
                     "model.catalog" => {
                         let store = respire_app::service::open_store()?;
                         Ok(
-                            json!({"registry":respire_app::embedding::registry()?,"active":store.active_selection()?,"switch":profile_state()}),
+                            json!({"registry":respire_app::embedding::registry()?,"active":store.active_selection()?,"switch":profile_state(),
+                                "default_model":respire_app::embedding::DEFAULT_MODEL,"default_variant":respire_app::embedding::DEFAULT_VARIANT,
+                                "variants":respire_app::embedding::variant_names()}),
                         )
                     }
                     "model.configure" => {

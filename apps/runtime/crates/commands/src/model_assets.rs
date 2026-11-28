@@ -428,6 +428,10 @@ fn file_assets_status_for(selection: &ProbeSelection) -> Result<AssetsStatus> {
             assets.push(RequiredAsset { name, version: "profile-v1", path: resource.path.clone(), size: resource.size,
                 sha256: resource.sha256.clone(), suggested_source: "selected model profile", incompatible_reason: None });
         }
+        for resource in &profile.profile.companions {
+            assets.push(RequiredAsset { name: "profile-external-data", version: "profile-v1", path: resource.path.clone(), size: resource.size,
+                sha256: resource.sha256.clone(), suggested_source: "selected model profile", incompatible_reason: None });
+        }
         return required_assets_status(&assets);
     }
     let engine = respire_app::memory::onnx::Engine::parse(&selection.engine)?;

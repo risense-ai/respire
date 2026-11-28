@@ -95,7 +95,10 @@ fn requires_repair(db: &Connection) -> Result<bool> {
     Ok(false)
 }
 
-pub(super) fn open(path: &Path) -> Result<Connection> {
+pub(super) fn open(
+    path: &Path,
+    initial_model: impl FnOnce() -> Result<Option<respire_core_sdk::profiles::Selection>>,
+) -> Result<Connection> {
     let mut db = Connection::open_with_flags(
         path,
         OpenFlags::SQLITE_OPEN_READ_WRITE
@@ -143,6 +146,11 @@ pub(super) fn open(path: &Path) -> Result<Connection> {
             "migrated local memory database failed SQLite quick_check"
         );
         tx.pragma_update(None, "user_version", schema_version::CURRENT)?;
+        if !existing {
+            if let Some(selection) = initial_model()? {
+                super::retrieval::write_active_selection(&tx, &selection, &serde_json::to_string(&selection)?)?;
+            }
+        }
     } else {
         // The existing sync maintenance is not a schema transition.
         LocalStore::backfill_sync_heads(&tx)?;

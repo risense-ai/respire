@@ -9,9 +9,7 @@
     }
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct ModelVariant { pub name: &'static str, pub sha256: &'static str, pub size: u64 }
-    /// Pinned Xenova/bge-m3@4de13258 single-file onnx variants. fp32 (external
-    /// .onnx_data), bnb4 and sentence_transformers files cannot load from memory
-    /// or conflict with CLS pooling, so they are not offered.
+    /// Pinned Xenova/bge-m3@4de13258 ONNX variants.
     pub const MODEL_VARIANTS: &[ModelVariant] = &[
         ModelVariant { name: "quantized", sha256: "0826f8c1ab9edf1801db86c61919d4d108e8bfc0b809ec823ad366882ff0b77d", size: 569694530 },
         ModelVariant { name: "fp16", sha256: "4f1a646a3d4f39985589e9991a717044ede8278617fe55e3d246838bc05055e9", size: 1133992936 },
@@ -20,6 +18,29 @@
         ModelVariant { name: "q4", sha256: "4f6d9786712f8dbf00efbb08ffd819395ef05d860249e852b4efc16022f753a6", size: 1248237611 },
         ModelVariant { name: "q4f16", sha256: "8305fdfa48b5702ecb4a6d84c1a52a4d1cb27d69880ff7f69d1a93d795864f25", size: 699932840 },
     ];
+    pub const M3_PROFILE_VARIANTS: &[ModelVariant] = &[
+        ModelVariant { name: "bnb4", size: 1229364419, sha256: "3781d63fa70c05bd65e1d4ed66ca48933a36b3ff7c75b89eea051d8d625cc093" },
+        ModelVariant { name: "fp32", size: 607298, sha256: "5d89a0010dd39aa2cfa8b22bb49f06904c5bbf5877135f877da419480f40cde3" },
+    ];
+    pub const M3_EXTERNAL_DATA: ModelVariant = ModelVariant { name: "model.onnx_data", size: 2266820608, sha256: "1eebfb28493f67bba03ce0ef64bfdc7fc5a3bd9d7493f818bb1d78cd798416b4" };
+    pub const GRANITE_311M_VARIANTS: &[ModelVariant] = &[
+        ModelVariant { name: "quint8_avx2", size: 313421909, sha256: "f1fdd44e7e1ac51f12ab7957c7bd092e064d596c288513bf9d326842f669edee" },
+        ModelVariant { name: "standard", size: 1247170481, sha256: "75f9f258bf5013f5fe8a4dad61dd0fd16ac0cbaa7a106e3d3f41c2d04a42d541" },
+    ];
+    pub const GRANITE_97M_VARIANTS: &[ModelVariant] = &[
+        ModelVariant { name: "quint8_avx2", size: 98247878, sha256: "a6022dd8220ea6f6595562a1328ee216f4a94faa55362f2f4747c80f1e78772e" },
+        ModelVariant { name: "standard", size: 390004608, sha256: "68e592b160673d30250824c1116bc6ab33f70efb22b97c9e1d7ce1e69c1c9d70" },
+    ];
+    pub const BGE_BASE_ZH_VARIANTS: &[ModelVariant] = &[
+        ModelVariant { name: "quantized", size: 102868746, sha256: "b665f3bba56c3119bc76ba131ebcc544d720a7408cb11581bdf354aaa0198d43" },
+        ModelVariant { name: "fp16", size: 203679052, sha256: "9ed3f10ed06aafe0320567019d18fdec255339350525a33ae18f85f4def288f0" },
+        ModelVariant { name: "int8", size: 102407793, sha256: "c11bdcfad37eaf53e43362885cbe5fad1b44d5b704da753a04f8c0b2f7768064" },
+        ModelVariant { name: "uint8", size: 102407824, sha256: "5e2f9e9f07472751e0a5a0b21bcfa49cb0ac1eaab094784a3f30425a8bcc1d80" },
+        ModelVariant { name: "q4", size: 120342974, sha256: "dab1bb68aaf39bbfa4ef7d218091174f01cd25781a07f36c654a2e3037d4376a" },
+        ModelVariant { name: "q4f16", size: 81549931, sha256: "8278a219a9ae056860dcde7ce8241bee057a6ab0243454c85facf4d6e8325777" },
+        ModelVariant { name: "bnb4", size: 115035086, sha256: "85bb3a0990c1ebf3e575d7a43938da383ae7233eba27af7e19341553e4583594" },
+        ModelVariant { name: "fp32", size: 406953171, sha256: "5e5619f7cca7380b824d329c157dba10bee7cc00d0c139e82fdb7906051b8e4f" },
+    ];
     pub fn parse_variant(value: &str) -> Result<ModelVariant> {
         let wanted = value.trim().to_ascii_lowercase();
         MODEL_VARIANTS.iter().copied().find(|variant| variant.name == wanted).ok_or_else(|| {
@@ -27,12 +48,25 @@
                 MODEL_VARIANTS.iter().map(|variant| variant.name).collect::<Vec<_>>().join(", "))
         })
     }
-    pub fn variant_file_name(variant: &str) -> String { format!("onnx/model_{variant}.onnx") }
+    pub fn variant_file_name(variant: &str) -> String {
+        match variant {
+            "fp32" | "standard" => "onnx/model.onnx".to_owned(),
+            _ => format!("onnx/model_{variant}.onnx"),
+        }
+    }
+
+    pub fn has_legacy_settings() -> Result<bool> {
+        let (path, _) = read_inference_json()?;
+        Ok(path.is_file() || crate::env::var_os("RSRS_M3_DIR").is_some()
+            || crate::env::var_os("RSRS_ENGINE").is_some()
+            || crate::env::var_os("RSRS_MODEL_VARIANT").is_some()
+            || crate::env::var_os("RSRS_CPU_OWNED_ORT_FILE").is_some())
+    }
     /// CPU keeps the quantized graph; accelerators default to fp16.
     pub fn default_variant(engine: Engine) -> &'static str {
         match engine { Engine::Cpu => "quantized", _ => "fp16" }
     }
-    fn settings_dir() -> std::path::PathBuf {
+    pub(crate) fn settings_dir() -> std::path::PathBuf {
         crate::env::var_os("RSRS_DATA_DIR").map(std::path::PathBuf::from)
             .unwrap_or_else(|| bge::expand_home("~/.rsrs"))
     }
@@ -194,12 +228,18 @@
         Ok(())
     }
     #[cfg(windows)]
+    fn provider_root() -> std::path::PathBuf {
+        std::env::var_os("RESPIRE_CANDIDATE_PROVIDER_ROOT")
+            .filter(|_| std::env::var_os("RESPIRE_PRIVATE_CORE_CANDIDATE").as_deref() == Some(std::ffi::OsStr::new("1")))
+            .map(std::path::PathBuf::from).unwrap_or_else(settings_dir)
+    }
+    #[cfg(windows)]
     pub fn accelerator_catalog_metadata() -> (std::path::PathBuf, u64, String) {
         use sha2::{Digest, Sha256};
         // Embedded bytes come from the pinned, SHA-256-verified official NuGet payload.
         let expected = crate::host_winml::DLL;
         (
-            settings_dir().join("engines/winml-2.4.89/Microsoft.Windows.AI.MachineLearning.dll"),
+            provider_root().join("engines/winml-2.4.89/Microsoft.Windows.AI.MachineLearning.dll"),
             expected.len() as u64,
             format!("{:x}", Sha256::digest(expected)),
         )
@@ -217,7 +257,7 @@
     pub(crate) fn host_providers() -> Result<Vec<crate::host_winml::Provider>> {
         let dll = accelerator_catalog_path()?.context("Windows ML catalog path missing")?;
         let mut providers = crate::host_winml::Catalog::open(&dll)?.providers()?;
-        let manifest = settings_dir().join("engines/providers.json");
+        let manifest = provider_root().join("engines/providers.json");
         if manifest.exists() {
             let saved: std::collections::BTreeMap<String, std::path::PathBuf> = serde_json::from_slice(&std::fs::read(manifest)?)?;
             for (name, path) in saved { providers.push(crate::host_winml::Provider { name, ready:path.is_file(), path:Some(path) }); }

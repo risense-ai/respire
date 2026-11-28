@@ -77,7 +77,7 @@ func (d *desktop) handler(static http.Handler) http.Handler {
 		}
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
-		if d.businessRoute(w, r) {
+		if d.modelActionRoute(w, r) || d.businessRoute(w, r) {
 			return
 		}
 		var result any
@@ -105,8 +105,9 @@ func (d *desktop) handler(static http.Handler) http.Handler {
 			d.mu.Unlock()
 			result = map[string]any{
 				"version": version, "platform": host.Platform(), "endpoint": d.m.Endpoint, "root": d.m.Root,
-				"theme":       theme,
-				"preferences": d.m.Preferences(), "autostart": auto,
+				"defaultModel": host.DefaultModelID,
+				"theme":        theme,
+				"preferences":  d.m.Preferences(), "autostart": auto,
 				"proxy": d.m.ProxyInfo(),
 				"task":  d.m.TaskSnapshot(), "connected": healthErr == nil,
 				"managed":   healthErr == nil && d.m.Owns(h.Exe),

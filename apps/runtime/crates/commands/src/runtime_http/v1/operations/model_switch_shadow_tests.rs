@@ -190,6 +190,49 @@ pub(super) async fn check_live_shadow(app: &Router) -> Result<()> {
     store.queue_selection(&incumbent, "fixture-interrupted")?;
     let restore = legacy_start("model.resume", Vec::new())?;
     finish_legacy(&restore).await?;
+    assert_dispatch_selection(&incumbent.generation).await?;
+    check_curated_variants(&store, &incumbent).await
+}
+
+async fn check_curated_variants(store: &LocalStore, incumbent: &profiles::Selection) -> Result<()> {
+    use respire_app::core_sdk::onnx::Engine;
+    let choices = [
+        (embedding::DEFAULT_MODEL, "quint8_avx2"), (embedding::DEFAULT_MODEL, "standard"),
+        ("granite-97m-r2", "quint8_avx2"), ("granite-97m-r2", "standard"),
+        ("m3", "q4f16"), ("m3", "fp16"),
+    ];
+    for (model, variant) in choices {
+        let mut target = embedding::select_from_registry(embedding::Choice {
+            model:model.to_owned(), backend:"onnx".to_owned(), engine:Engine::Cpu, variant:Some(variant.to_owned()),
+        }, &embedding::builtin_registry()?)?;
+        let mut weights = incumbent.profile.weights.as_ref().context("fixture weights")?.clone();
+        weights.path = weights.path.with_file_name(format!("shadow-{model}-{variant}.onnx"));
+        fs::copy(&incumbent.profile.weights.as_ref().context("fixture weights")?.path, &weights.path)?;
+        target.profile.weights = Some(weights);
+        target.profile.tokenizer = incumbent.profile.tokenizer.clone();
+        target.profile.onnx = incumbent.profile.onnx.clone();
+        for key in ["dimensions", "pooling", "max_tokens", "pad_token_id"] {
+            target.profile.embedding[key] = incumbent.profile.embedding[key].clone();
+        }
+        assert!(rpc_serve::shadow_target(store, &mut target)?);
+        let before = store.active_generation_key()?;
+        let (checkpoint, release) = rpc_serve::pause_after_checkpoint(model)?;
+        store.queue_selection(&target, "variant-fixture")?;
+        let task = legacy_start("model.resume", Vec::new())?;
+        tokio::task::spawn_blocking(move || checkpoint.recv_timeout(WAIT)).await??;
+        assert_eq!(store.active_generation_key()?, before);
+        release.send(())?;
+        finish_legacy(&task).await?;
+        let selected = store.active_selection()?.context("activated variant")?;
+        assert_eq!(selected.model, model);
+        assert_eq!(selected.variant.as_deref(), Some(variant));
+        assert_eq!(selected.generation, target.generation);
+        assert_eq!(selected.profile.weights.context("activated weights")?.path,
+            target.profile.weights.context("target weights")?.path);
+    }
+    store.queue_selection(incumbent, "variant-fixture-restore")?;
+    let task = legacy_start("model.resume", Vec::new())?;
+    finish_legacy(&task).await?;
     assert_dispatch_selection(&incumbent.generation).await
 }
 

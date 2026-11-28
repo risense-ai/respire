@@ -21,6 +21,8 @@ pub struct ModelProfile {
     #[serde(default)] pub onnx: Value,
     #[serde(default)] pub weights: Option<Resource>,
     #[serde(default)] pub tokenizer: Option<Resource>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")] pub companions: Vec<Resource>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")] pub isolate_engines: bool,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -58,7 +60,7 @@ pub const ACTIVE_SELECTION_KEY: &str = "embedding.active.selection.v1";
 thread_local! { static ACTIVE: RefCell<Option<Selection>> = const { RefCell::new(None) }; }
 type Transport = fn(&Value, &Selection) -> Result<Value>;
 static TRANSPORT: RwLock<Option<Transport>> = RwLock::new(None);
-thread_local! { static DRAFT: RefCell<Option<Selection>> = const { RefCell::new(None) }; }
+thread_local! { static DRAFT: RefCell<Option<Option<Selection>>> = const { RefCell::new(None) }; }
 
 pub fn set_transport(callback: Transport) -> Result<()> {
     *TRANSPORT.write().map_err(|_| anyhow::anyhow!("embedding transport lock poisoned"))? = Some(callback);
@@ -74,13 +76,13 @@ pub fn set_active(selection: Option<Selection>) {
     ACTIVE.with_borrow_mut(|slot| *slot = selection);
 }
 pub fn current() -> Result<Option<Selection>> {
-    if let Some(selection) = DRAFT.with_borrow(Clone::clone) { return Ok(Some(selection)); }
+    if let Some(selection) = DRAFT.with_borrow(Clone::clone) { return Ok(selection); }
     Ok(ACTIVE.with_borrow(Clone::clone))
 }
-pub fn scoped<T>(selection: Selection, action: impl FnOnce() -> Result<T>) -> Result<T> {
-    struct Restore(Option<Selection>);
+pub fn scoped<T>(selection: impl Into<Option<Selection>>, action: impl FnOnce() -> Result<T>) -> Result<T> {
+    struct Restore(Option<Option<Selection>>);
     impl Drop for Restore { fn drop(&mut self) { DRAFT.with_borrow_mut(|slot| *slot = self.0.take()); } }
-    let _restore = Restore(DRAFT.with_borrow_mut(|slot| slot.replace(selection)));
+    let _restore = Restore(DRAFT.with_borrow_mut(|slot| slot.replace(selection.into())));
     action()
 }
 impl Selection {
@@ -101,9 +103,14 @@ impl Selection {
         anyhow::ensure!(matches!(embedding["pooling"].as_str(), Some("cls" | "mean" | "sentence_embedding")) && embedding["normalize"].is_boolean(), "invalid pooling/normalization");
         for field in ["query_prefix", "document_prefix"] { anyhow::ensure!(embedding[field].is_string(), "embedding {field} must be a string"); }
         if matches!(self.backend_profile.backend.as_str(), "onnx" | "mlx") {
-            for resource in [&self.profile.weights, &self.profile.tokenizer] {
-                let resource = resource.as_ref().context("local embedding weights and tokenizer are required")?;
+            let weights = self.profile.weights.as_ref().context("local embedding weights are required")?;
+            let tokenizer = self.profile.tokenizer.as_ref().context("local embedding tokenizer is required")?;
+            for resource in [weights, tokenizer].into_iter().chain(&self.profile.companions) {
                 anyhow::ensure!(resource.size > 0 && resource.sha256.len() == 64 && resource.sha256.bytes().all(|b| b.is_ascii_hexdigit()), "resource requires exact size and SHA-256");
+            }
+            if !self.profile.companions.is_empty() {
+                anyhow::ensure!(self.backend_profile.backend == "onnx" && self.profile.companions.len() == 1,
+                    "only one ONNX external data resource is supported");
             }
             if self.backend_profile.backend == "onnx" {
                 for name in ["input_ids"] { anyhow::ensure!(self.profile.onnx[name].as_str().is_some_and(|v| !v.is_empty()), "missing ONNX tensor name {name}"); }
@@ -119,11 +126,15 @@ impl Selection {
     }
     pub fn config(&self) -> Result<Value> {
         self.validate()?;
-        let asset_id = if matches!(self.backend_profile.backend.as_str(), "onnx" | "mlx") {
+        let mut asset_id = if matches!(self.backend_profile.backend.as_str(), "onnx" | "mlx") {
             format!("{}:{}", self.profile.weights.as_ref().context("weights missing")?.sha256, self.profile.tokenizer.as_ref().context("tokenizer missing")?.sha256)
         } else { format!("{}:{}", self.profile.embedding["model_id"].as_str().context("model_id missing")?, self.profile.embedding["revision"].as_str().context("revision missing")?) };
         use sha2::{Digest,Sha256};
         let native_id = self.backend_profile.native.as_ref().map(|native| serde_json::to_vec(native).map(|bytes| format!("{:x}",Sha256::digest(bytes)))).transpose()?;
+        for companion in &self.profile.companions {
+            asset_id.push(':');
+            asset_id.push_str(&companion.sha256.to_ascii_lowercase());
+        }
         let mut config = json!({"model":self.model,"backend":self.backend_profile.backend,"engine":self.engine,
             "asset_id":asset_id,"session_options_id":format!("profile-v1:{:?}:{:?}",self.engine,native_id),
             "embedding":self.profile.embedding,
@@ -137,11 +148,20 @@ impl Selection {
             config["provider"] = json!(self.backend_profile.provider);
             config["protocol"] = json!(self.backend_profile.protocol);
         }
-        if self.backend_profile.native.is_some() { config["host_execution_provider"] = json!(true); }
+        if self.backend_profile.native.is_some() || self.uses_linux_accelerator() { config["host_execution_provider"] = json!(true); }
         if self.backend_profile.backend == "host_transport" {
             config["execution_identity"] = json!(format!("{:x}",Sha256::digest(serde_json::to_vec(&json!({"provider":self.backend_profile.provider,"protocol":self.backend_profile.protocol,"endpoint":self.backend_profile.endpoint}))?)));
+        } else if self.profile.isolate_engines || !self.profile.companions.is_empty() || self.uses_linux_accelerator() {
+            config["execution_identity"] = json!(format!("{:x}", Sha256::digest(serde_json::to_vec(&(
+                self.engine, native_id, self.profile.companions.iter().map(|item| &item.sha256).collect::<Vec<_>>(),
+                self.profile.weights.as_ref().map(|item| &item.path), self.profile.tokenizer.as_ref().map(|item| &item.path),
+            ))?)));
         } else if let Some(identity) = native_id { config["execution_identity"] = json!(identity); }
         Ok(config)
+    }
+    pub(crate) fn uses_linux_accelerator(&self) -> bool {
+        cfg!(target_os = "linux") && self.profile.isolate_engines && self.backend_profile.backend == "onnx"
+            && self.engine != Engine::Cpu && self.backend_profile.native.is_none()
     }
     pub fn verify(&self) -> Result<()> {
         self.validate()?;
@@ -150,6 +170,7 @@ impl Selection {
                 let resource = resource.as_ref().context("resource missing")?;
                 crate::model_selection::verify(&resource.path, resource.size, &resource.sha256)?;
             }
+            for resource in &self.profile.companions { verify_resource(resource)?; }
         }
         Ok(())
     }

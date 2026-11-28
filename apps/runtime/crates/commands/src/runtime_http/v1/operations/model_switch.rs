@@ -48,11 +48,8 @@ pub(super) async fn enqueue(scope: RestScope, input: Request) -> V1Result<Respon
             &registry,
         )
         .ok()
-        .filter(|s| {
-            s.engine == Engine::Cpu
-                && s.backend_profile.backend == "onnx"
-                && s.backend_profile.native.is_none()
-        })
+        .filter(|s| s.backend_profile.backend == "onnx"
+            && (s.engine == Engine::Cpu || !embedding::variants(&s.model).is_empty()))
         .ok_or_else(|| {
             Problem::new(
                 StatusCode::BAD_REQUEST,

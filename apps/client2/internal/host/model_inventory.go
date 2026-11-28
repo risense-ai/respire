@@ -10,10 +10,6 @@ import (
 	"respire-client2/internal/i18n"
 )
 
-// BGE-M3 onnx variants accepted by the runtime's `model engine --model` and
-// `model install-m3 --model` (cli MODEL_VARIANTS). Sizes must mirror
-// crates/core-sdk/src/business.rs so install state can be verified locally
-// without hashing the multi-hundred-MiB files on every poll.
 type modelVariantFile struct {
 	Name string
 	Size int64
@@ -26,10 +22,14 @@ var modelVariantFiles = []modelVariantFile{
 	{"uint8", 568456765},
 	{"q4", 1248237611},
 	{"q4f16", 699932840},
+	{"bnb4", 1229364419},
+	{"fp32", 607298},
 }
 
-// modelVariantByName returns the pinned file name relative to the model dir.
 func variantFileName(name string) string {
+	if name == "standard" || name == "fp32" {
+		return filepath.Join("onnx", "model.onnx")
+	}
 	return filepath.Join("onnx", "model_"+name+".onnx")
 }
 
@@ -78,31 +78,56 @@ func resolveModelDir(installationRoot, exe string, managed bool, home string) st
 	return user
 }
 
-// modelFilesPresent matches the CLI's baseline: tokenizer.json plus the
-// quantized onnx graph.
+// modelFilesPresent follows the serving legacy Runtime's baseline lookup.
 func modelFilesPresent(dir string) bool {
 	if info, err := os.Stat(filepath.Join(dir, "tokenizer.json")); err != nil || info.IsDir() {
 		return false
 	}
-	info, err := os.Stat(filepath.Join(dir, variantFileName("quantized")))
-	return err == nil && !info.IsDir()
+	for _, path := range []string{variantFileName("quantized"), m3CPUContainer.rel} {
+		if info, err := os.Stat(filepath.Join(dir, path)); err == nil && info.Mode().IsRegular() {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *Manager) m3VariantDir(ctx context.Context, files []modelFileSpec) (string, error) {
+	if dir := m.ModelDir(); modelWeightsPresent(dir, files) {
+		return dir, nil
+	}
+	return m.modelDir(ctx)
 }
 
 // installedVariants returns the legacy M3 weights with the exact pinned size.
 func installedVariants(dir string) map[string]int64 {
 	present := map[string]int64{}
-	for _, variant := range modelVariantFiles {
-		if info, err := os.Stat(filepath.Join(dir, variantFileName(variant.Name))); err == nil && info.Size() == variant.Size {
-			present[variant.Name] = info.Size()
+	definition, _ := modelDefinitionByID("m3")
+	for _, variant := range definition.Variants {
+		files, err := definition.weightFiles(variant.Name)
+		if err == nil && modelWeightsPresent(dir, files) {
+			present[variant.Name] = variant.Size
 		}
 	}
 	return present
+}
+
+func modelWeightsPresent(dir string, files []modelFileSpec) bool {
+	for _, spec := range files {
+		info, err := os.Stat(filepath.Join(dir, spec.rel))
+		if err != nil || !info.Mode().IsRegular() || info.Size() != spec.size {
+			return false
+		}
+	}
+	return true
 }
 
 // ModelVariants reports install state and location for every variant of one
 // catalog model, powering the client's model table. m3 keeps the legacy
 // resolution and CLI variant table; profile models read models/<id>.
 func (m *Manager) ModelVariants(ctx context.Context, model string) (map[string]any, error) {
+	if model == "" {
+		model = DefaultModelID
+	}
 	definition, err := modelDefinitionByID(model)
 	if err != nil {
 		return nil, err
@@ -125,7 +150,15 @@ func (m *Manager) ModelVariants(ctx context.Context, model string) (map[string]a
 	}
 	variants := make([]map[string]any, 0, len(definition.Variants))
 	for _, variant := range definition.Variants {
-		path := filepath.Join(dir, definition.weightPath(variant.Name))
+		files, err := definition.weightFiles(variant.Name)
+		if err != nil {
+			return nil, err
+		}
+		variantDir := dir
+		if definition.Legacy && modelWeightsPresent(m.ModelDir(), files) {
+			variantDir = m.ModelDir()
+		}
+		path := filepath.Join(variantDir, files[0].rel)
 		entry := map[string]any{
 			"name":      variant.Name,
 			"size":      variant.Size,
@@ -133,17 +166,22 @@ func (m *Manager) ModelVariants(ctx context.Context, model string) (map[string]a
 			"bytes":     0,
 			"installed": false,
 		}
-		if info, err := os.Stat(path); err == nil && info.Size() == variant.Size {
-			entry["bytes"], entry["installed"] = variant.Size, true
+		if len(files) > 1 {
+			entry["size"] = variant.Size + files[1].size
+			entry["companion_paths"] = []string{filepath.Join(variantDir, files[1].rel)}
 		}
-		if managed && variant.Name == "quantized" {
+		if modelWeightsPresent(variantDir, files) {
+			entry["bytes"], entry["installed"] = entry["size"], true
+		}
+		if managed && variant.Name == "quantized" && entry["installed"] == false {
 			entry["path"], entry["bytes"], entry["installed"], entry["runtime_managed"] = managedWeights, variant.Size, true, true
 		}
 		variants = append(variants, entry)
 	}
 	return map[string]any{
-		"model":     definition.ID,
-		"model_dir": dir,
+		"model":           definition.ID,
+		"model_dir":       dir,
+		"default_variant": definition.Variants[0].Name,
 		"tokenizer_installed": (managed && modelFileValid(managedTokenizer, definition.Tokenizer)) ||
 			modelFileValid(filepath.Join(dir, "tokenizer.json"), definition.Tokenizer),
 		"cpu_container_ready": !definition.Legacy || m.cpuContainerPresent(dir),

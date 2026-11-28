@@ -2,7 +2,7 @@ use crate::model_progress;
 #[cfg(not(test))]
 use respire_app::core_sdk::worker::CandidateWorker;
 use respire_app::{
-    core_sdk::onnx::Engine, diary, transport::local::ModelSwitchArtifact, MemoryEntry, StoredMemory,
+    diary, transport::local::ModelSwitchArtifact, MemoryEntry, StoredMemory,
 };
 #[cfg(not(test))]
 use respire_spawn::owner_credential::ModelJobRoot;
@@ -22,18 +22,11 @@ pub(crate) use native_fixture::{
 use native_fixture::{CandidateWorker, ModelJobRoot};
 
 pub(crate) fn shadow_target(store: &LocalStore, target: &mut Selection) -> Result<bool> {
-    if target.engine != Engine::Cpu
-        || target.backend_profile.backend != "onnx"
-        || target.backend_profile.native.is_some()
-    {
+    if target.backend_profile.backend != "onnx" {
         return Ok(false);
     }
     target.generation = profiles::generation_key_for_profile(target)?;
-    let active = match store.active_selection()? {
-        Some(active) if !active.generation.is_empty() => active.generation,
-        _ => store.active_generation_key()?,
-    };
-    Ok(target.generation != active)
+    Ok(target.profile.isolate_engines || target.generation != store.active_generation_key()?)
 }
 
 pub(crate) fn switch_store_fence<T>(
@@ -105,6 +98,7 @@ pub(crate) fn run_shadow_switch(
 ) -> Result<Value> {
     let _serving = ShadowServing;
     ShadowServing::set(true)?;
+    let reuse_generation = store.active_generation_key()? == target.generation;
     let check = || {
         check()?;
         model_progress::switch_checkpoint(task_id, None)
@@ -131,10 +125,14 @@ pub(crate) fn run_shadow_switch(
         }
     };
     let mut root = Some(root);
-    let mut worker = Some(
-        CandidateWorker::start(&data_root, &index_root, target.clone())
-            .context("cannot start candidate Core worker")?,
-    );
+    let mut worker = Some(match CandidateWorker::start(&data_root, &index_root, target.clone()) {
+        Ok(worker) => worker,
+        Err(error) => {
+            root.take().context("candidate directory unavailable")?.remove_empty()
+                .with_context(|| format!("candidate directory cleanup after worker start failed: {error:#}"))?;
+            return Err(error).context("cannot start candidate Core worker");
+        }
+    });
     let result = (|| {
         worker
             .as_mut()
@@ -155,7 +153,12 @@ pub(crate) fn run_shadow_switch(
         for _ in 0..16 {
             let (indexed, total) = counts()?;
             report("switch-index", indexed as u64, Some(total as u64))?;
-            for _ in 0..total.saturating_sub(indexed).div_ceil(BATCH) {
+            let batches = if reuse_generation {
+                0
+            } else {
+                total.saturating_sub(indexed).div_ceil(BATCH)
+            };
+            for _ in 0..batches {
                 check()?;
                 let rows = fetch(BATCH)?;
                 if rows.is_empty() {
@@ -181,7 +184,7 @@ pub(crate) fn run_shadow_switch(
             if total.saturating_sub(indexed) > FINAL_BATCH {
                 continue;
             }
-            if diary_pending()? {
+            if !reuse_generation && diary_pending()? {
                 let worker = worker.as_mut().context("candidate worker unavailable")?;
                 diary::rebuild_candidate_with_progress(
                     store,
@@ -207,10 +210,13 @@ pub(crate) fn run_shadow_switch(
                     profiles::exclusive(|| {
                         check()?;
                         let (indexed, total) = counts()?;
-                        if total.saturating_sub(indexed) > FINAL_BATCH || diary_pending()? {
+                        if (reuse_generation && indexed != total)
+                            || total.saturating_sub(indexed) > FINAL_BATCH
+                            || diary_pending()?
+                        {
                             return Ok(false);
                         }
-                        if indexed != total {
+                        if !reuse_generation && indexed != total {
                             let rows = fetch(FINAL_BATCH)?;
                             let artifacts = prepare_batch(
                                 worker.as_mut().context("candidate worker unavailable")?,
@@ -240,9 +246,15 @@ pub(crate) fn run_shadow_switch(
                             let mut embedder = crate::engine::EMBEDDER_SLOT
                                 .lock()
                                 .map_err(|_| anyhow::anyhow!("embedder cache poisoned"))?;
-                            respire_app::resident::clear()?;
+                            if reuse_generation {
+                                store.activate_selection(target, &store.memory_revision()?)?;
+                            } else {
+                                store.activate_shadow_selection(target, task_id)?;
+                            }
+                            if let Err(error) = respire_app::resident::clear() {
+                                eprintln!("model switch committed; resident cache cleanup failed: {error:#}");
+                            }
                             *embedder = None;
-                            store.activate_shadow_selection(target, task_id)?;
                             profiles::set_active(Some(target.clone()));
                             Ok(())
                         })?;

@@ -416,7 +416,7 @@ func TestRuntimeSDKRetainsUnrepresentedOperations(t *testing.T) {
 	}
 }
 
-func TestRuntimeSDKGraniteKeepsRegistrationAndOmitsVariant(t *testing.T) {
+func TestRuntimeSDKGraniteKeepsRegistrationAndSendsVariant(t *testing.T) {
 	configured := false
 	manager := v1TestManager(t, []string{"openapi.v1", "sse.operations.v1"}, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -441,8 +441,8 @@ func TestRuntimeSDKGraniteKeepsRegistrationAndOmitsVariant(t *testing.T) {
 			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 				t.Error(err)
 			}
-			if _, exists := request["variant"]; exists {
-				t.Error("Granite variant must be omitted")
+			if request["variant"] != "standard" {
+				t.Errorf("Granite switch lost the selected variant: %v", request)
 			}
 			w.WriteHeader(202)
 			io.WriteString(w, `{"operation_id":"op","status":"accepted"}`)

@@ -69,7 +69,7 @@ fn validate_request_scope(request: &RpcRequest) -> Result<(), (String, String)> 
     }
     let _scope_held = read_request_identity(request)?;
     let gate = shared_exclusive();
-    let skips_gate = matches!(request.method.as_str(), "runtime.result" | "model.control")
+    let skips_gate = matches!(request.method.as_str(), "runtime.result" | "model.control" | "model.probe")
         || (request.method == "cli.exec" && is_status(&request.args));
     let held = if skips_gate {
         None

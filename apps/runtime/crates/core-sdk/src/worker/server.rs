@@ -103,15 +103,11 @@ pub fn run() -> Result<()> {
                         .map(serde_json::from_value::<crate::profiles::Selection>)
                         .transpose()?;
                     let transport_enabled = frame["transport"].as_bool() == Some(true);
-                    if operation == "candidate_prepare_v1" {
+                    if matches!(operation, "candidate_prepare_v1" | "candidate_probe_v1" | "candidate_probe_report_v1") {
                         let selection = selection
-                            .filter(|s| {
-                                s.engine == crate::onnx::Engine::Cpu
-                                    && s.backend_profile.backend == "onnx"
-                                    && s.backend_profile.native.is_none()
-                            })
+                            .filter(|s| s.backend_profile.backend == "onnx")
                             .context(
-                                "candidate preparation requires an explicit local CPU selection",
+                                "candidate preparation requires an explicit local ONNX selection",
                             )?;
                         anyhow::ensure!(
                             candidate
@@ -119,7 +115,20 @@ pub fn run() -> Result<()> {
                                 && payload["model"].as_str() == Some(selection.model.as_str()),
                             "candidate preparation not available on this worker"
                         );
+                        if operation == "candidate_probe_report_v1" {
+                            let dimensions = usize::try_from(payload["dimensions"].as_u64().context("probe dimensions missing")?)?;
+                            return Ok(crate::model_probe::run_isolated(&selection, dimensions, false));
+                        }
                         return crate::profiles::scoped(selection, || {
+                            if operation == "candidate_probe_v1" {
+                                crate::business::prepare_candidate(json!({"model":payload["model"],"entry":{
+                                    "id":"candidate-probe","kind":"Context","tags":[],"title":"Candidate probe",
+                                    "content":"Respire candidate load verification","user":"local","computer":"","project":"",
+                                    "created_at":"2000-01-01T00:00:00Z","updated_at":"2000-01-01T00:00:00Z",
+                                    "emotion":-1,"parent_id":"","importance":"important",
+                                }}))?;
+                                return Ok(json!({"ready":true}));
+                            }
                             crate::business::prepare_candidate(payload)
                         });
                     }

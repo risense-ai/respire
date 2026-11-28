@@ -84,7 +84,11 @@ fn run_prepare(prepare: PrepareJob) {
         let _task = crate::model_progress::TaskScope::new(Some(operation_id.clone()));
         operation.enter_thread();
         crate::model_progress::check()?;
-        crate::model_assets::verify_m3_assets()?;
+        if let Some(selection) = respire_app::embedding::saved_selection()? {
+            crate::model_assets::verify_selection_assets(&selection)?;
+        } else {
+            crate::model_assets::verify_m3_assets()?;
+        }
         crate::model_progress::check()?;
         Ok(crate::output_state::Captured {
             exit: 0,

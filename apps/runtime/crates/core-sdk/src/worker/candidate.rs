@@ -4,8 +4,9 @@ use respire_protocol::MemoryEntry;
 use std::path::{Path, PathBuf};
 
 static CANDIDATE: Mutex<Option<Arc<Process>>> = Mutex::new(None);
+static PROBE: Mutex<Option<Arc<Process>>> = Mutex::new(None);
 
-/// A single-use, local CPU-only model lane. It receives unlocked text for the
+/// A single-use, local ONNX model lane. It receives unlocked text for the
 /// typed prepare operation, never a Vault, database, or transport callback.
 pub struct CandidateWorker {
     process: Arc<Process>,
@@ -25,11 +26,19 @@ impl CandidateWorker {
         selection: Selection,
         fixture: Option<&Path>,
     ) -> Result<Self> {
+        Self::start_in(&CANDIDATE, data_root, index_root, selection, fixture)
+    }
+
+    fn start_in(
+        slot: &Mutex<Option<Arc<Process>>>,
+        data_root: &Path,
+        index_root: &Path,
+        selection: Selection,
+        fixture: Option<&Path>,
+    ) -> Result<Self> {
         anyhow::ensure!(
-            selection.engine == crate::onnx::Engine::Cpu
-                && selection.backend_profile.backend == "onnx"
-                && selection.backend_profile.native.is_none(),
-            "candidate worker supports local CPU model selection only"
+            selection.backend_profile.backend == "onnx",
+            "candidate worker requires a local ONNX selection"
         );
         let data_root = data_root.canonicalize()?;
         let index_root = index_root.canonicalize()?;
@@ -37,7 +46,7 @@ impl CandidateWorker {
             index_root != data_root && index_root.starts_with(&data_root),
             "candidate index directory is outside its private job root"
         );
-        let mut slot = CANDIDATE
+        let mut slot = slot
             .lock()
             .map_err(|_| anyhow::anyhow!("candidate worker state poisoned"))?;
         anyhow::ensure!(!STOPPING.load(Ordering::Acquire), "Core is shutting down");
@@ -56,6 +65,17 @@ impl CandidateWorker {
         })
     }
 
+    pub(crate) fn probe_report(selection: &Selection, dimensions: usize) -> Result<Value> {
+        let root = tempfile::tempdir()?;
+        let index = root.path().join("index");
+        std::fs::create_dir(&index)?;
+        let mut worker = Self::start_in(&PROBE, root.path(), &index, selection.clone(), None)?;
+        let result = worker.call("candidate_probe_report_v1", json!({"model":selection.model,"dimensions":dimensions}), || Ok(()));
+        worker.close()?;
+        root.close()?;
+        result
+    }
+
     /// Reap the owned child before disposing of its index tree.
     pub fn close(self) -> Result<()> {
         self.process.retire("candidate lane closed")
@@ -63,10 +83,8 @@ impl CandidateWorker {
 
     pub fn probe(&mut self, check: impl FnMut() -> Result<()>) -> Result<Value> {
         self.call(
-            "model_probe",
-            json!({
-                "model":self.selection.model, "text":"Respire candidate load verification"
-            }),
+            "candidate_probe_v1",
+            json!({"model":self.selection.model}),
             check,
         )
     }
@@ -161,11 +179,11 @@ impl Drop for CandidateWorker {
 }
 
 pub(super) fn shutdown() -> Result<()> {
-    let slot = CANDIDATE
-        .lock()
-        .map_err(|_| anyhow::anyhow!("candidate worker state poisoned"))?;
-    if let Some(worker) = slot.as_ref() {
-        worker.retire("host shutdown")?;
+    for slot in [&CANDIDATE, &PROBE] {
+        let slot = slot.lock().map_err(|_| anyhow::anyhow!("candidate worker state poisoned"))?;
+        if let Some(worker) = slot.as_ref() {
+            worker.retire("host shutdown")?;
+        }
     }
     Ok(())
 }

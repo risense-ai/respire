@@ -122,34 +122,10 @@ func (d *desktop) businessRoute(w http.ResponseWriter, r *http.Request) bool {
 		if err = json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&body); err != nil {
 			break
 		}
-		if body.Model == "" {
-			body.Model = "m3"
-		}
-		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
-		defer cancel()
-		receipt, managed, startErr := d.m.StartRuntimeModelDownload(ctx, body.Model, body.Variant, body.Mirror)
+		id, startErr := d.m.StartModelDownload(body.Model, body.Variant, body.Mirror)
 		if startErr != nil {
+			w.WriteHeader(modelActionStatus(startErr))
 			err = startErr
-			break
-		}
-		if managed {
-			result = map[string]any{"id": receipt.OperationId, "runtime": true, "stream": receipt.Stream}
-			break
-		}
-		model := body.Model
-		variant := body.Variant
-		mirror := body.Mirror
-		// Start in the background so the POST returns before the download
-		// finishes; otherwise progress polling could only begin after the
-		// task was already over and the modal never showed a live bar.
-		id := d.m.StartDownload(i18n.Message446478c6a451bc64+variant, func(ctx context.Context) error {
-			ctx, cancel := context.WithTimeout(ctx, 60*time.Minute)
-			defer cancel()
-			return d.m.DownloadModel(ctx, model, variant, mirror)
-		})
-		if id == "" {
-			w.WriteHeader(http.StatusConflict)
-			err = errors.New(i18n.Message7f7d5e3ef44921fb)
 			break
 		}
 		result = map[string]string{"id": id}
