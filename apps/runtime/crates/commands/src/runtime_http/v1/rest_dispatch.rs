@@ -285,6 +285,9 @@ pub(super) fn service(work: Work, store: Option<&LocalStore>, ownership: &Librar
                     let store = store
                         .filter(|_| ownership.protects(profile).unwrap_or(false))
                         .ok_or_else(transport::unavailable)?;
+                    respire_app::core_sdk::profiles::set_active(
+                        store.active_selection().map_err(|_| transport::unavailable())?,
+                    );
                     if matches!(access, Access::Write) {
                         respire_app::service::ensure_writable().map_err(|_| {
                             Problem::new(

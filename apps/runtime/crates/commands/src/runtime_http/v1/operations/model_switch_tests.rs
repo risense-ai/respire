@@ -12,6 +12,9 @@ const BAD_MODEL: &str = "synthetic-invalid-onnx";
 const CANCELLED_MODEL: &str = "synthetic-cancelled";
 const PATH: &str = "/v1/models/switch";
 
+#[path = "model_switch_shadow_tests.rs"]
+mod shadow;
+
 #[test]
 fn switch_uses_serving_store_and_rolls_back() -> Result<()> {
     production_router_fixture(TEST)
@@ -74,6 +77,7 @@ pub(super) fn seed(store: &LocalStore, urk: [u8; 32]) -> Result<()> {
         &diary,
         "sse-fixture",
     )?)?);
+    shadow::LARGE_LIBRARY_KEYS.set(keys).map_err(|_| anyhow::anyhow!("fixture keys already installed"))?;
     Ok(())
 }
 
@@ -153,6 +157,7 @@ pub(super) async fn check_routes(app: &Router) -> Result<()> {
         json_response(active, StatusCode::OK).await?["active_model_id"],
         MODEL
     );
+    shadow::check_live_shadow(app).await?;
     Ok(())
 }
 

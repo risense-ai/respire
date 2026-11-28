@@ -127,3 +127,139 @@ test("a remounted model page reuses the pending stream and its terminal receipt"
   assert.equal((await resumed).state, "completed");
   assert.equal(f.currentRuntimeSwitch(), null);
 });
+
+function loadFunctions(file, dependencies, exports) {
+  const source = readFrontend(file).replace(/^import [\s\S]*?;\r?\n/gm, "").replace(/^export /gm, "");
+  return new Function(...Object.keys(dependencies), `${source}\nreturn {${exports}};`)(...Object.values(dependencies));
+}
+
+function modelControls(f) {
+  const { $, h, bytes, number } = loadFunctions("ui/core.js", {}, "$, h, bytes, number");
+  const { readProfileState } = loadFunctions("pages/model-kit.js", {}, "readProfileState");
+  return loadFunctions("pages/models-view.js", { $, h, bytes, number, readProfileState,
+    currentRuntimeSwitch: f.currentRuntimeSwitch, phase: value => value },
+  "liveModelOperation, modelOperationProgress, modelCancelButton, syncModelCancel, cancellableModelID, nextSwitchStallState");
+}
+
+test("advancing switch progress keeps the poll alive beyond 600 ticks", () => {
+  const { nextSwitchStallState } = modelControls(fixture());
+  let state = { key: "", ticks: 0 };
+  const op = { id: "switch", active: true, phase: "switch-index", done: 0 };
+  for (let tick = 0; tick < 1200; tick += 1) {
+    if (tick === 600) op.done += 1;
+    state = nextSwitchStallState(state.key, state.ticks, op);
+    assert.equal(state.expired, false);
+  }
+  op.phase = "switch-diary";
+  state = nextSwitchStallState(state.key, state.ticks, op);
+  assert.equal(state.ticks, 0);
+  assert.equal(state.expired, false);
+});
+
+test("unchanged switch progress expires at idle tick 601", () => {
+  const { nextSwitchStallState } = modelControls(fixture());
+  const op = { id: "switch", active: true, phase: "switch-index", done: 4, elapsed: 0 };
+  let state = nextSwitchStallState("", 0, op);
+  for (let tick = 1; tick <= 600; tick += 1) {
+    op.elapsed += 3;
+    state = nextSwitchStallState(state.key, state.ticks, op);
+    assert.equal(state.expired, false);
+  }
+  state = nextSwitchStallState(state.key, state.ticks, op);
+  assert.deepEqual(state, { key: "switch|switch-index|4||", ticks: 601, expired: true });
+});
+
+test("model cancel markup is empty without an advanced cancel button", () => {
+  const { modelCancelButton } = modelControls(fixture());
+  assert.equal(modelCancelButton({ querySelector: () => null }), "");
+});
+
+test("fresh switch profile renders indexed items and elapsed time over a stale status snapshot", () => {
+  const { liveModelOperation, modelOperationProgress } = modelControls(fixture());
+  const snapshot = { id: "switch", active: true, phase: "switch-load", done: 0 };
+  const operation = { id: "switch", active: true, phase: "switch-index", item: "granite", done: 24, total: 80, elapsed: 7, elapsed_secs: 99 };
+  const view = { profileState: { progress: { summary: { operation } } }, profileStatus: snapshot };
+  const status = { summary: { model_operation: snapshot } };
+  const html = modelOperationProgress(liveModelOperation(view, status));
+  assert.match(html, /granite.*24 \/ 80 \(30%\).*<span>7 /);
+  assert.doesNotMatch(html, /[KM]iB|99/);
+  assert.match(modelOperationProgress({ ...operation, total: null }), /<span>24<\/span>/);
+  assert.match(modelOperationProgress({ phase: "verify", done: 1024, total: 2048 }), /1\.0 KiB \/ 2\.0 KiB/);
+  view.profileState.progress.summary.operation = { active: false };
+  assert.deepEqual(liveModelOperation(view, status), {});
+});
+
+test("overview uses the shared progress formatter for active model operations", () => {
+  const source = readFrontend("pages/overview.js");
+  assert.match(source, /import \{ modelOperationProgress \} from "\.\/models-view\.js"/);
+  assert.match(source, /op\.active \? modelOperationProgress\(op\) : ""/);
+  assert.doesNotMatch(source, /bytes\(op\.done\)/);
+});
+
+test("the three-second profile poll publishes fresh counts and stops at idle", async () => {
+  const controls = modelControls(fixture());
+  const { readProfileState } = loadFunctions("pages/model-kit.js", {}, "readProfileState");
+  const source = readFrontend("pages/models.js");
+  const polling = source.slice(source.indexOf("  function syncProfilePolling("), source.indexOf("  async function refreshM3Inventory("));
+  const snapshot = { active: true, id: "switch", phase: "queued", done: 0 };
+  const operation = { active: true, id: "switch", phase: "switch-index", done: 4, total: 10, elapsed: 6 };
+  const ctx = { status: { summary: { model_operation: snapshot } } };
+  const view = { modelID: "granite" };
+  let tick, interval;
+  const start = new Function("view", "ctx", "fetchProfileState", "readProfileState", "activeModelScope", "acceptRuntimeActive",
+    "setInterval", "clearInterval", "liveModelOperation", "notify", `
+    let disposed = false, profileRefreshing = false;
+    ${polling}
+    function update() { syncProfilePolling(liveModelOperation(view, ctx.status)); }
+    return update;
+  `)(view, ctx, async () => ({ progress: { summary: { operation: { ...operation } } } }),
+    readProfileState, () => "scope", () => {},
+    (fn, ms) => { tick = fn; interval = ms; return 1; }, id => { assert.equal(id, 1); tick = null; }, controls.liveModelOperation, assert.fail);
+  start();
+  assert.equal(interval, 3000);
+  await tick();
+  assert.deepEqual(view.runtimeProgress, operation);
+  assert.deepEqual(readProfileState(view.profileState).operation, operation);
+  assert.equal(controls.liveModelOperation(view, ctx.status).done, 4);
+  operation.active = false;
+  await tick();
+  assert.equal(tick, null);
+});
+
+test("both direct cancel buttons and Advanced Settings use the active operation ID", async () => {
+  const f = fixture();
+  const controls = modelControls(f);
+  const snapshot = { active: true, id: "status-task" };
+  const profile = { active: true, id: "profile-task" };
+  const buttons = [false, false, true].map(advanced => ({ dataset: { model: "cancel" }, closest: () => advanced }));
+  const root = { querySelectorAll: () => buttons, addEventListener: (_, fn) => { root.click = fn; } };
+  const calls = [];
+  const { bindModelActions } = loadFunctions("pages/models-actions.js", {
+    ...controls, action: (_, run) => run(), execute: async (...args) => { calls.push(args); },
+  }, "bindModelActions");
+
+  const observed = f.observeRuntimeSwitch({ operation_id: "receipt-task", stream: true }, { model: "granite" });
+  const receiptOperation = controls.liveModelOperation({}, {});
+  assert.equal(receiptOperation.id, "receipt-task");
+  f.streams[0].frame("completed", "completed", "receipt-task");
+  await observed;
+
+  for (const [view, status, id] of [
+    [{}, { summary: { model_operation: snapshot } }, "status-task"],
+    [{ profileState: { progress: { details: { operation: profile } } } }, {}, "profile-task"],
+    [{ runtimeProgress: { operation_id: "runtime-task", state: "running" } }, {}, "runtime-task"],
+    [{ runtimeProgress: { ...receiptOperation, id: "receipt-task" } }, {}, "receipt-task"],
+    [{ runtimeProgress: { ...profile, cancellable: false } }, {}, undefined],
+    [{ runtimeProgress: { id: "finished", state: "completed" } }, {}, undefined],
+  ]) {
+    controls.syncModelCancel(root, view, controls.liveModelOperation(view, status));
+    assert.deepEqual(buttons.map(button => button.disabled), [!id, !id, !id]);
+    assert.deepEqual(buttons.slice(0, 2).map(button => button.hidden), [!id, !id]);
+    bindModelActions(view, { root, ctx: { status }, refreshProfileState: async () => {} });
+    root.click({ target: { closest: selector => selector === "[data-model]" ? buttons[0] : null } });
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  assert.deepEqual(calls, ["status-task", "profile-task", "runtime-task", "receipt-task"].map(id => ["model_cancel", { id }]));
+  assert.match(readFrontend("pages/models.js"), /data-model-task-progress[^\n]+modelCancelButton\(root\)/);
+  assert.match(readFrontend("pages/models-view.js"), /data-mode-progress hidden[^\n]+modelCancelButton\(root\)/);
+});

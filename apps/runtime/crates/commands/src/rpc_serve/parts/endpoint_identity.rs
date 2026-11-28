@@ -88,9 +88,7 @@ fn with_locked_owner_scope<T>(
     })
 }
 
-pub(crate) fn with_locked_library<T>(
-    action: impl FnOnce(&str, &std::path::Path, uuid::Uuid, u64, uuid::Uuid, respire_app::auth::RuntimeLibrary<'_>) -> T,
-) -> Option<T> {
+fn verified_locked_profile() -> Option<std::path::PathBuf> {
     if !startup_complete() || !store_ready() || business_paused()
         || respire_app::service::off_mode()
     {
@@ -101,6 +99,22 @@ pub(crate) fn with_locked_library<T>(
     let profile = respire_app::service::data_dir().canonicalize().ok()?;
     respire_app::service::ensure_runtime_profile().ok()?;
     respire_app::snapshot::ensure_no_incomplete_restore(&profile).ok()?;
+    Some(profile)
+}
+
+pub(crate) fn open_locked_model_switch_row(
+    row: &respire_app::StoredMemory,
+) -> Result<Option<respire_app::MemoryEntry>> {
+    let Some(profile) = verified_locked_profile() else {
+        return Ok(None);
+    };
+    respire_app::auth::open_runtime_model_switch_row(&profile, row)
+}
+
+pub(crate) fn with_locked_library<T>(
+    action: impl FnOnce(&str, &std::path::Path, uuid::Uuid, u64, uuid::Uuid, respire_app::auth::RuntimeLibrary<'_>) -> T,
+) -> Option<T> {
+    let profile = verified_locked_profile()?;
     let instance = uuid::Uuid::parse_str(&process_identity().instance_id).ok()?;
     let generation = crate::rpc_worker::wire_generation();
     respire_app::auth::with_runtime_library(&profile, |owner, vault_epoch, library| {

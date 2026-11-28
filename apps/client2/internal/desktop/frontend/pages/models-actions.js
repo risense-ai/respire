@@ -1,5 +1,6 @@
 import { messages as i18nMessages } from "../ui/i18n/messages.js";
 import { $, bytes, summary, execute, action, confirm, notify, resultView, api } from "../ui/core.js";
+import { cancellableModelID, liveModelOperation, syncModelCancel } from "./models-view.js";
 import {
   MODEL_OPTIONS,
   isProfileModel,
@@ -17,8 +18,9 @@ export function bindModelActions(view, {
   handleModeSelect,
   handlePrimaryAction,
   refreshProfileState,
+  runIndexedAction,
+  update,
   renderVariants,
-  renderDynamic,
   ctx,
   currentMirror,
   load,
@@ -51,20 +53,22 @@ export function bindModelActions(view, {
           view.switchingVariant = variant;
           view.switchInFlight = true;
           view.switchTicks = 0;
+          view.switchProgressKey = "";
+          update();
           try {
-            const receipt = await submitProfileSwitch(view.modelID, engine, variant, (operation) => {
-              view.runtimeProgress = operation;
-              if (root.isConnected) { renderVariants(); renderDynamic(true); }
-            });
-            if (receipt?.settled) { view.switchInFlight = false; view.switchingVariant = ""; view.runtimeProgress = null; view.lastVerifiedAt = new Date(); }
-            else if (!view.switchTimer)
-              view.switchTimer = setInterval(() => refreshProfileState(), 3000);
+            const receipt = await submitProfileSwitch(view.modelID, engine, variant);
+            if (receipt?.settled) {
+              view.switchInFlight = false;
+              view.switchingVariant = "";
+              view.lastVerifiedAt = new Date();
+            } else {
+              view.profileSwitchPending = true;
+            }
             notify(`${i18nMessages.m0e3d526f29331bd7}${view.modelID} · ${engine.toUpperCase()} · ${variant}${i18nMessages.m1df4614471fdde44}`);
           } catch (error) {
             view.switchInFlight = false;
             view.switchingVariant = "";
-            clearInterval(view.switchTimer);
-            view.switchTimer = null;
+            await refreshProfileState();
             throw error;
           }
           await refreshProfileState();
@@ -76,6 +80,7 @@ export function bindModelActions(view, {
         view.switchingVariant = variant;
         view.switchInFlight = true;
         renderVariants();
+        update();
         notify(`${i18nMessages.mf756893b5a1a7aa8}${engine.toUpperCase()} · ${variant}${i18nMessages.m79ecb4c2993c2d33}`);
         const scope = activeModelScope(ctx.desktop?.health);
         try {
@@ -103,7 +108,7 @@ export function bindModelActions(view, {
           view.switchingVariant = "";
           if (root.isConnected) {
             renderVariants();
-            renderDynamic(true);
+            await refreshProfileState();
           }
           await ctx.refresh();
         }
@@ -119,6 +124,23 @@ export function bindModelActions(view, {
     }
     const button = event.target.closest("[data-model]");
     if (!button) return;
+    if (button.dataset.model === "cancel") {
+      const id = cancellableModelID(liveModelOperation(view, ctx.status));
+      if (!id || view.cancelPending) return;
+      action(button, async () => {
+        view.cancelPending = id;
+        syncModelCancel(root, view, liveModelOperation(view, ctx.status));
+        try {
+          const result = await execute("model_cancel", { id });
+          if (root.isConnected)
+            $("[data-result]", root).innerHTML = resultView(i18nMessages.m4347dbc9b646e415, result);
+        } finally {
+          view.cancelPending = null;
+          await refreshProfileState();
+        }
+      }).finally(() => syncModelCancel(root, view, liveModelOperation(view, ctx.status)));
+      return;
+    }
     action(button, async () => {
       const operation = button.dataset.model;
       let result;
@@ -164,10 +186,6 @@ export function bindModelActions(view, {
           onDone: () => load(),
         });
         await ctx.refresh();
-      } else if (operation === "cancel") {
-        const id = ctx.status?.summary?.model_operation?.id;
-        if (!id) throw new Error(i18nMessages.m0eda705f43ee11f7);
-        result = await execute("model_cancel", { id });
       } else if (operation === "uninstall") {
         if (
           !(await confirm(
@@ -188,7 +206,7 @@ export function bindModelActions(view, {
         notify(
           `${i18nMessages.md7104a3e99ee9fd9}${probe.selected || i18nMessages.m46cbcb7c5a65bff9} · ${probe.elapsed_ms ?? "—"}ms · cosine ${typeof probe.cosine === "number" ? probe.cosine.toFixed(4) : "—"}`,
         );
-      } else if (operation === "index") result = await execute("index_prepare");
+      } else if (operation === "index") result = await runIndexedAction("index_prepare");
       else if (operation === "rebuild") {
         if (
           !(await confirm(
@@ -198,7 +216,7 @@ export function bindModelActions(view, {
           ))
         )
           return;
-        result = await execute("index_rebuild");
+        result = await runIndexedAction("index_rebuild");
       }
       if (result && root.isConnected)
         $("[data-result]", root).innerHTML = resultView(i18nMessages.m4347dbc9b646e415, result);

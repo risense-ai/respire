@@ -1,5 +1,5 @@
 import { messages as i18nMessages } from "../ui/i18n/messages.js";
-import { $, h, raw, bytes, number, summary, panel, pairs, input, select, execute, notify, resultView, api, currentRuntimeSwitch, observeRuntimeSwitch } from "../ui/core.js";
+import { $, h, raw, number, summary, panel, pairs, input, select, execute, notify, resultView, api } from "../ui/core.js";
 import { heading, phase } from "./overview.js";
 import { recallChecks } from "./recall.js";
 import {
@@ -19,7 +19,7 @@ import {
   openDownloadModal,
 } from "./model-kit.js";
 
-import { createModelsView, PAGE_STATES } from "./models-view.js";
+import { createModelsView, liveModelOperation, modelCancelButton, modelOperationProgress, nextSwitchStallState, PAGE_STATES } from "./models-view.js";
 import { bindModelActions } from "./models-actions.js";
 import { bindModelSettings, FUSION_MODES, FUSION_NUMERIC } from "./models-settings.js";
 
@@ -44,6 +44,8 @@ export function models(root, ctx) {
     lastVerifiedAt: null,
     pageKey: "",
     switchTicks: 0,
+    switchProgressKey: "",
+    profileSwitchPending: false,
     lastProbe: null,
   };
   let agent = {},
@@ -107,6 +109,12 @@ export function models(root, ctx) {
   $("[data-model=providers]", root)?.remove();
   $("[data-engine-hint]", root).textContent = "";
   const live = $("[data-live]", root);
+  live.innerHTML = `<div class="grid"><div data-inference-status></div>${panel(
+    i18nMessages.m281dccfa29c6c9fb,
+    `<div class="panel-body"><div data-model-task-progress></div>${modelCancelButton(root)}<p class="form-error section-gap" data-model-task-error hidden></p>${i18nMessages.m31f6729bd220085e}</pre></details>`,
+  )}</div>`;
+  let profileRefreshing = false;
+  let disposed = false;
   function currentMirror() {
     const value = $("[data-mirror] [name=mirror]", root).value;
     return value === "custom"
@@ -190,7 +198,7 @@ export function models(root, ctx) {
     try {
       view.switchInFlight = true;
       view.stateOverride = null;
-      renderDynamic(true);
+      update();
       const result = await applyEngineChoice({
         model,
         engine,
@@ -237,8 +245,8 @@ export function models(root, ctx) {
       health = ctx.desktop?.health || {},
       inference = health.inference || {},
       index = s.retrieval_index || {},
-      op = s.model_operation || {};
-    live.innerHTML = `<div class="grid">${panel(
+      op = liveModelOperation(view, ctx.status);
+    $("[data-inference-status]", live).innerHTML = panel(
       i18nMessages.me46b0272bd641090,
       pairs([
         [i18nMessages.m8168e2d3bbb44b32, phase(inference.phase)],
@@ -260,7 +268,13 @@ export function models(root, ctx) {
           index.running ? i18nMessages.m0a53c8de45a1ed4a : index.scheduled ? i18nMessages.m2fcab8f67ceeae3e : i18nMessages.mdae661d17c2dd8f0,
         ],
       ]),
-    )}${panel(i18nMessages.m281dccfa29c6c9fb, `<div class="panel-body"><p>${h(op.active ? `${phase(op.phase)} · ${op.item || ""}` : i18nMessages.m707bd8db0c65b214)}</p>${op.active ? `<div class="progress-label"><span>${h(bytes(op.done))} / ${h(bytes(op.total))}</span><span>${h(op.elapsed_secs !== undefined ? op.elapsed_secs + i18nMessages.m00fe8dda1fd70f64 : "")}</span></div><progress ${op.total ? `value="${h(op.done)}" max="${h(op.total)}"` : ""}></progress>` : ""}${index.error ? `<p class="form-error section-gap">${h(index.error)}</p>` : ""}${i18nMessages.m31f6729bd220085e}${h(raw({ inference, index, model: op }))}</pre></details>`)}</div>`;
+    );
+    $("[data-model-task-progress]", live).innerHTML = op.active ? modelOperationProgress(op) : `<p>${h(i18nMessages.m707bd8db0c65b214)}</p>`;
+    const error = $("[data-model-task-error]", live);
+    error.hidden = !index.error;
+    error.textContent = index.error || "";
+    $("details pre", live).textContent = raw({ inference, index, model: op });
+    syncProfilePolling(op);
     updateVariantsProgress();
     renderDynamic();
     renderEngineHint();
@@ -272,7 +286,7 @@ export function models(root, ctx) {
       else if (view.sawMissingBaseline && !view.baselinePrepared) {
         view.baselinePrepared = true;
         const mirror = currentMirror();
-        execute("model_prepare", {
+        runIndexedAction("model_prepare", {
           mirror: mirror && mirror !== "auto" ? mirror : "auto",
         })
           .then(() => notify(i18nMessages.m17ba200c46586b47))
@@ -355,31 +369,12 @@ export function models(root, ctx) {
         }
         // A switch left pending by a previous page session keeps being
         // watched so its outcome still reaches the notice.
-        if (
-          isProfileModel(view.modelID) &&
-          !view.switchInFlight &&
-          (switchState.state === "pending" || currentRuntimeSwitch()?.model === view.modelID)
-        ) {
+        if (!view.switchInFlight && switchState.state === "pending") {
           view.switchInFlight = true;
+          view.profileSwitchPending = true;
           view.switchingVariant = "";
           view.switchTicks = 0;
-          const observed = currentRuntimeSwitch();
-          const operationID = readProfileState(view.profileState).operation.id;
-          let receipt = observed?.receipt;
-          if (!receipt && operationID && ctx.desktop?.health?.capabilities?.includes("sse.operations.v1")) {
-            try {
-              await api("runtime-operation?id=" + encodeURIComponent(operationID));
-              receipt = { operation_id: operationID, stream: true };
-            } catch (error) { if (error.status !== 404) throw error; }
-          }
-          if (receipt) {
-            const done = observeRuntimeSwitch(receipt, { model: view.modelID });
-            done.then(() => refreshProfileState()).catch(error => {
-              view.switchInFlight = false;
-              if (root.isConnected) { notify(error.message, true); renderDynamic(true); }
-            });
-          } else if (!view.switchTimer)
-            view.switchTimer = setInterval(() => refreshProfileState(), 3000);
+          view.switchProgressKey = "";
           notify(i18nMessages.m6119b43db7c76cb2);
         }
       } else {
@@ -428,28 +423,55 @@ export function models(root, ctx) {
     if (!MODEL_OPTIONS.some(([id]) => id === next) || next === view.modelID) return;
     view.modelID = next;
     localStorage.setItem("respire-model", view.modelID);
-    view.profileState = null;
     const node = $("[data-variants]", root);
     if (node) node.innerHTML = i18nMessages.m6cb3cc3ccc61b15a;
     (async () => {
       try {
         await ctx.modelInventory.load(view.modelID);
         await refreshProfileState();
+        renderVariants();
       } catch (error) {
         notify(error.message, true);
         renderVariants();
       }
     })();
   });
-  async function refreshProfileState() {
-    if (!isProfileModel(view.modelID)) {
-      view.profileState = null;
-      renderVariants();
-      return;
+  function syncProfilePolling(op) {
+    const polling = view.profileSwitchPending || (!disposed && (view.switchInFlight || view.indexInFlight || op.active));
+    if (polling && !view.switchTimer) {
+      view.switchTimer = setInterval(() => refreshProfileState().catch(error => notify(error.message, true)), 3000);
+    } else if (!polling && view.switchTimer) {
+      clearInterval(view.switchTimer);
+      view.switchTimer = null;
     }
+  }
+  async function runIndexedAction(name, args) {
+    view.indexInFlight = true;
+    syncProfilePolling(liveModelOperation(view, ctx.status));
+    try {
+      return await execute(name, args);
+    } finally {
+      view.indexInFlight = false;
+      await refreshProfileState();
+    }
+  }
+  async function refreshProfileState() {
+    if (profileRefreshing) return;
+    profileRefreshing = true;
     const scope = activeModelScope(ctx.desktop?.health);
-    view.profileState = await fetchProfileState();
-    const { active, activeKnown } = readProfileState(view.profileState);
+    const snapshot = ctx.status?.summary?.model_operation;
+    try {
+      const state = await fetchProfileState();
+      if (state && scope === activeModelScope(ctx.desktop?.health)) {
+        view.profileState = state;
+        view.runtimeProgress = readProfileState(state).operation;
+        if (typeof view.runtimeProgress.active === "boolean") view.profileStatus = snapshot;
+      }
+    } finally {
+      profileRefreshing = false;
+    }
+    if (scope !== activeModelScope(ctx.desktop?.health)) return;
+    const { active, activeKnown, switchState, operation } = readProfileState(view.profileState);
     acceptRuntimeActive({ active, activeKnown }, scope);
     if (active?.model === view.modelID) {
       view.engineState = {
@@ -457,24 +479,19 @@ export function models(root, ctx) {
         model: active.variant || graniteVariant(active.model) || view.switchingVariant || "quantized",
       };
     }
-    if (root.isConnected) {
-      renderVariants();
-      renderDynamic();
-    }
-    if (view.switchInFlight) {
+    if (view.profileSwitchPending) {
       const verdict = profileStateSettled(view.profileState);
-      view.switchTicks += 1;
-      // 3s × 600 = 30 min: never poll forever; the runtime itself abandons a
-      // switch after 30 minutes.
-      const expired = view.switchTicks > 600;
+      // Allow 30 minutes without progress, matching the Runtime's idle timeout.
+      const { key, ticks, expired } = nextSwitchStallState(view.switchProgressKey, view.switchTicks, operation);
+      view.switchProgressKey = key;
+      view.switchTicks = ticks;
       if (verdict.settled || expired) {
-        const { switchState } = readProfileState(view.profileState);
         view.switchInFlight = false;
+        view.profileSwitchPending = false;
         view.switchingVariant = "";
-        clearInterval(view.switchTimer);
-        view.switchTimer = null;
         if (!verdict.failed && !expired) view.lastVerifiedAt = new Date();
         view.switchTicks = 0;
+        view.switchProgressKey = "";
         notify(
           expired
             ? i18nMessages.m1fdbb18d383794e2
@@ -484,12 +501,12 @@ export function models(root, ctx) {
           expired || verdict.failed,
         );
         if (root.isConnected) {
-          renderVariants();
-          renderDynamic(true);
           await ctx.refresh();
         }
       }
     }
+    if (!disposed) update();
+    else syncProfilePolling({});
   }
   async function refreshM3Inventory() {
     if (!root.isConnected || view.modelID !== "m3") return true;
@@ -511,8 +528,9 @@ export function models(root, ctx) {
     handleModeSelect,
     handlePrimaryAction,
     refreshProfileState,
+    runIndexedAction,
+    update,
     renderVariants,
-    renderDynamic,
     ctx,
     currentMirror,
     load,
@@ -525,10 +543,8 @@ export function models(root, ctx) {
   if (ctx.desktop?.connected) load();
   return {
     dispose() {
-      // An in-flight switch keeps polling (bounded by switchTicks): the page
-      // is gone but the outcome must still reach the global notice instead of
-      // failing silently in the background. switchInFlight stays set so the
-      // settle branch in refreshProfileState can fire.
+      disposed = true;
+      syncProfilePolling({});
       dispose();
     },
     update() {

@@ -187,14 +187,18 @@ mod model_menu_tests {
             assert!(picker
                 .iter()
                 .any(|line| line.to_string().contains("hf-mirror.com")));
-            app.live.model_progress = serde_json::json!({"id":"fixture-task","active":true,"phase":"download","item":"model_quantized.onnx","done":25,"total":100});
+            app.live.model_progress = serde_json::json!({"id":"fixture-task","active":true,"phase":"switch-index","item":"granite","done":25,"total":100,"elapsed":7});
             let rows = model_body(&app)
                 .iter()
                 .map(ToString::to_string)
                 .collect::<Vec<_>>()
                 .join("\n");
             assert!(rows.contains("25.0%"));
-            assert!(rows.contains("model_quantized.onnx"));
+            assert!(rows.contains("(25/100) granite 7"));
+            assert!(rows.contains(&t(
+                "\u{9009}\u{4e2d}\u{201c}\u{53d6}\u{6d88}\u{5f53}\u{524d}\u{6a21}\u{578b}\u{4efb}\u{52a1}\u{201d}\u{540e}\u{6309}\u{56de}\u{8f66}",
+                "Select ‘Cancel current model task’ and press Enter",
+            )));
             app.live.inference = serde_json::json!({"active":true,"queued":3,"phase":"loading"});
             let busy_rows = model_body(&app)
                 .iter()
@@ -218,6 +222,11 @@ mod model_menu_tests {
             assert!(
                 matches!(&app.overlay, Overlay::Confirm { kind: ConfirmKind::CancelModel(id), .. } if id == "fixture-task")
             );
+            app.overlay = Overlay::None;
+            app.live.model_progress["cancellable"] = false.into();
+            model_key(&mut app, KeyCode::Enter);
+            assert!(matches!(app.overlay, Overlay::None));
+            app.live.model_progress["cancellable"] = true.into();
             app.cursor += 1;
             model_key(&mut app, KeyCode::Enter);
             assert!(
@@ -246,5 +255,20 @@ mod model_menu_tests {
             None => std::env::remove_var("RSRS_DATA_DIR"),
         }
         result
+    }
+
+    #[test]
+    fn active_index_cancellation_sends_one_request_then_observes_exit() {
+        let mut calls = Vec::new();
+        let result = cancel_model_with("fixture-index", |id, cancel| {
+            calls.push((id.to_owned(), cancel));
+            Ok(if cancel {
+                serde_json::json!({"id":id,"phase":"switch-index","active":true,"cancelled":true})
+            } else {
+                serde_json::json!({"active":false})
+            })
+        });
+        assert_eq!(result, Ok(()));
+        assert_eq!(calls, [("fixture-index".to_owned(), true), ("fixture-index".to_owned(), false)]);
     }
 }

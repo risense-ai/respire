@@ -118,6 +118,48 @@ func TestRuntimeSDKModelHandlersAndCancellation(t *testing.T) {
 	}
 }
 
+func TestModelCancelRoutesToRuntimeSwitchOrRPCWorker(t *testing.T) {
+	for _, target := range []string{"v1-switch", "rpc-switch"} {
+		t.Run(target, func(t *testing.T) {
+			const id = "desktop-20000000-0000-4000-8000-000000000001"
+			manager := v1TestManager(t, []string{"openapi.v1", "sse.operations.v1"}, func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.URL.Path == "/v1/operations/v1-switch" && target == "v1-switch" && r.Method == http.MethodGet:
+					io.WriteString(w, `{"operation_id":"v1-switch","kind":"model_switch","state":"running"}`)
+				case r.URL.Path == "/v1/operations/v1-switch" && target == "v1-switch" && r.Method == http.MethodDelete:
+					w.WriteHeader(http.StatusAccepted)
+					io.WriteString(w, `{"operation_id":"v1-switch","kind":"model_switch","state":"cancelled"}`)
+				case r.URL.Path == "/v1/operations/rpc-switch" && target == "rpc-switch" && r.Method == http.MethodGet:
+					http.NotFound(w, r)
+				case r.URL.Path == "/api/rpc" && target == "rpc-switch" && r.Method == http.MethodPost:
+					var request struct {
+						Method string        `json:"method"`
+						Args   []string      `json:"args"`
+						Scope  *runtimeScope `json:"scope"`
+					}
+					if err := json.NewDecoder(r.Body).Decode(&request); err != nil || request.Method != "model.control" || strings.Join(request.Args, ",") != "rpc-switch,true" {
+						t.Errorf("unexpected RPC cancellation request: %+v, %v", request, err)
+						http.Error(w, "invalid cancellation request", http.StatusBadRequest)
+						return
+					}
+					json.NewEncoder(w).Encode(rpcResponse{V: 1, ID: id, OK: true, Scope: request.Scope, OperationID: id,
+						Envelope: json.RawMessage(`{"status":"ok","summary":{"id":"rpc-switch","active":true,"cancelled":true}}`)})
+				default:
+					t.Errorf("unexpected cancellation request: %s %s", r.Method, r.URL.Path)
+					http.NotFound(w, r)
+				}
+			})
+			manager.jobs = map[string]*Operation{id: {ID: id, Name: "model_cancel", State: "running", write: true}}
+			spec, _ := operationSpec("model_cancel")
+			manager.runOperation(spec, []string{target, "true"}, "", id, "model_cancel", json.RawMessage(fmt.Sprintf(`{"id":%q}`, target)))
+			job, err := manager.Operation(id)
+			if err != nil || job.State != "done" || job.RuntimeV1 != (target == "v1-switch") || !strings.Contains(string(job.Envelope), `"cancelled"`) {
+				t.Fatalf("model cancellation job = %+v, error = %v", job, err)
+			}
+		})
+	}
+}
+
 func TestRuntimeSDKSpacesSyncAndBackupHandlers(t *testing.T) {
 	var requests []string
 	manager := v1TestManager(t, []string{"openapi.v1", "backups.v1", "sse.operations.v1"}, func(w http.ResponseWriter, r *http.Request) {

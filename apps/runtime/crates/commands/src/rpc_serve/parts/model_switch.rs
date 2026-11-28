@@ -10,7 +10,16 @@ pub(crate) struct ModelSwitchReservation {
     _admission: AdmissionGuard,
 }
 
-static DETACHED_MODEL_READS: AtomicBool = AtomicBool::new(false);
+static SHADOW_SERVING: AtomicBool = AtomicBool::new(false);
+static INCUMBENT_READS: AtomicUsize = AtomicUsize::new(0);
+
+mod shadow_switch {
+    use super::*;
+    include!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/rpc_serve/parts/shadow_switch.rs"));
+}
+pub(crate) use shadow_switch::{run_shadow_switch, shadow_target, switch_store_fence};
+#[cfg(test)]
+pub(crate) use shadow_switch::{check_shadow_admission_fixture, legacy_model_fixture, pause_after_checkpoint};
 
 pub(crate) fn model_switch_running() -> bool {
     PROFILE_SWITCH_RUNNING.load(Ordering::Acquire)
@@ -18,7 +27,7 @@ pub(crate) fn model_switch_running() -> bool {
 
 impl Drop for ModelSwitchReservation {
     fn drop(&mut self) {
-        DETACHED_MODEL_READS.store(false, Ordering::Release);
+        SHADOW_SERVING.store(false, Ordering::Release);
         PROFILE_SWITCH_RUNNING.store(false, Ordering::Release);
     }
 }
@@ -26,22 +35,34 @@ impl Drop for ModelSwitchReservation {
 impl ModelSwitchReservation {
     /// The serving dispatcher already holds the foreground store fence.
     pub(crate) fn reserve(task_id: String) -> Result<Option<Self>> {
+        Self::reserve_inner(task_id, None)
+    }
+
+    pub(crate) fn reserve_switch(task_id: String, target: &str) -> Result<Option<Self>> {
+        Self::reserve_inner(task_id, Some(target))
+    }
+
+    fn reserve_inner(task_id: String, target: Option<&str>) -> Result<Option<Self>> {
         let admission = begin_admission(task_id.clone(), "model_switch")
             .context("runtime is draining and rejected new business")?;
         let _gate = PROFILE_ADMISSION
             .lock()
             .map_err(|_| anyhow::anyhow!("model admission lock poisoned"))?;
         if model_switch_running()
-            || RUNNING.load(Ordering::Acquire) != 0
-            || CLASSIFY_RUNNING.load(Ordering::Acquire)
-            || WRITE_RUNNING.load(Ordering::Acquire)
-            || sync_running()
+            || (target.is_none()
+                && (incumbent_reads_running()
+                    || CLASSIFY_RUNNING.load(Ordering::Acquire)
+                    || WRITE_RUNNING.load(Ordering::Acquire)
+                    || sync_running()))
         {
             return Ok(None);
         }
-        let Some(operation) = crate::model_progress::Operation::try_reserve_task(task_id)? else {
+        let Some(operation) = crate::model_progress::Operation::try_reserve_task(task_id.clone())? else {
             return Ok(None);
         };
+        if let Some(target) = target {
+            record_switch_pending(&task_id, target);
+        }
         PROFILE_SWITCH_RUNNING.store(true, Ordering::Release);
         Ok(Some(Self {
             operation,
@@ -49,12 +70,50 @@ impl ModelSwitchReservation {
         }))
     }
 
-    pub(crate) fn keep_incumbent_recall_live(&self, active: bool) {
-        DETACHED_MODEL_READS.store(active, Ordering::Release);
-    }
-
     pub(crate) fn enter(&self) {
         self.operation.enter_thread();
+    }
+}
+
+fn incumbent_reads_running() -> bool {
+    INCUMBENT_READS.load(Ordering::Acquire) != 0
+}
+
+pub(crate) fn drain_model_switch_requests(check: &impl Fn() -> Result<()>) -> Result<()> {
+    let waiting = Instant::now();
+    while incumbent_reads_running() || CLASSIFY_RUNNING.load(Ordering::Acquire) || sync_running() {
+        check()?;
+        anyhow::ensure!(
+            waiting.elapsed() < Duration::from_secs(1800),
+            "model switch timed out draining in-flight requests"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    Ok(())
+}
+
+struct IncumbentRead;
+
+#[cfg(test)]
+pub(crate) fn incumbent_read_fixture() -> impl Drop {
+    IncumbentRead::start()
+}
+
+#[cfg(test)]
+pub(crate) fn shadow_reads_paused_fixture() -> bool {
+    model_switch_running() && !SHADOW_SERVING.load(Ordering::Acquire)
+}
+
+impl IncumbentRead {
+    fn start() -> Self {
+        INCUMBENT_READS.fetch_add(1, Ordering::AcqRel);
+        Self
+    }
+}
+
+impl Drop for IncumbentRead {
+    fn drop(&mut self) {
+        INCUMBENT_READS.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -169,7 +228,7 @@ pub(crate) fn run_model_switch(
     result
 }
 
-pub(crate) fn record_switch_result(task_id: &str, result: &Result<Value>) -> Value {
+pub(crate) fn record_switch_result(task_id: &str, result: Result<&Value, &anyhow::Error>) -> Value {
     let state = match result {
         Ok(result) => {
             json!({"id":task_id,"state":"ready","active_changed":true,"semantic":"ready","result":result})
