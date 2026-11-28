@@ -73,10 +73,6 @@ fn model_cache_path(model: &str) -> Result<std::path::PathBuf> {
     let generation = core_sdk::generation_key(model)?;
     candidate_cache_path(&generation)
 }
-/// Existing target diary state stays with the established model switch path.
-pub fn has_candidate_diary_cache(generation: &str) -> Result<bool> {
-    Ok(candidate_cache_path(generation)?.try_exists()?)
-}
 fn model_cache(model: &str, readonly: bool) -> Result<Option<Connection>> {
     cache_at(&model_cache_path(model)?, readonly)
 }

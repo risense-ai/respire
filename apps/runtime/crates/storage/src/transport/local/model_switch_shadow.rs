@@ -1,12 +1,54 @@
 use super::catalog::MEMORY_SELECT;
-use super::model_switch_source::{
-    pending_target, pending_task_id, validate_inline_artifact, INSERT_INLINE_ARTIFACT,
-};
 use super::retrieval::write_active_selection;
-use super::{LocalStore, ModelSwitchArtifact, StoredMemory};
-use anyhow::{ensure, Result};
+use super::{LocalStore, StoredMemory};
+use anyhow::{ensure, Context, Result};
 use respire_core_sdk::profiles::Selection;
-use rusqlite::{params, Transaction, TransactionBehavior};
+use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
+
+pub struct ModelSwitchArtifact<'a> {
+    pub id: &'a str,
+    pub ciphertext: &'a str,
+    pub opaque: &'a [u8],
+}
+
+const INSERT_INLINE_ARTIFACT: &str =
+    "INSERT OR REPLACE INTO core_artifacts(memory_id,model,source,artifact)
+     SELECT id,?2,ciphertext,?4 FROM memories WHERE id=?1 AND ciphertext=?3 AND deleted=0";
+
+fn validate_inline_artifact(opaque: &[u8]) -> Result<()> {
+    ensure!(
+        !opaque.is_empty() && !opaque.starts_with(b"rsi1:"),
+        "expected inline opaque candidate artifact"
+    );
+    Ok(())
+}
+
+fn meta(connection: &Connection, key: &str) -> Result<Option<String>> {
+    Ok(connection
+        .query_row("SELECT value FROM meta WHERE key=?1", [key], |row| row.get(0))
+        .optional()?)
+}
+
+fn pending_task_id(connection: &Connection) -> Result<String> {
+    let raw = meta(connection, "embedding_pending_task_v1")?
+        .context("model build admission is unavailable")?;
+    let task: serde_json::Value = serde_json::from_str(&raw)?;
+    let raw = task["id"]
+        .as_str()
+        .context("model build admission identity is unavailable")?;
+    Ok(raw.to_owned())
+}
+
+fn pending_target(connection: &Connection) -> Result<String> {
+    let wire = meta(connection, "embedding_pending_selection_v1")?
+        .context("model build target is unavailable")?;
+    let target: Selection = serde_json::from_str(&wire)?;
+    ensure!(
+        !target.generation.is_empty() && serde_json::to_string(&target)? == wire,
+        "model build target is not canonical"
+    );
+    Ok(wire)
+}
 
 impl LocalStore {
     pub fn pending_candidate_counts(&self, generation: &str) -> Result<(usize, usize)> {
@@ -67,6 +109,16 @@ impl LocalStore {
         write_active_selection(&tx, target, &wire)?;
         tx.commit()?;
         Ok(())
+    }
+
+    fn model_switch_foreground_generation(&self) -> Result<String> {
+        if let Some(selection) = self
+            .active_selection()?
+            .filter(|selection| !selection.generation.is_empty())
+        {
+            return Ok(selection.generation);
+        }
+        self.active_generation_key()
     }
 
     fn check_shadow_admission(

@@ -353,24 +353,10 @@ impl LocalStore {
 
     /// Only the library transaction publishes the complete immutable selection.
     pub fn activate_selection(&self, selection: &respire_core_sdk::profiles::Selection, source_revision: &str) -> Result<()> {
-        self.publish_selection(selection, source_revision, None)
-    }
-
-    pub(super) fn publish_selection(
-        &self, selection: &respire_core_sdk::profiles::Selection, source_revision: &str,
-        source: Option<(&super::ModelSwitchSourceStamp, &[super::ModelSwitchArtifact<'_>])>,
-    ) -> Result<()> {
         anyhow::ensure!(!selection.generation.is_empty(), "candidate generation is missing");
         let tx = rusqlite::Transaction::new_unchecked(&self.connection, rusqlite::TransactionBehavior::Immediate)?;
-        if let Some((source, _)) = source {
-            source.check(&tx, selection)?;
-        }
         let revision: String = tx.query_row("SELECT value FROM meta WHERE key='memory_revision_v1'", [], |r| r.get(0))?;
         anyhow::ensure!(revision == source_revision, "library sources changed before model activation; resume the switch");
-        if let Some((_, prepared)) = source {
-            anyhow::ensure!(self.model_switch_foreground_generation()? != selection.generation, "model promotion cannot rewrite the foreground");
-            super::model_switch_source::promote_inline(&tx, &selection.generation, prepared)?;
-        }
         let missing: i64 = tx.query_row("SELECT COUNT(*) FROM memories m WHERE deleted=0 AND NOT EXISTS (SELECT 1 FROM core_artifacts a WHERE a.memory_id=m.id AND a.model=?1 AND a.source=m.ciphertext)",[&selection.generation],|row|row.get(0))?;
         anyhow::ensure!(missing == 0,"candidate main index is incomplete");
         write_active_selection(&tx, selection, &serde_json::to_string(selection)?)?;

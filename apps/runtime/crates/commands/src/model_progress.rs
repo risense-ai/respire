@@ -228,7 +228,13 @@ pub(crate) fn switch_checkpoint(
         .ok_or_else(|| anyhow!("model operation no longer admitted"))?;
     check_progress(progress)?;
     if let Some((stage, item, done, total)) = phase {
-        progress.updated = Instant::now();
+        if progress.phase != stage
+            || progress.item != item
+            || progress.done != done
+            || progress.total != total
+        {
+            progress.updated = Instant::now();
+        }
         progress.phase = stage.to_owned();
         progress.item = item.to_owned();
         progress.done = done;
@@ -237,6 +243,7 @@ pub(crate) fn switch_checkpoint(
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) fn in_model_operation<T>(task_id: &str, action: impl FnOnce() -> T) -> T {
     struct Restore(bool, Option<String>);
     impl Drop for Restore {
@@ -332,6 +339,37 @@ pub fn control(task_id: &str, cancel: bool) -> Result<Value> {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn switch_checkpoint_refreshes_idle_time_only_when_progress_changes() -> Result<()> {
+        let _serial = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let task_id = "synthetic-switch-progress";
+        let _operation = Operation::reserve_task(task_id.to_owned())?;
+        let initial = ("switch-index", "m3", 10, Some(20));
+        switch_checkpoint(task_id, Some(initial))?;
+
+        for (checkpoint, changes) in [
+            (initial, false),
+            (initial, false),
+            (("switch-index", "m3", 11, Some(20)), true),
+            (("switch-index", "m3", 11, Some(21)), true),
+            (("switch-index", "granite", 11, Some(21)), true),
+            (("switch-diary", "granite", 11, Some(21)), true),
+        ] {
+            let before = Instant::now() - Duration::from_secs(1);
+            CURRENT.lock().unwrap().as_mut().unwrap().updated = before;
+            switch_checkpoint(task_id, Some(checkpoint))?;
+            let after = CURRENT.lock().unwrap().as_ref().unwrap().updated;
+            if changes {
+                assert!(after > before, "{checkpoint:?}");
+            } else {
+                assert_eq!(after, before, "{checkpoint:?}");
+            }
+        }
+        Ok(())
+    }
 
     #[test]
     fn loading_rejects_cancel_without_acknowledgement_at_validation_and_native_phases() -> Result<()>

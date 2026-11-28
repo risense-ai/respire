@@ -189,6 +189,13 @@ test("fresh switch profile renders indexed items and elapsed time over a stale s
   assert.deepEqual(liveModelOperation(view, status), {});
 });
 
+test("overview uses the shared progress formatter for active model operations", () => {
+  const source = readFrontend("pages/overview.js");
+  assert.match(source, /import \{ modelOperationProgress \} from "\.\/models-view\.js"/);
+  assert.match(source, /op\.active \? modelOperationProgress\(op\) : ""/);
+  assert.doesNotMatch(source, /bytes\(op\.done\)/);
+});
+
 test("the three-second profile poll publishes fresh counts and stops at idle", async () => {
   const controls = modelControls(fixture());
   const { readProfileState } = loadFunctions("pages/model-kit.js", {}, "readProfileState");

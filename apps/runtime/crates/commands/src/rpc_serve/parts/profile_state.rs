@@ -122,8 +122,8 @@ fn start_profile_switch_target(
             if shadow_target(store, &mut target)? {
                 return run_shadow_switch(store, &task_id, &target, check, |row| {
                     validate_job_scope(&scope).map_err(anyhow::Error::msg)?;
-                    with_locked_library(|_, _, _, _, _, library| library.open_model_switch_row(row))
-                        .context("verified model switch authority unavailable")?
+                    open_locked_model_switch_row(row)?
+                        .context("verified model switch authority unavailable")
                 }, |_, _, _| Ok(()), commit);
             }
             drain_model_switch_requests(&check)?;
