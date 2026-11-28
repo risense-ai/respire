@@ -24,19 +24,25 @@ fn requires_scope(method: &str) -> bool {
 }
 
 fn model_switch_blocks(request: &RpcRequest) -> bool {
-    request.method == "cli.exec" && model_switch_blocks_args(&request.args)
+    match request.method.as_str() {
+        "cli.exec" => model_switch_blocks_args(&request.args),
+        "model.switch" | "model.resume" | "model.configure" | "model.prepare" | "index.prepare" => model_switch_running(),
+        _ => false,
+    }
 }
 
 fn model_switch_blocks_args(args: &[String]) -> bool {
     PROFILE_SWITCH_RUNNING.load(Ordering::Acquire) && !is_status(args)
-        && !(DETACHED_MODEL_READS.load(Ordering::Acquire)
-            && command_name(args) == Some("recall") && !is_exclusive(args))
+        && !(SHADOW_SERVING.load(Ordering::Acquire)
+            && matches!(command_name(args), Some("recall" | "list" | "show" | "diary-search"
+                | "diary-fragment" | "memory-revision" | "remember" | "update" | "delete"
+                | "classify" | "sync")))
 }
 
 fn model_switch_busy() -> (String, String) {
     (
         "model_switch_busy".to_owned(),
-        "model switch in progress; semantic queries and writes are paused; inspect model.progress".to_owned(),
+        "command unavailable during model switch; inspect model.progress".to_owned(),
     )
 }
 
@@ -63,7 +69,8 @@ fn validate_request_scope(request: &RpcRequest) -> Result<(), (String, String)> 
     }
     let _scope_held = read_request_identity(request)?;
     let gate = shared_exclusive();
-    let skips_gate = matches!(request.method.as_str(), "runtime.result" | "model.control");
+    let skips_gate = matches!(request.method.as_str(), "runtime.result" | "model.control")
+        || (request.method == "cli.exec" && is_status(&request.args));
     let held = if skips_gate {
         None
     } else {
@@ -150,7 +157,7 @@ fn validate_job_scope(scope: &RuntimeRequestScope) -> Result<(), String> {
 
 fn capture_scoped(scope: &RuntimeRequestScope, args: Vec<String>) -> CommandResult {
     let _scope_held = SCOPE_EXECUTION.read().map_err(|_| "scope_mismatch: identity fence poisoned".to_owned())?;
-    {
+    if !is_status(&args) {
         let gate = shared_exclusive();
         let _held = gate.acquire(true);
         validate_job_scope(scope)?;
@@ -310,7 +317,8 @@ fn admit(
     let _scope_held = read_request_identity(request)?;
     let gate = shared_exclusive();
     // Legacy progress must observe the command while it holds the execution gate.
-    let skips_gate = matches!(request.method.as_str(), "model.control" | "cli.progress");
+    let skips_gate = matches!(request.method.as_str(), "model.control" | "cli.progress")
+        || (request.method == "cli.exec" && is_status(&request.args));
     let held = if skips_gate {
         None
     } else {

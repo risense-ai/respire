@@ -15,6 +15,12 @@ pub fn model_task_text(task: &Value) -> String {
             "{:.1}% ({done}/{total})",
             done as f64 / total as f64 * 100.0
         )
+    } else if matches!(
+        phase,
+        "queued" | "switch-verify" | "switch-load" | "switch-index" | "switch-diary"
+            | "committed" | "index" | "index-load" | "prepare" | "load"
+    ) {
+        done.to_string()
     } else {
         if zh {
             "\u{7b49}\u{5f85}\u{8fdb}\u{5ea6}"
@@ -23,19 +29,31 @@ pub fn model_task_text(task: &Value) -> String {
         }
         .to_owned()
     };
-    format!(
-        "{} {} {}",
-        task_phase(phase),
-        progress,
-        task["item"].as_str().unwrap_or("")
-    )
-    .trim_end()
-    .to_owned()
+    let elapsed = task["elapsed"]
+        .as_u64()
+        .or_else(|| task["elapsed_secs"].as_u64());
+    let mut text = format!("{} {progress}", task_phase(phase));
+    if let Some(item) = task["item"].as_str().filter(|item| !item.is_empty()) {
+        text.push_str(&format!(" {item}"));
+    }
+    if let Some(elapsed) = elapsed {
+        text.push_str(&format!(" {elapsed}{}", if zh { " \u{79d2}" } else { "s" }));
+    }
+    text
 }
 
 fn task_phase(phase: &str) -> String {
     if crate::i18n::lang() != crate::i18n::Lang::Zh {
-        return phase.to_owned();
+        return match phase {
+            "queued" => "Queued",
+            "switch-verify" => "Verifying target model",
+            "switch-load" => "Loading target model",
+            "switch-index" => "Indexing memories",
+            "switch-diary" => "Indexing diaries",
+            "committed" => "Model switch committed",
+            other => other,
+        }
+        .to_owned();
     }
     match phase {
         "download" => "\u{4e0b}\u{8f7d}\u{4e2d}",
@@ -44,6 +62,12 @@ fn task_phase(phase: &str) -> String {
         "index-load" => "\u{52a0}\u{8f7d}\u{7d22}\u{5f15}\u{6a21}\u{578b}",
         "verify" => "\u{6821}\u{9a8c}\u{4e2d}",
         "index" => "\u{91cd}\u{5efa}\u{7d22}\u{5f15}",
+        "queued" => "\u{5df2}\u{6392}\u{961f}",
+        "switch-verify" => "\u{6821}\u{9a8c}\u{76ee}\u{6807}\u{6a21}\u{578b}",
+        "switch-load" => "\u{52a0}\u{8f7d}\u{76ee}\u{6807}\u{6a21}\u{578b}",
+        "switch-index" => "\u{91cd}\u{5efa}\u{8bb0}\u{5fc6}\u{7d22}\u{5f15}",
+        "switch-diary" => "\u{91cd}\u{5efa}\u{65e5}\u{8bb0}\u{7d22}\u{5f15}",
+        "committed" => "\u{6a21}\u{578b}\u{5207}\u{6362}\u{5df2}\u{63d0}\u{4ea4}",
         "load" => "\u{52a0}\u{8f7d}\u{6a21}\u{578b}",
         "running" => "\u{5904}\u{7406}\u{4e2d}",
         "scheduled" | "pending" => "\u{7b49}\u{5f85}\u{5904}\u{7406}",

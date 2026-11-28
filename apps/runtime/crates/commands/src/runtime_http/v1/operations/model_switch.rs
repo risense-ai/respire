@@ -62,16 +62,20 @@ pub(super) async fn enqueue(scope: RestScope, input: Request) -> V1Result<Respon
         })?;
         let job = state::registry().begin(ctx.scope.clone(), "model_switch")?;
         let task_id = job.id()?;
-        let reservation = ModelSwitchReservation::reserve(task_id.clone())
+        let reservation = ModelSwitchReservation::reserve_switch(task_id.clone(), &target.model)
             .map_err(|_| transport::unavailable())?
             .ok_or_else(busy)?;
         let receipt = transport::json_response(StatusCode::ACCEPTED, job.accepted()?)?;
-        owner_control::enqueue_model_switch(PendingSwitch {
+        let queued = owner_control::enqueue_model_switch(PendingSwitch {
             job,
-            task_id,
+            task_id: task_id.clone(),
             target,
             reservation,
-        })?;
+        });
+        if queued.is_err() {
+            rpc_serve::record_switch_result(&task_id, Err(&anyhow::anyhow!("model switch dispatcher unavailable")));
+        }
+        queued?;
         Ok(receipt)
     })
     .await
@@ -90,144 +94,6 @@ pub(in crate::runtime_http::v1) struct PendingSwitch {
     task_id: String,
     target: Selection,
     reservation: ModelSwitchReservation,
-}
-
-impl PendingSwitch {
-    pub(in crate::runtime_http::v1) fn run(
-        self,
-        store: Option<&LocalStore>,
-        ownership: &LibraryLock,
-    ) {
-        self.run_established(store, ownership, false)
-    }
-
-    fn run_established(
-        self,
-        store: Option<&LocalStore>,
-        ownership: &LibraryLock,
-        already_started: bool,
-    ) {
-        let Self {
-            job,
-            task_id,
-            mut target,
-            reservation,
-        } = self;
-        let result = rpc_serve::with_owner_store_fence(|| -> Result<Phase> {
-            let scope = job.scope();
-            let Some(vault) = with_authority(scope, |library| {
-                if already_started {
-                    if job
-                        .entry()
-                        .cancelled()
-                        .map_err(|_| anyhow::anyhow!("operation state unavailable"))?
-                    {
-                        return Ok(None);
-                    }
-                } else if !job
-                    .start()
-                    .map_err(|_| anyhow::anyhow!("operation state unavailable"))?
-                {
-                    return Ok(None);
-                }
-                Ok(Some(library.model_switch_vault()))
-            })?
-            else {
-                return Ok(Phase::Cancelled);
-            };
-            anyhow::ensure!(
-                ownership.protects(&scope.canonical_profile)?,
-                "profile lock unavailable"
-            );
-            let store = store.context("serving store unavailable")?;
-            let epoch = rpc_worker::sync_generation();
-            let entry = job.entry();
-            let check = || {
-                rpc_worker::check_sync_context(epoch)?;
-                check_mode()?;
-                anyhow::ensure!(
-                    scope.bearer_is_current(),
-                    "local bearer changed during model switch"
-                );
-                anyhow::ensure!(
-                    !entry
-                        .cancelled()
-                        .map_err(|_| anyhow::anyhow!("operation state unavailable"))?,
-                    model_progress::OperationStopped::Cancelled
-                );
-                Ok(())
-            };
-            let commit = |final_commit, action: &mut dyn FnMut() -> Result<()>| {
-                check()?;
-                with_authority(scope, |_| {
-                    job.model_commit(final_commit, || {
-                        if final_commit {
-                            model_progress::commit_final(action)
-                        } else {
-                            model_progress::commit(action)
-                        }
-                    })
-                })
-            };
-            reservation.enter();
-            let result = (|| {
-                commit(false, &mut || store.queue_selection(&target, &task_id))?;
-                rpc_serve::run_model_switch(
-                    store,
-                    &vault,
-                    &task_id,
-                    &mut target,
-                    check,
-                    |phase, done, total| {
-                        let percent = match phase {
-                            "switch-verify" => 5,
-                            "switch-load" => 15,
-                            "switch-index" => {
-                                20 + (done.saturating_mul(59) / total.unwrap_or(1).max(1)).min(59)
-                                    as u8
-                            }
-                            "switch-diary" => 80,
-                            _ => return Ok(()),
-                        };
-                        job.progress(percent)
-                            .map_err(|_| anyhow::anyhow!("operation state unavailable"))
-                    },
-                    commit,
-                )
-            })();
-            let profile = rpc_serve::record_switch_result(&task_id, &result);
-            let phase = match &result {
-                Ok(_) => Phase::Completed,
-                Err(_)
-                    if profile["semantic"] != "unverified"
-                        && (entry.cancelled().unwrap_or(false)
-                            || model_progress::control(&task_id, false)
-                                .is_ok_and(|p| p["cancelled"] == true)) =>
-                {
-                    Phase::Cancelled
-                }
-                Err(_) => Phase::Failed,
-            };
-            if let Err(error) = result {
-                eprintln!("command=model_switch status=fail mode=rest error={error:#}");
-            }
-            Ok(phase)
-        });
-        let result = match cleanup_pending(store, ownership, &job.scope().canonical_profile, &task_id) {
-            Ok(()) => result,
-            Err(error) => Some(Err(error.context("model switch pending cleanup failed"))),
-        };
-        drop(reservation);
-        match result {
-            Some(Ok(phase)) => job.finish(phase),
-            Some(Err(error)) => {
-                eprintln!("command=model_switch status=fail mode=rest error={error:#}");
-                job.finish(Phase::Failed);
-            }
-            None => job.finish(Phase::Failed),
-        }
-        rpc_worker::kick_index();
-    }
 }
 
 // Housekeeping uses the exact library lock and task identity, even after business

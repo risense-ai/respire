@@ -20,6 +20,7 @@ import {
   fetchProfileState,
   readProfileState,
 } from "./model-kit.js";
+import { modelOperationProgress } from "./models-view.js";
 
 import { stats } from "./stats.js";
 
@@ -177,7 +178,7 @@ export function overview(root, ctx) {
             op.active ? `${phase(op.phase)} · ${op.item || ""}` : i18nMessages.mac3f9d75f986bef6,
           ],
         ]) +
-          `<div class="model-progress">${note ? `<p class="hint">${h(note)}</p>` : ""}${op.active ? `<div class="progress-label"><span>${h(op.item || op.phase)}</span><span>${h(bytes(op.done))} / ${h(bytes(op.total))}</span></div><progress ${op.total ? `value="${h(op.done)}" max="${h(op.total)}"></progress>` : ""}` : ""}${i18nMessages.m5974f611004cf8f8}`,
+          `<div class="model-progress">${note ? `<p class="hint">${h(note)}</p>` : ""}${op.active ? modelOperationProgress(op) : ""}${i18nMessages.m5974f611004cf8f8}`,
       )}</div>`;
     runtimeStatus.innerHTML =
       pairs([

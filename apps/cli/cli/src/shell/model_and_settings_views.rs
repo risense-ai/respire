@@ -9,8 +9,17 @@ fn model_body(app: &App) -> Vec<Line<'static>> {
     };
     let bge = doctor_value(&app.live, "embedder");
     let engine = &app.live.engine;
-    let mut lines = vec![
-        line(format!("BGE-M3  {bge}")),
+    let mut lines = vec![line(format!("BGE-M3  {bge}"))];
+    if app.live.model_progress["active"] == true {
+        lines.push(line(crate::output::model_task_text(&app.live.model_progress)));
+        if cancellable_model_id(&app.live.model_progress).is_some() {
+            lines.push(line(t(
+                "\u{9009}\u{4e2d}\u{201c}\u{53d6}\u{6d88}\u{5f53}\u{524d}\u{6a21}\u{578b}\u{4efb}\u{52a1}\u{201d}\u{540e}\u{6309}\u{56de}\u{8f66}",
+                "Select ‘Cancel current model task’ and press Enter",
+            )));
+        }
+    }
+    lines.extend([
         choice(
             app.cursor == 0,
             t("\u{5b89}\u{88c5}\u{6216}\u{6821}\u{9a8c} BGE-M3 \u{91cf}\u{5316}\u{6a21}\u{578b}\u{ff08}543 MiB\u{ff09}", "Install or verify BGE-M3 quantized (543 MiB)"),
@@ -24,7 +33,7 @@ fn model_body(app: &App) -> Vec<Line<'static>> {
             "{}: {engine} / {}",
             t("\u{5f53}\u{524d}\u{63a8}\u{7406}\u{8bbe}\u{7f6e}", "Inference setting"), app.live.model_settings["model"].as_str().unwrap_or("unknown")
         )),
-    ];
+    ]);
     for (index, engine) in model_engines().iter().enumerate() {
         let label = match *engine {
             "npu" if cfg!(target_os = "macos") => "Apple CoreML (ANE / CPU)".to_owned(),
@@ -79,11 +88,6 @@ fn model_body(app: &App) -> Vec<Line<'static>> {
     )));
     if let Some(error) = app.live.index["error"].as_str() {
         lines.push(fail_line(error.to_owned()));
-    }
-    if app.live.model_progress["active"] == true {
-        lines.push(line(crate::output::model_task_text(
-            &app.live.model_progress,
-        )));
     }
     if let Some(status) = crate::progress::inference_progress_text(&app.live.inference) {
         if app.live.inference["host_recovery_required"] == true {

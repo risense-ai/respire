@@ -19,6 +19,12 @@ fn set_profile_state(value: Value) {
         *slot = value;
     }
 }
+pub(crate) fn record_switch_pending(task_id: &str, target: &str) -> Value {
+    let pending = json!({"id":task_id,"state":"pending","target":target,"active_changed":false,"semantic":"incumbent_ready"});
+    set_profile_state(pending.clone());
+    pending
+}
+
 fn start_profile_switch(
     choice: respire_app::embedding::Choice,
     request: &RpcRequest,
@@ -50,35 +56,30 @@ fn start_profile_switch_target(
         .lock()
         .map_err(|_| anyhow::anyhow!("model admission lock poisoned"))?;
     // The RPC still holds the write gate. Releasing it wakes waiters before rebuilding.
-    anyhow::ensure!(
-        PROFILE_SWITCH_RUNNING
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok(),
-        "another model switch is running"
-    );
-    let operation = match crate::model_progress::Operation::reserve_task(task_id.clone()) {
-        Ok(operation) => operation,
-        Err(error) => {
-            PROFILE_SWITCH_RUNNING.store(false, Ordering::Release);
-            return Err(error);
-        }
-    };
-    let queued = (|| -> Result<()> {
+    anyhow::ensure!(!model_switch_running(), "another model switch is running");
+    let operation = crate::model_progress::Operation::reserve_task(task_id.clone())?;
+    let pending = record_switch_pending(&task_id, &target.model);
+    PROFILE_SWITCH_RUNNING.store(true, Ordering::Release);
+    let queued = (|| -> Result<_> {
         check_sync_context(epoch)?;
         let store = respire_app::service::open_store()?;
         anyhow::ensure!(
             library == respire_app::service::data_dir(),
             "model switch library changed before acceptance"
         );
-        store.queue_selection(&target, &task_id)
+        let database = store.backup_target()?;
+        store.queue_selection(&target, &task_id)?;
+        Ok(database)
     })();
-    if let Err(error) = queued {
-        PROFILE_SWITCH_RUNNING.store(false, Ordering::Release);
-        return Err(error);
-    }
+    let database = match queued {
+        Ok(database) => database,
+        Err(error) => {
+            record_switch_result(&task_id, Err(&error));
+            PROFILE_SWITCH_RUNNING.store(false, Ordering::Release);
+            return Err(error);
+        }
+    };
     drop(admission);
-    let pending = json!({"id":task_id,"state":"pending","target":target.model,"active_changed":false,"semantic":"busy"});
-    set_profile_state(pending.clone());
     let mut response = status_response(request);
     response.operation_id = Some(task_id.clone());
     response.envelope = Some(ResultEnvelope::new(
@@ -88,50 +89,57 @@ fn start_profile_switch_target(
     remember(&identity.storage_id, &response);
     let reply = deferred_reply(request, identity, completion_admission);
     let method = request.method.clone();
+    let worker_task = task_id.clone();
+    let worker_database = database.clone();
     let spawn = std::thread::Builder::new().name("respire-model-switch".into()).stack_size(16 * 1024 * 1024).spawn(move || {
         struct Finish;
         impl Drop for Finish { fn drop(&mut self) { PROFILE_SWITCH_RUNNING.store(false,Ordering::Release); } }
         let _finish = Finish;
         operation.enter_thread();
         let _operation = operation;
+        let task_id = worker_task;
         let _scope = crate::model_progress::TaskScope::new(Some(task_id.clone()));
-        let result = (|| -> Result<Value> {
-            crate::model_progress::update("switch-verify",&target.model,0,None)?;
-            let waiting = Instant::now();
-            while RUNNING.load(Ordering::Acquire).saturating_sub(RUNNING_STATUS.load(Ordering::Acquire)) > 0 || CLASSIFY_RUNNING.load(Ordering::Acquire) || sync_running() {
+        let store = LocalStore::open_existing(&worker_database);
+        let result = store.as_ref().map_err(|error| anyhow::anyhow!("{error:#}")).and_then(|store| {
+            let check = || {
                 check_sync_context(epoch)?;
-                crate::model_progress::check()?;
-                anyhow::ensure!(waiting.elapsed() < Duration::from_secs(1800),"model switch timed out draining in-flight requests");
-                std::thread::sleep(Duration::from_millis(25));
+                anyhow::ensure!(library == respire_app::service::data_dir(), "model switch library changed");
+                anyhow::ensure!(!respire_app::service::service_paused(), "model switching is paused by service mode");
+                respire_app::service::ensure_writable()?;
+                crate::model_progress::check()
+            };
+            let commit = |final_commit, action: &mut dyn FnMut() -> Result<()>| {
+                check()?;
+                validate_job_scope(&scope).map_err(anyhow::Error::msg)?;
+                if final_commit {
+                    crate::model_progress::commit_final(action)
+                } else {
+                    crate::model_progress::commit(action)
+                }
+            };
+            check()?;
+            crate::model_progress::update("switch-verify",&target.model,0,None)?;
+            if shadow_target(store, &mut target)? {
+                return run_shadow_switch(store, &task_id, &target, check, |row| {
+                    validate_job_scope(&scope).map_err(anyhow::Error::msg)?;
+                    open_locked_model_switch_row(row)?
+                        .context("verified model switch authority unavailable")
+                }, |_, _, _| Ok(()), commit);
             }
-            let _identity = SCOPE_EXECUTION.read()
-                .map_err(|_| anyhow::anyhow!("scope_mismatch: identity fence poisoned"))?;
-            let gate = shared_exclusive();
-            let _write = gate.acquire(true);
-            validate_job_scope(&scope).map_err(anyhow::Error::msg)?;
-            check_sync_context(epoch)?;
-            anyhow::ensure!(library == respire_app::service::data_dir(), "model switch library changed");
-            let store = respire_app::service::open_store()?;
-            let vault = respire_app::auth::ModelSwitchVault::from_session(crate::engine::build_session()?);
-            run_model_switch(
-                &store, &vault, &task_id, &mut target,
-                || {
-                    check_sync_context(epoch)?;
-                    anyhow::ensure!(library == respire_app::service::data_dir(), "model switch library changed");
-                    Ok(())
-                },
-                |_, _, _| Ok(()),
-                |final_commit, action| {
-                    if final_commit {
-                        crate::model_progress::commit_final(action)
-                    } else {
-                        check_sync_context(epoch)?;
-                        crate::model_progress::commit(action)
-                    }
-                },
-            )
-        })();
-        let final_state = record_switch_result(&task_id, &result);
+            drain_model_switch_requests(&check)?;
+            switch_store_fence(&check, || {
+                validate_job_scope(&scope).map_err(anyhow::Error::msg)?;
+                let vault = ModelSwitchVault::from_session(crate::engine::build_session()?);
+                run_model_switch(store, &vault, &task_id, &mut target, check, |_, _, _| Ok(()), commit)
+            })
+        }).or_else(|error| {
+            let store = LocalStore::open_existing(&worker_database)
+                .with_context(|| format!("{error:#}; pending cleanup store unavailable"))?;
+            store.clear_pending_selection(Some(&task_id))
+                .with_context(|| format!("{error:#}; pending cleanup failed"))?;
+            Err(error)
+        });
+        let final_state = record_switch_result(&task_id, result.as_ref());
         let completion = result.map(|_| crate::output_state::Captured {
             exit: 0,
             envelope: ResultEnvelope::new(&method, OutputStatus::Ok, final_state, Vec::new()),
@@ -140,11 +148,13 @@ fn start_profile_switch_target(
         kick_index();
     });
     if let Err(error) = spawn {
+        let result = LocalStore::open_existing(&database)
+            .and_then(|store| store.clear_pending_selection(Some(&task_id)))
+            .with_context(|| format!("{error}; pending cleanup failed"))
+            .and(Err(error.into()));
+        record_switch_result(&task_id, result.as_ref());
         PROFILE_SWITCH_RUNNING.store(false, Ordering::Release);
-        set_profile_state(
-            json!({"state":"failed","active_changed":false,"error":error.to_string()}),
-        );
-        return Err(error.into());
+        return result.map(|_| response);
     }
     Ok(response)
 }
@@ -424,7 +434,10 @@ fn flight_loop() {
         let admission = PROFILE_ADMISSION
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        if PROFILE_SWITCH_RUNNING.load(Ordering::Acquire) {
+        if model_switch_running() && match manual.as_ref() {
+            Some(ManualSync::Legacy(job, _, _)) => model_switch_blocks_args(&job.args),
+            _ => !SHADOW_SERVING.load(Ordering::Acquire),
+        } {
             if let Some(job) = manual {
                 job.reject("model_switch_busy");
             } else {

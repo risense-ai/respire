@@ -15,6 +15,11 @@ mod tests;
 
 #[path = "diary_fragments.rs"]
 mod fragments;
+#[path = "diary_candidate.rs"]
+mod candidate;
+pub use candidate::{
+    candidate_cache_path, candidate_needs_rebuild, rebuild_candidate_with_progress,
+};
 const LIMIT_MAX: usize = 20;
 const BUDGET_MAX: usize = 12000;
 const CACHE_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS diary_sources(id TEXT PRIMARY KEY, source TEXT NOT NULL); CREATE TABLE IF NOT EXISTS diary_artifacts(id TEXT PRIMARY KEY, source_id TEXT NOT NULL, generation TEXT NOT NULL, artifact BLOB NOT NULL)";
@@ -66,11 +71,7 @@ fn cache_path() -> std::path::PathBuf {
 fn model_cache_path(model: &str) -> Result<std::path::PathBuf> {
     if core_sdk::profiles::current()?.is_none() { return Ok(cache_path()); }
     let generation = core_sdk::generation_key(model)?;
-    Ok(cache_path().with_file_name(format!("diary-fragments-{}.db", digest(&generation))))
-}
-/// Existing target diary state stays with the established model switch path.
-pub fn has_candidate_diary_cache(generation: &str) -> Result<bool> {
-    Ok(cache_path().with_file_name(format!("diary-fragments-{}.db", digest(generation))).try_exists()?)
+    candidate_cache_path(&generation)
 }
 fn model_cache(model: &str, readonly: bool) -> Result<Option<Connection>> {
     cache_at(&model_cache_path(model)?, readonly)
@@ -367,46 +368,51 @@ pub fn needs_rebuild(store: &LocalStore) -> Result<bool> {
         let Some(db) = model_cache(&model, true)? else {
             return Ok(!sources.is_empty());
         };
-        if sources.is_empty() {
-            return Ok(db.query_row("SELECT EXISTS(SELECT 1 FROM diary_sources) OR EXISTS(SELECT 1 FROM diary_artifacts)",[],|r|r.get::<_,bool>(0))?);
-        }
-        if db.query_row("SELECT count(*) FROM diary_sources", [], |r| {
-            r.get::<_, usize>(0)
-        })? != sources.len()
-        {
-            return Ok(true);
-        }
-        let generation = core_sdk::generation_key(&model)?;
-        let mut stmt = db.prepare("SELECT generation,artifact FROM diary_artifacts")?;
-        let artifacts = stmt
-            .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        if artifacts.iter().any(|(key, _)| key != &generation) {
-            return Ok(true);
-        }
-        if !artifacts.is_empty()
-            && !core_sdk::index_ready(&artifacts.into_iter().map(|(_, a)| a).collect::<Vec<_>>())?
-        {
-            return Ok(true);
-        }
-        for source in sources {
-            let old: Option<String> = db
-                .query_row(
-                    "SELECT source FROM diary_sources WHERE id=?1",
-                    [&source.id],
-                    |r| r.get(0),
-                )
-                .optional()?;
-            if old.as_deref() != Some(version(&source).as_str()) {
-                return Ok(true);
-            }
-        }
-        Ok(false)
+        cache_needs_rebuild(&db, &sources, || core_sdk::generation_key(&model))
     })();
     // Broken or incompatible derived state requests rebuild, never blocks original text.
     Ok(result.unwrap_or(true))
+}
+
+fn cache_needs_rebuild(
+    db: &Connection,
+    sources: &[StoredMemory],
+    generation: impl FnOnce() -> Result<String>,
+) -> Result<bool> {
+    let tx = db.unchecked_transaction()?;
+    let cached = {
+        let mut statement = tx.prepare("SELECT id,source FROM diary_sources")?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        rows.collect::<rusqlite::Result<HashMap<_, _>>>()?
+    };
+    if cached.len() != sources.len()
+        || sources.iter().any(|source| cached.get(&source.id) != Some(&version(source)))
+    {
+        return Ok(true);
+    }
+    let artifacts = {
+        let mut statement = tx.prepare("SELECT source_id,generation,artifact FROM diary_artifacts")?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Vec<u8>>(2)?,
+            ))
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    tx.commit()?;
+    if artifacts.is_empty() {
+        return Ok(false);
+    }
+    let generation = generation()?;
+    if artifacts.iter().any(|(id, key, _)| !cached.contains_key(id) || key != &generation) {
+        return Ok(true);
+    }
+    let artifacts: Vec<_> = artifacts.into_iter().map(|(_, _, artifact)| artifact).collect();
+    Ok(!core_sdk::index_ready(&artifacts)?)
 }
 
 include!("diary/generation.rs");
