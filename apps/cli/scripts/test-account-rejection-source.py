@@ -79,6 +79,17 @@ class RejectionSourceTests(unittest.TestCase):
         self.assertIn('working-directory: apps/cli', cli_job)
         self.assertIn('& ./scripts/test-account-rejection-contract.ps1', cli_job)
 
+    def test_workflow_runs_logout_completion_suite(self):
+        workflow = (ROOT.parents[1] / '.github/workflows/ci.yml').read_text(encoding='utf-8')
+        cli_job = workflow.split('\n  cli-ci:\n', 1)[1].split('\n  client2-ci:\n', 1)[0]
+        lifecycle_step = cli_job.split('- name: Test isolated Runtime resolution and lifecycle\n', 1)[1]
+        lifecycle_step = lifecycle_step.split('\n      - name: ', 1)[0]
+        suites = re.search(r'(?m)^\s*for suite in ([^;]+); do$', lifecycle_step).group(1).split()
+        logout_suite = 'autostart::identity_write_control::tests::'
+        logout_filter = 'autostart::supervise::launch_authorization::identity_write_control::tests::'
+        self.assertIn(logout_suite, suites)
+        self.assertRegex(lifecycle_step, rf'if \[\[ "\$suite" == {logout_suite} \]\]; then\n\s+suite="{logout_filter}"')
+
 
 if __name__ == '__main__':
     unittest.main()

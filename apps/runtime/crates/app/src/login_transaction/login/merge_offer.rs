@@ -50,9 +50,44 @@ mod tests {
         check("fixture-key")?;
         assert!(check("wrong-key").is_err());
         assert!(verify_login_merge_offer(&ownership, &identity, &uuid::Uuid::new_v4().to_string(), "fixture-key").is_err());
+        let wrong_identity = HostAuthIdentity::Bound {
+            account_id: digest(b"other account"),
+            session_sha256: digest(b"other session"),
+        };
+        assert!(verify_login_merge_offer(&ownership, &wrong_identity, &id, "fixture-key").is_err());
         assert_eq!(std::fs::read(recovery_path())?, before);
+
+        journal.operations[index].account.as_mut().context("account operation missing")?
+            .source_identity = wrong_identity;
+        save_journal(&mut journal)?;
+        let mismatched = std::fs::read(recovery_path())?;
+        assert!(check("fixture-key").is_err(), "accepted a mismatched receipt identity");
+        assert_eq!(std::fs::read(recovery_path())?, mismatched);
+
+        let mut journal: Journal = serde_json::from_slice(&before)?;
         require_inputs(&mut journal, index, &["super_password"])?;
+        let changed = std::fs::read(recovery_path())?;
         assert!(check("fixture-key").is_err());
+        assert_eq!(std::fs::read(recovery_path())?, changed);
+
+        let cases: [(&str, fn(&mut Recovery, &mut LoginProgress)); 5] = [
+            ("retired recovery", |active, _| active.retired = true),
+            ("vault migration", |_, login| login.migrate_vault = true),
+            ("existing merge decision", |_, login| login.merge_local = Some(false)),
+            ("missing merge target", |_, login| login.merge_target = None),
+            ("disabled merge offer", |_, login| login.offer_local_merge = false),
+        ];
+        for (case, mutate) in cases {
+            let mut journal: Journal = serde_json::from_slice(&before)?;
+            let active = journal.active.as_mut().context("active recovery missing")?;
+            let login = journal.operations[index].account.as_mut().and_then(|account| account.login.as_mut())
+                .context("login progress missing")?;
+            mutate(active, login);
+            save_journal(&mut journal)?;
+            let before_check = std::fs::read(recovery_path())?;
+            assert!(check("fixture-key").is_err(), "accepted {case}");
+            assert_eq!(std::fs::read(recovery_path())?, before_check, "changed recovery for {case}");
+        }
         Ok(())
     }
 }
