@@ -17,7 +17,7 @@ pub fn open_store_with_profile() -> Result<(PathBuf, LocalStore)> {
     let store = if RUNTIME_PROFILE.get().is_some() {
         LocalStore::open_existing(&db)
     } else {
-        LocalStore::open(&db)
+        open_or_initialize_models(&db)
     }?;
     respire_core_sdk::profiles::set_active(store.active_selection()?);
     crate::embedding::install_transport()?;
@@ -30,7 +30,7 @@ pub fn open_runtime_store(ownership:&crate::lock::LibraryLock)->Result<(LocalSto
     anyhow::ensure!(ownership.protects(&root)?,"runtime bootstrap requires matching library ownership");
     let expected=crate::snapshot::runtime_bootstrap_target(&root)?;
     respire_core_sdk::set_index_root(&root)?;
-    let store=LocalStore::open(&database_path(&root)?)?;
+    let store=open_or_initialize_models(&database_path(&root)?)?;
     store.clear_pending_selection(None)?;
     if let Some(id)=expected.as_ref() {
         store.verify_sqlite_integrity()?;
@@ -50,9 +50,18 @@ pub fn initialize_runtime_store() -> Result<LocalStore> {
     crate::snapshot::ensure_no_incomplete_restore(&root)?;
     check_runtime_profile(&root)?;
     respire_core_sdk::set_index_root(&root)?;
-    let store = LocalStore::open(&database_path(&root)?)?;
+    let store = open_or_initialize_models(&database_path(&root)?)?;
     store.clear_pending_selection(None)?;
     Ok(store)
+}
+
+fn open_or_initialize_models(path: &Path) -> Result<LocalStore> {
+    LocalStore::open_with_model_default(path, || {
+        if respire_core_sdk::onnx::has_legacy_settings()? { return Ok(None); }
+        let mut selection = crate::embedding::default_selection()?;
+        selection.generation = respire_core_sdk::profiles::generation_key_for_profile(&selection)?;
+        Ok(Some(selection))
+    })
 }
 
 /// New libraries use rsrs.db; opening an existing library never renames it.

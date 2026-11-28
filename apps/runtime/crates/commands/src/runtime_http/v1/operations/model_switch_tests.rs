@@ -110,6 +110,7 @@ pub(super) async fn check_routes(app: &Router) -> Result<()> {
         json_response(active, StatusCode::OK).await?["active_model_id"],
         MODEL
     );
+    check_model_probe()?;
 
     let (release, wait) = std::sync::mpsc::channel();
     let (locked, ready) = std::sync::mpsc::channel();
@@ -158,6 +159,44 @@ pub(super) async fn check_routes(app: &Router) -> Result<()> {
         MODEL
     );
     shadow::check_live_shadow(app).await?;
+    Ok(())
+}
+
+fn check_model_probe() -> Result<()> {
+    let store = LocalStore::open_existing(&service::database_path(&service::data_dir())?)?;
+    let incumbent = serde_json::to_value(store.active_selection()?)?;
+    let index = store.active_generation_key()?;
+    let revision = store.retrieval_revision()?;
+    let native_generation = respire_app::core_sdk::worker::generation();
+    let root = service::data_dir();
+    let mut input = json!({
+        "model":"granite-311m-r2", "variant":"standard", "engine":"gpu",
+        "weights_path":root.join("synthetic.onnx"), "tokenizer_path":root.join("fixture-tokenizer.json"),
+    });
+    let run = |input: &Value| -> Result<Value> {
+        let reply = crate::rpc_serve::legacy_model_fixture("model.probe", vec![input.to_string()])?;
+        anyhow::ensure!(reply.ok, "probe RPC failed: {reply:?}");
+        Ok(reply.envelope.context("probe result")?.summary)
+    };
+    let result = run(&input)?;
+    assert_eq!(result["ok"], true);
+    assert_eq!(result["engine"], "gpu");
+    assert_eq!(result["execution_provider"], "deterministic_test");
+    assert_eq!(result["dimensions"], 768);
+    assert!((result["vector_norm"].as_f64().context("vector norm")? - 1.0).abs() < 1e-6);
+    input["dimensions"] = json!(384);
+    let result = run(&input)?;
+    assert_eq!(result["ok"], false);
+    assert_eq!(result["error_code"], "invalid_embedding");
+    input["weights_path"] = json!(root.join("missing.onnx"));
+    let result = run(&input)?;
+    assert_eq!(result["error_code"], "asset_verification_failed");
+    assert!(result["diagnostic_log"].as_str().is_some_and(|log| log.contains("missing.onnx")));
+    assert_eq!(serde_json::to_value(store.active_selection()?)?, incumbent);
+    assert_eq!(store.active_generation_key()?, index);
+    assert_eq!(store.retrieval_revision()?, revision);
+    assert!(store.pending_selection()?.is_none());
+    assert_eq!(respire_app::core_sdk::worker::generation(), native_generation);
     Ok(())
 }
 

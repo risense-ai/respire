@@ -30,7 +30,10 @@ func v1TestManager(t *testing.T, capabilities []string, handler http.HandlerFunc
 			return
 		}
 		if r.URL.Path == "/api/health" {
-			io.WriteString(w, `{"server":"respire","v":1,"pid":42,"account_id":"account","instance_id":"instance","generation":7}`)
+			json.NewEncoder(w).Encode(HealthInfo{
+				Server: "respire", Protocol: 1, PID: 42, AccountID: "account",
+				InstanceID: "instance", Generation: 7, InstallationRoot: dataRoot,
+			})
 			return
 		}
 		if strings.HasPrefix(r.URL.Path, "/v1/") && r.Header.Get("Authorization") != "Bearer fixture-token" {

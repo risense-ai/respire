@@ -344,6 +344,9 @@
             let mut output = Buffer::empty();
             let config_value: Value = serde_json::from_slice(config)?;
             let device_options = cfg!(windows) && config_value["engine"].as_str() != Some("cpu");
+            #[cfg(target_os = "linux")]
+            let linux_accelerator = crate::profiles::current()?.filter(|selection| selection.uses_linux_accelerator())
+                .map(|selection| selection.engine);
             let mut options = SessionOptionsContext {
                 profiling: crate::env::var_os("RSRS_ORT_PROFILE").map(std::path::PathBuf::from),
                 device_options,
@@ -352,14 +355,30 @@
                 } else {
                     None
                 },
-                cache: crate::onnx::host_cache_dir(),
+                cache: (std::env::var_os("RESPIRE_PRIVATE_CORE_CANDIDATE").as_deref() != Some(std::ffi::OsStr::new("1")))
+                    .then(crate::onnx::host_cache_dir),
                 error: None,
+                #[cfg(target_os = "linux")]
+                linux_accelerator,
+                external_data_dir: if model.is_empty() { None } else {
+                    crate::profiles::current()?.and_then(|s| s.profile.companions.into_iter().next())
+                        .map(|resource| -> Result<_> {
+                            let directory = tempfile::tempdir()?;
+                            let copy = std::fs::File::create_new(directory.path().join("model.onnx_data"))?;
+                            crate::model_selection::copy_verified(&resource.path, resource.size, &resource.sha256, copy)?;
+                            Ok(directory)
+                        })
+                        .transpose()?
+                },
             };
             // Borrowed slices and host option callback remain alive through this call.
             let options_required = config_value["backend"].as_str() != Some("host_transport")
                 && (options.profiling.is_some()
                     || options.device_options
-                    || options.native.is_some());
+                    || options.native.is_some()
+                    || options.external_data_dir.is_some());
+            #[cfg(target_os = "linux")]
+            let options_required = options_required || linux_accelerator.is_some();
             #[cfg(test)]
             let options_required = options_required || test_option_failure_armed();
             let code = if options_required {

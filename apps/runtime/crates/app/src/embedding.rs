@@ -1,5 +1,5 @@
 //! Host model registry, resource preparation and remote embedding transport.
-use crate::core_sdk::onnx::{Engine, MODEL_VARIANTS};
+use crate::core_sdk::onnx::Engine;
 use crate::core_sdk::profiles::{BackendProfile, ModelProfile, Resource, Selection};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -10,10 +10,15 @@ use std::{
     path::{Path, PathBuf},
 };
 
+mod catalog;
+pub use catalog::{default_selection, variant_names, variants, DEFAULT_MODEL, DEFAULT_VARIANT};
+
 #[derive(Default, Serialize, Deserialize)]
 pub struct Registry {
     pub models: BTreeMap<String, ModelProfile>,
     pub backends: BTreeMap<String, BackendProfile>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    configured_variants: BTreeMap<String, BTreeMap<String, ModelProfile>>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -75,30 +80,7 @@ fn resource(
 }
 /// Pins come from the Runtime release, before any host-supplied overrides.
 pub fn builtin_registry() -> Result<Registry> {
-    let mut registry = Registry::default();
-    let root = crate::service::main_data_dir().join("models");
-    let m3_revision = "4de13258303883538bd53b696b452bf8099f0858";
-    let small_revision = "75c43b069aac4d136ba6bc1122f995fedcfd2781";
-    for (id, repo, revision, dims, directory, size, hash, tokenizer_size, tokenizer_hash, prefix) in [
-        ("m3", "Xenova/bge-m3", m3_revision, 1024, crate::core_sdk::bge::m3_model_dir()?, 569694530, "0826f8c1ab9edf1801db86c61919d4d108e8bfc0b809ec823ad366882ff0b77d", 17082821, "6710678b12670bc442b99edc952c4d996ae309a7020c1fa0096dd245c2faf790", ""),
-        ("bge-small-zh-v1.5", "Xenova/bge-small-zh-v1.5", small_revision, 512, root.join("bge-small-zh-v1.5"), 24010842, "15b717c382bcb518ba457b93ea6850ede7f4f1cd8937454aa06972366cd19bcc", 439125, "48cea5d44424912a6fd1ea647bf4fe50b55ab8b1e5879c3275f80e339e8fae26", "\u{4e3a}\u{8fd9}\u{4e2a}\u{53e5}\u{5b50}\u{751f}\u{6210}\u{8868}\u{793a}\u{4ee5}\u{7528}\u{4e8e}\u{68c0}\u{7d22}\u{76f8}\u{5173}\u{6587}\u{7ae0}\u{ff1a}"),
-    ] {
-        registry.models.insert(id.to_owned(), ModelProfile { id:id.to_owned(),
-            embedding:json!({"model_id":repo,"revision":revision,"dimensions":dims,"max_tokens":512,"pooling":"cls","normalize":true,"query_prefix":prefix,"document_prefix":"","pad_token_id":0,"pad_to_max_tokens":false}),
-            onnx:json!({"input_ids":"input_ids","attention_mask":"attention_mask","token_type_ids":"token_type_ids","output":"last_hidden_state"}),
-            weights:Some(resource(&directory,"onnx/model_quantized.onnx",size,hash,repo,revision)),
-            tokenizer:Some(resource(&directory,"tokenizer.json",tokenizer_size,tokenizer_hash,repo,revision)),
-        });
-    }
-    let mlx_revision = "a37eddded9a6a1273a87fb8b0da0d1cdbd98aeec";
-    let mlx_root = root.join("bge-m3-mlx");
-    registry.models.insert("m3-mlx".to_owned(), ModelProfile {
-        id: "m3-mlx".to_owned(),
-        embedding: json!({"model_id":"mlx-community/bge-m3-mlx-fp16","revision":mlx_revision,"dimensions":1024,"max_tokens":512,"pooling":"cls","normalize":true,"query_prefix":"","document_prefix":"","pad_token_id":0,"pad_to_max_tokens":false}),
-        onnx: Value::Null,
-        weights: Some(resource(&mlx_root,"model.safetensors",1_135_554_209,"e8028acb2e77e0010d35ef75832d823edb5851c95682deef2bde86a45bd4441d","mlx-community/bge-m3-mlx-fp16",mlx_revision)),
-        tokenizer: Some(resource(&mlx_root,"tokenizer.json",17_098_085,"5df1f55d60c9705a501ab9a75550728625740741fe4be308dac4806c16b7d51d","mlx-community/bge-m3-mlx-fp16",mlx_revision)),
-    });
+    let mut registry = Registry { models: catalog::models()?, ..Registry::default() };
     registry.backends.insert(
         "onnx".to_owned(),
         BackendProfile {
@@ -134,7 +116,9 @@ pub fn registry() -> Result<Registry> {
         Ok(bytes) => {
             let saved: Registry = serde_json::from_slice(&bytes)?;
             registry.models.extend(saved.models);
+            registry.models.remove(catalog::LEGACY_DISTILL);
             registry.backends.extend(saved.backends);
+            registry.configured_variants = saved.configured_variants;
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
         Err(error) => return Err(error.into()),
@@ -153,6 +137,11 @@ pub fn configure(configure: Configure) -> Result<Value> {
     let mut registry = registry()?;
     if let Some(model) = configure.model_profile {
         anyhow::ensure!(!model.id.trim().is_empty(), "model profile ID is empty");
+        anyhow::ensure!(model.id != catalog::LEGACY_DISTILL, "legacy model is read-only");
+        if let Some(variant) = pinned_variant(&model) {
+            registry.configured_variants.entry(model.id.clone()).or_default()
+                .insert(variant.to_owned(), model.clone());
+        }
         registry.models.insert(model.id.clone(), model);
     }
     if let Some(backend) = configure.backend_profile {
@@ -266,7 +255,7 @@ mod managed_tests {
         fs::create_dir(&alice)?;
         fs::create_dir(&bob)?;
         let mut catalog = builtin_registry()?;
-        let mut choice = catalog.models.remove("bge-small-zh-v1.5").context("fixture model")?;
+        let mut choice = catalog.models.remove("bge-base-zh-v1.5").context("fixture model")?;
         choice.weights.as_mut().context("fixture weights")?.size = 4;
         choice.tokenizer.as_mut().context("fixture tokenizer")?.size = 3;
         let legacy = choice.weights.as_ref().context("fixture weights")?.path.clone();
@@ -294,48 +283,55 @@ pub fn select(choice: Choice) -> Result<Selection> {
     select_from_registry(choice, &registry()?)
 }
 
+fn pinned_variant(profile: &ModelProfile) -> Option<&'static str> {
+    let weights = profile.weights.as_ref()?;
+    variants(&profile.id).iter().find(|pin| weights.size == pin.size && weights.sha256.eq_ignore_ascii_case(pin.sha256)).map(|pin| pin.name)
+}
+
 pub fn select_from_registry(choice: Choice, registry: &Registry) -> Result<Selection> {
+    anyhow::ensure!(choice.model != catalog::LEGACY_DISTILL, "legacy model is read-only");
     let mut profile = registry
         .models
         .get(&choice.model)
         .context("unknown model profile")?
         .clone();
-    // Never replace a user-configured profile. Eligibility is based on the
-    // complete authoritative recipe, not merely a familiar model name.
-    let is_builtin = builtin_registry()?.models.get(&choice.model)
-        .map(serde_json::to_value).transpose()? == Some(serde_json::to_value(&profile)?);
-    if let Some(variant) = choice.variant.as_deref() {
-        if choice.model == "m3" {
-            let variant = MODEL_VARIANTS
-                .iter()
-                .find(|v| v.name == variant)
-                .context("unknown M3 variant")?;
-            let original = profile.weights.as_ref().context("M3 weights missing")?;
-            let directory = original
-                .path
-                .parent()
-                .and_then(|p| p.parent())
-                .context("M3 model root missing")?;
-            profile.weights = Some(resource(
-                directory,
-                &format!("onnx/model_{}.onnx", variant.name),
-                variant.size,
-                variant.sha256,
-                "Xenova/bge-m3",
-                "4de13258303883538bd53b696b452bf8099f0858",
-            ));
-        } else if choice.model == "m3-mlx" {
-            anyhow::ensure!(
-                variant == "fp16",
-                "m3-mlx supports only the fp16 MLX conversion"
-            );
-        } else {
-            anyhow::ensure!(variant == "quantized", "custom models select resource paths in their profile; preset small supports quantized");
+    let mut selected_variant = choice.variant;
+    let mut project = false;
+    if !variants(&choice.model).is_empty() {
+        let requested = selected_variant.as_deref().or_else(|| pinned_variant(&profile));
+        let builtin = catalog::model(&choice.model, requested)?;
+        let name = pinned_variant(&builtin).context("curated variant pin missing")?;
+        if let Some(configured) = registry.configured_variants.get(&choice.model).and_then(|models| models.get(name)) {
+            profile = configured.clone();
+        } else if pinned_variant(&profile) != Some(name) && (selected_variant.is_some() || pinned_variant(&profile).is_some()) {
+            if choice.model == "m3" {
+                let previous = profile.weights.as_ref().context("M3 weights missing")?;
+                let mut weights = builtin.weights.clone().context("curated M3 weights missing")?;
+                let root = previous.path.parent().and_then(Path::parent).context("M3 model root missing")?;
+                weights.path = root.join(crate::core_sdk::onnx::variant_file_name(name));
+                profile.weights = Some(weights);
+                profile.companions.clear();
+            } else {
+                profile = builtin.clone();
+            }
         }
+        if pinned_variant(&profile) == Some(name) {
+            profile.isolate_engines = true;
+            if profile.companions.is_empty() && !builtin.companions.is_empty() {
+                let weights = profile.weights.as_ref().context("curated variant weights missing")?;
+                profile.companions = builtin.companions.iter().cloned().map(|mut resource| {
+                    resource.path = weights.path.with_file_name("model.onnx_data");
+                    resource
+                }).collect();
+            }
+            selected_variant = Some(name.to_owned());
+            project = matches!(name, "quantized") && serde_json::to_value(&profile)? == serde_json::to_value(&builtin)?;
+        }
+    } else if let Some(variant) = selected_variant.as_deref() {
+        anyhow::ensure!(variant == if choice.model == "m3-mlx" { "fp16" } else { "quantized" },
+            "custom models select resource paths in their profile");
     }
-    let supported_pair = choice.model != "m3"
-        || choice.variant.as_deref().is_none_or(|name| name == "quantized");
-    if is_builtin && supported_pair {
+    if project {
         if let Ok(roots) = crate::service::resolved_roots() {
             if let (Ok(installation), Ok(account)) = (
                 roots.installation_root.canonicalize(), roots.account_data_root.canonicalize(),
@@ -345,11 +341,16 @@ pub fn select_from_registry(choice: Choice, registry: &Registry) -> Result<Selec
             }
         }
     }
+    if profile.isolate_engines {
+        for resource in profile.weights.iter_mut().chain(&mut profile.tokenizer).chain(&mut profile.companions) {
+            resource.path = std::path::absolute(&resource.path)?;
+        }
+    }
     let selection = Selection {
         model: choice.model,
         backend: choice.backend.clone(),
         engine: choice.engine,
-        variant: choice.variant,
+        variant: selected_variant,
         profile,
         backend_profile: registry
             .backends

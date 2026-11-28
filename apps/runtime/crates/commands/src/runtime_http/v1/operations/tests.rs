@@ -365,7 +365,7 @@ async fn check_resource_routes(app: &Router) -> Result<()> {
     super::model_download::tests::check_routes(app).await?;
     let response = request(app, "GET", "/v1/models/catalog", Some(TOKEN)).await?;
     let catalog = json_response(response, StatusCode::OK).await?;
-    assert_eq!(catalog["active_model_id"], "m3");
+    assert_eq!(catalog["active_model_id"], "granite-311m-r2");
     assert_eq!(
         request(app, "GET", "/v1/models/active-assets", Some(TOKEN))
             .await?

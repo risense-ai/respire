@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"slices"
-	"strings"
 
 	runtimesdk "github.com/risense-ai/respire/packages/runtime-sdk-go"
 )
@@ -20,8 +19,11 @@ func (m *Manager) StartRuntimeModelDownload(ctx context.Context, model, variant,
 	if variant != definition.Variants[0].Name {
 		return ModelSwitchReceipt{}, false, nil
 	}
-	mirror = strings.TrimRight(m.modelMirrorSetting(mirror), "/")
-	if mirror != "" && mirror != "auto" && !slices.Contains(modelMirrors, mirror) {
+	mirror, err = NormalizeModelMirror(m.modelMirrorSetting(mirror))
+	if err != nil {
+		return ModelSwitchReceipt{}, true, err
+	}
+	if mirror != "auto" && !slices.Contains(modelMirrors, mirror) {
 		return ModelSwitchReceipt{}, false, nil // Custom origins are not accepted by the V1 downloader.
 	}
 	client, supported, err := m.runtimeSDK(ctx, "model.managed_download")
@@ -37,7 +39,7 @@ func (m *Manager) StartRuntimeModelDownload(ctx context.Context, model, variant,
 	}
 	engine := "cpu"
 	var selectedMirror *string
-	if mirror != "" && mirror != "auto" {
+	if mirror != "auto" {
 		selectedMirror = &mirror
 	}
 	raw, err := sdkJSON(client.StartModelDownload(ctx, runtimesdk.DownloadModelRequest{
@@ -80,6 +82,10 @@ func (m *Manager) modelCatalogV1(ctx context.Context) (json.RawMessage, bool, er
 	if err := json.Unmarshal(raw, &catalog); err != nil {
 		return nil, true, err
 	}
+	catalog.Models = slices.DeleteFunc(catalog.Models, func(model runtimesdk.ModelCatalogEntry) bool {
+		_, err := modelDefinitionByID(model.Id)
+		return err != nil
+	})
 	// The V1 catalog has no engine/variant selection fields. Preserve those
 	// legacy-only details until the contract represents them.
 	legacy, err := m.runtimeRPC(ctx, "model.catalog", nil)

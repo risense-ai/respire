@@ -23,6 +23,10 @@ mod business;
 pub use business::*;
 mod inference_policy;
 mod model_selection;
+pub mod model_probe;
+#[cfg(target_os = "linux")]
+#[allow(unsafe_code)]
+mod linux_ep;
 pub mod profiles;
 mod resident;
 pub use resident::{

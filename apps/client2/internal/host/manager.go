@@ -81,12 +81,18 @@ func NormalizeModelMirror(raw string) (string, error) {
 	parsed, err := url.Parse(mirror)
 	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Hostname() == "" ||
 		parsed.User != nil || parsed.ForceQuery || parsed.RawQuery != "" || strings.Contains(mirror, "#") ||
-		(parsed.Path != "" && parsed.Path != "/") {
+		(parsed.Path != "" && parsed.Path != "/") || strings.HasSuffix(parsed.Host, ":") {
 		return "", errors.New("model mirror must be auto or an HTTP(S) origin")
+	}
+	if port := parsed.Port(); port != "" {
+		number, err := strconv.Atoi(port)
+		if err != nil || number < 1 || number > 65535 {
+			return "", errors.New("model mirror must use a valid TCP port")
+		}
 	}
 	for _, origin := range modelMirrors {
 		_, host, _ := strings.Cut(origin, "://")
-		if strings.EqualFold(parsed.Host, host) {
+		if parsed.Scheme == "https" && strings.EqualFold(parsed.Host, host) {
 			return origin, nil
 		}
 	}
@@ -227,6 +233,7 @@ type TaskState struct {
 	ID    string `json:"id,omitempty"`
 	Busy  bool   `json:"busy"`
 	Stage string `json:"stage"`
+	State string `json:"state,omitempty"`
 	Error string `json:"error,omitempty"`
 	Done  int64  `json:"done"`
 	Total int64  `json:"total"`
@@ -246,6 +253,8 @@ type Manager struct {
 	Endpoint        string
 	HTTPClient      *http.Client
 	modelHTTPClient *http.Client
+	modelMu         sync.Mutex
+	modelDownloads  map[modelVariant]bool
 	localClient     *http.Client
 	mu              sync.Mutex
 	directRuntime   HealthInfo
@@ -503,6 +512,7 @@ func (m *Manager) StartDownload(stage string, action func(context.Context) error
 		switch {
 		case err == nil:
 			m.task.Stage = i18n.Message5a73ae60f30b9728
+			m.task.State = "downloaded"
 		case paused:
 			m.task.Stage = i18n.Message563ea3a387e4cd9b
 		case errors.Is(err, context.Canceled):

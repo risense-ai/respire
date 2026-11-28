@@ -91,38 +91,39 @@ type ModelSwitchReceipt struct {
 }
 
 func (m *Manager) StartModelSwitch(ctx context.Context, model, engine, variant string) (ModelSwitchReceipt, error) {
+	if model == "" {
+		model = DefaultModelID
+	}
+	definition, variant, _, err := selectedModelVariant(model, variant)
+	if err != nil {
+		return ModelSwitchReceipt{}, err
+	}
+	if err := validateModelEngine(engine); err != nil {
+		return ModelSwitchReceipt{}, err
+	}
+	m.modelMu.Lock()
+	defer m.modelMu.Unlock()
+	if m.modelDownloads[modelVariant{Model: model, Variant: variant}] {
+		return ModelSwitchReceipt{}, ErrModelVariantBusy
+	}
 	client, supported, err := m.runtimeSDK(ctx, "openapi.v1")
 	if err != nil {
 		return ModelSwitchReceipt{}, err
 	}
+	if !definition.Legacy || variant != "quantized" {
+		if err := m.configureModel(ctx, model, variant); err != nil {
+			return ModelSwitchReceipt{}, err
+		}
+	}
 	if !supported || engine != "cpu" {
-		if model == "m3" {
-			return ModelSwitchReceipt{Legacy: true}, nil
-		}
-		if err := m.ModelConfigure(ctx, model, variant); err != nil {
-			return ModelSwitchReceipt{}, err
-		}
-		return ModelSwitchReceipt{}, m.ModelSwitch(ctx, model, engine, variant)
-	}
-	definition, err := modelDefinitionByID(model)
-	if err != nil {
-		return ModelSwitchReceipt{}, err
-	}
-	if !definition.Legacy {
-		if err := m.ModelConfigure(ctx, model, variant); err != nil {
-			return ModelSwitchReceipt{}, err
-		}
-	}
-	var selectedVariant *string
-	if definition.GraniteWeightsPath == "" {
-		selectedVariant = &variant
+		return m.startModelSwitchRPC(ctx, model, engine, variant)
 	}
 	_, stream, err := m.runtimeSDK(ctx, "sse.operations.v1")
 	if err != nil {
 		return ModelSwitchReceipt{}, err
 	}
 	raw, err := sdkJSON(client.SwitchModel(ctx, runtimesdk.SwitchModelRequest{
-		ModelId: model, Engine: &engine, Variant: selectedVariant,
+		ModelId: model, Engine: &engine, Variant: &variant,
 	}, m.authorizeRuntime))
 	if err != nil {
 		return ModelSwitchReceipt{}, err
@@ -138,6 +139,9 @@ func (m *Manager) StartModelSwitch(ctx context.Context, model, engine, variant s
 }
 
 func (m *Manager) RuntimeOperation(ctx context.Context, id string, cancel bool) (json.RawMessage, error) {
+	if strings.HasPrefix(id, modelSwitchRPCPrefix) {
+		return m.modelSwitchRPCStatus(ctx, id, cancel)
+	}
 	capability := "openapi.v1"
 	if cancel {
 		capability = "sse.operations.v1"

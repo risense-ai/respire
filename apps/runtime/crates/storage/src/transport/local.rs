@@ -132,12 +132,19 @@ fn map_audit(row: &rusqlite::Row<'_>) -> rusqlite::Result<serde_json::Value> {
 
 impl LocalStore {
     pub fn open(path: &Path) -> Result<Self> {
+        Self::open_with_model_default(path, || Ok(None))
+    }
+
+    pub fn open_with_model_default(
+        path: &Path,
+        initial_model: impl FnOnce() -> Result<Option<respire_core_sdk::profiles::Selection>>,
+    ) -> Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("failed to create data dir: {}", parent.display()))?;
             respire_core_sdk::set_index_root(&std::fs::canonicalize(parent)?)?;
         }
-        let store = Self { connection: startup_schema::open(path)? };
+        let store = Self { connection: startup_schema::open(path, initial_model)? };
         store.maintain_sync_storage()?;
         Ok(store)
     }

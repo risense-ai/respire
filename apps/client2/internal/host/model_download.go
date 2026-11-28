@@ -18,6 +18,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 const (
@@ -40,6 +41,13 @@ var modelFileSpecs = map[string]modelFileSpec{
 	"uint8":     {rel: "onnx/model_uint8.onnx", sha256: "3222211565d0d5da2fe89e0c40856ed879e5c5dd3369fbbe685213469498e811", size: 568456765},
 	"q4":        {rel: "onnx/model_q4.onnx", sha256: "4f6d9786712f8dbf00efbb08ffd819395ef05d860249e852b4efc16022f753a6", size: 1248237611},
 	"q4f16":     {rel: "onnx/model_q4f16.onnx", sha256: "8305fdfa48b5702ecb4a6d84c1a52a4d1cb27d69880ff7f69d1a93d795864f25", size: 699932840},
+	"bnb4":      {rel: "onnx/model_bnb4.onnx", sha256: "3781d63fa70c05bd65e1d4ed66ca48933a36b3ff7c75b89eea051d8d625cc093", size: 1229364419},
+	"fp32":      {rel: "onnx/model.onnx", sha256: "5d89a0010dd39aa2cfa8b22bb49f06904c5bbf5877135f877da419480f40cde3", size: 607298},
+}
+
+var m3ExternalData = modelFileSpec{
+	rel: "onnx/model.onnx_data", size: 2266820608,
+	sha256: "1eebfb28493f67bba03ce0ef64bfdc7fc5a3bd9d7493f818bb1d78cd798416b4",
 }
 
 const m3CPUContainerURL = "https://github.com/risense-ai/respire-cli/releases/download/model-bge-m3-ort-v1/model_quantized.cpu-v1.ort"
@@ -87,14 +95,10 @@ func (m *Manager) modelClient() *http.Client {
 }
 
 func modelOrigins(mirror string) []string {
-	mirror = strings.TrimSpace(mirror)
-	if mirror == "" || mirror == "auto" {
+	if mirror == "auto" {
 		return modelMirrors
 	}
-	if !strings.Contains(mirror, "://") {
-		mirror = "https://" + mirror
-	}
-	return []string{strings.TrimRight(mirror, "/")}
+	return []string{mirror}
 }
 
 func modelFileURL(origin, rel string) string {
@@ -130,37 +134,100 @@ func expandTilde(p string) (string, error) {
 // profile models download tokenizer.json plus
 // the chosen onnx variant from their pinned repository.
 func (m *Manager) DownloadModel(ctx context.Context, model, variant, mirror string) error {
+	key, err := downloadVariant(model, variant)
+	if err != nil {
+		return err
+	}
+	m.modelMu.Lock()
+	reserved := m.reserveModelDownload(key)
+	m.modelMu.Unlock()
+	if !reserved {
+		return ErrModelVariantBusy
+	}
+	defer m.releaseModelDownload(key)
+	return m.downloadModel(ctx, model, variant, mirror, true)
+}
+
+func (m *Manager) StartModelDownload(model, variant, mirror string) (string, error) {
+	if model == "" {
+		model = DefaultModelID
+	}
+	key, err := downloadVariant(model, variant)
+	if err != nil {
+		return "", err
+	}
+	mirror, err = NormalizeModelMirror(m.modelMirrorSetting(mirror))
+	if err != nil {
+		return "", fmt.Errorf("%w: %w", ErrInvalidModelVariant, err)
+	}
+	m.modelMu.Lock()
+	defer m.modelMu.Unlock()
+	if !m.reserveModelDownload(key) {
+		return "", ErrModelVariantBusy
+	}
+	id := m.StartDownload(i18n.Message446478c6a451bc64+key.Variant, func(ctx context.Context) error {
+		defer m.releaseModelDownload(key)
+		ctx, cancel := context.WithTimeout(ctx, 60*time.Minute)
+		defer cancel()
+		return m.downloadModel(ctx, model, variant, mirror, false)
+	})
+	if id == "" {
+		delete(m.modelDownloads, key)
+		return "", ErrModelVariantBusy
+	}
+	return id, nil
+}
+
+func downloadVariant(model, variant string) (modelVariant, error) {
+	if variant == "baseline" {
+		variant = ""
+	}
+	_, variant, _, err := selectedModelVariant(model, variant)
+	return modelVariant{Model: model, Variant: variant}, err
+}
+
+func (m *Manager) reserveModelDownload(key modelVariant) bool {
+	if m.modelDownloads[key] {
+		return false
+	}
+	if m.modelDownloads == nil {
+		m.modelDownloads = make(map[modelVariant]bool)
+	}
+	m.modelDownloads[key] = true
+	return true
+}
+
+func (m *Manager) releaseModelDownload(key modelVariant) {
+	m.modelMu.Lock()
+	defer m.modelMu.Unlock()
+	delete(m.modelDownloads, key)
+}
+
+func (m *Manager) downloadModel(ctx context.Context, model, variant, mirror string, runtimeManaged bool) error {
+	release, err := m.holdProfile()
+	if err != nil {
+		return err
+	}
+	defer release()
 	dir, definition, err := m.modelDirFor(model)
 	if err != nil {
 		return err
 	}
-	var files []modelFileSpec
-	if definition.Legacy {
-		switch variant {
-		case "baseline":
-			files = []modelFileSpec{modelFileSpecs["tokenizer"], modelFileSpecs["quantized"]}
-		default:
-			spec, ok := modelFileSpecs[variant]
-			if !ok {
-				return errors.New(i18n.Messagef81dd9a5fc1b2073 + variant)
-			}
-			files = []modelFileSpec{spec}
-		}
-	} else {
-		if variant == "baseline" {
-			variant = definition.Variants[0].Name
-		}
-		spec, specErr := definition.modelFileSpecFor(variant)
-		if specErr != nil {
-			return specErr
-		}
-		files = []modelFileSpec{definition.Tokenizer, spec}
+	baseline := variant == "baseline"
+	if baseline {
+		variant = ""
 	}
-	origins := modelOrigins(m.modelMirrorSetting(mirror))
-	// Keep the legacy baseline and its CPU engine package, plus every existing
-	// non-quantized variant, on their original paths. Only the explicit pinned
-	// quantized pair can use a verified Runtime's managed install capability.
-	if definition.ID == "m3" && variant == "quantized" {
+	variant = definition.selectedVariant(variant)
+	weights, err := definition.weightFiles(variant)
+	if err != nil {
+		return err
+	}
+	mirror, err = NormalizeModelMirror(m.modelMirrorSetting(mirror))
+	if err != nil {
+		return err
+	}
+	origins := modelOrigins(mirror)
+	if runtimeManaged && definition.Legacy && variant == "quantized" && !baseline {
 		health, supported, err := m.runtimeModelInstallCapability(ctx)
 		if err != nil {
 			return err
@@ -169,10 +236,11 @@ func (m *Manager) DownloadModel(ctx context.Context, model, variant, mirror stri
 			return m.downloadManagedM3(ctx, health, definition, origins)
 		}
 	}
+	files := append([]modelFileSpec{definition.Tokenizer}, weights...)
 	if err := m.downloadModelFiles(ctx, definition, dir, files, origins); err != nil {
 		return err
 	}
-	if definition.Legacy && variant == "baseline" && m3UsesCPUContainer() {
+	if definition.Legacy && baseline && m3UsesCPUContainer() {
 		return m.downloadModelFrom(ctx, m3CPUContainerURL,
 			filepath.Join(m.ModelDir(), filepath.FromSlash(m3CPUContainer.rel)), m3CPUContainer)
 	}
@@ -228,7 +296,7 @@ func (m *Manager) cpuContainerPresent(dir string) bool {
 
 func modelFileValid(path string, spec modelFileSpec) bool {
 	info, err := os.Stat(path)
-	return err == nil && info.Size() == spec.size && fileHashMust(path) == spec.sha256
+	return err == nil && info.Mode().IsRegular() && info.Size() == spec.size && fileHashMust(path) == spec.sha256
 }
 
 func fileHashMust(path string) string {
@@ -268,19 +336,21 @@ func (m *Manager) downloadModelFrom(ctx context.Context, url, dest string, spec 
 		return err
 	}
 	hasher := sha256.New()
+	writer := io.MultiWriter(out, hasher)
 	var merged int64
 	for _, part := range parts {
-		data, err := os.ReadFile(part)
+		input, err := os.Open(part)
 		if err != nil {
 			out.Close()
 			return err
 		}
-		if _, err = out.Write(data); err != nil {
+		size, err := io.Copy(writer, input)
+		input.Close()
+		if err != nil {
 			out.Close()
 			return err
 		}
-		hasher.Write(data)
-		merged += int64(len(data))
+		merged += size
 	}
 	if err = out.Close(); err != nil {
 		return err
