@@ -4,7 +4,7 @@ const { posix } = require("node:path");
 const { i18nMessages, readFrontend } = require("./frontend-source.cjs");
 
 const small = "granite-97m-r2", large = "granite-311m-r2";
-const variants = { [small]: ["standard", "onnx/model.onnx"], [large]: ["quantized", "onnx/model_quint8_avx2.onnx"] };
+const variants = { [small]: ["standard", "onnx/model.onnx"], [large]: ["quantized", "onnx/model_quint8_avx2.onnx"], m3: ["q4f16", "onnx/model_q4f16.onnx"] };
 const mirrorSelector = "[data-mirror] [name=mirror]";
 const taskContent = "[data-model-task-content]";
 const reopenButton = '[data-model="reopen-download"]';
@@ -77,10 +77,11 @@ function frontend(globals) {
   return load;
 }
 
-function fixture({ model = large, managed = true, installed = false, active = null, rebuild } = {}) {
+function fixture({ model = large, managed = true, installed = false, legacyInstalled = installed, active = null, rebuild } = {}) {
   const document = new Element(), dialogs = [], streams = [], requests = [], switches = [], patches = [], intervals = new Map();
   const timers = new Map();
   const [variant, filename] = variants[model];
+  const engineState = model === "m3" ? { model: "q4f16", engine: "cpu" } : { model: "fp16", engine: "gpu" };
   const storage = new Map([["respire-model", model]]);
   const ctx = { desktop: { connected: true, platform: "windows", preferences: { modelMirror: "auto" }, task: {},
     health: { instance_id: "fixture", account_id: "account", generation: 1, inference: { phase: "idle" }, capabilities: ["sse.operations.v1"] } },
@@ -116,7 +117,11 @@ function fixture({ model = large, managed = true, installed = false, active = nu
         case "/api/operation-ack": result = true; break;
         case "/api/model-variants":
           result = { model, tokenizer_installed: installed,
-            variants: [{ name: variant, path: filename, installed, size: 10240 }] };
+            variants: [{ name: variant, path: filename, installed: model === "m3" ? legacyInstalled : installed, size: 10240 }] };
+          if (model === "m3") result.variants.push(
+            { name: "quantized", path: "onnx/model_quantized.onnx", installed, size: 10240 },
+            { name: "fp16", path: "onnx/model_fp16.onnx", installed, size: 10240 },
+          );
           break;
         case "/api/model-profile-state": result = { catalog: { summary: { active } }, progress: { summary: {
           operation: ctx.status.summary.model_operation || { active: false }, switch: { state: "ready" },
@@ -139,7 +144,7 @@ function fixture({ model = large, managed = true, installed = false, active = nu
             job = { ...job, state: "failed", error: "Rebuild cancelled" };
             ctx.status = { summary: { indexed_count: 4, local_alive: 10 } };
           }
-          result = { ...command, state: "done", envelope: { summary: command.name === "model_engine" ? { model: "fp16", engine: "gpu" } : {} } };
+          result = { ...command, state: "done", envelope: { summary: command.name === "model_engine" ? engineState : {} } };
           break;
         }
         default: assert.fail(`Unexpected endpoint ${url}`);
@@ -264,6 +269,19 @@ test("installed idle selection is ready, and the status tag follows the effectiv
   view.runtimeActive = undefined;
   renderer.renderDynamic(true);
   assert.equal(tag(), `${i18nMessages.m4fbe6bf6f691659f} · GPU`);
+});
+
+test("legacy M3 on CPU is ready in balanced mode only with its active weights installed", async () => {
+  const installed = fixture({ model: "m3", installed: true, active: null });
+  await installed.mount();
+  const card = installed.root.querySelector("[data-status-card]");
+  assert.match(card.innerHTML, /status-card ready/);
+  await installed.click("[data-mode-select]", { dataset: { modeSelect: "performance" } });
+  assert.match(card.innerHTML, /status-card empty/);
+
+  const missing = fixture({ model: "m3", installed: true, legacyInstalled: false, active: null });
+  await missing.mount();
+  assert.match(missing.root.querySelector("[data-status-card]").innerHTML, /status-card empty/);
 });
 
 for (const model of [small, large]) {

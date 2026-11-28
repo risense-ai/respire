@@ -338,10 +338,16 @@ export function createModelsView(view, { root, ctx, live }) {
     if (view.switchInFlight || (op.active && !["download", "connect", "verify"].includes(op.phase)))
       return PAGE_STATES.VERIFYING;
     if (op.active || modelTaskBusy(task)) return PAGE_STATES.DOWNLOADING;
-    const variant = modeVariant(currentMode());
+    const mode = currentMode();
+    const active = activeSelection();
+    const activeMatchesMode = !graniteVariant(view.modelID) && active?.variant &&
+      active.model === view.modelID && modeForVariant(active.variant) === mode.id &&
+      (!mode.requiresGPU || active.engine !== "cpu");
+    const variantName = activeMatchesMode ? active.variant : mode.variant;
+    const variant = view.inventory?.variants?.find((item) => item.name === variantName);
     if (!variant?.installed || !view.inventory?.tokenizer_installed) return PAGE_STATES.EMPTY;
-    if (!currentVariant(currentMode().variant)) return PAGE_STATES.EMPTY;
-    if (currentMode().requiresGPU && activeSelection()?.engine === 'cpu') return PAGE_STATES.EMPTY;
+    if (!currentVariant(variantName)) return PAGE_STATES.EMPTY;
+    if (mode.requiresGPU && active?.engine === "cpu") return PAGE_STATES.EMPTY;
     if (["failed", "unavailable", "error", "loading"].includes(ctx.desktop?.health?.inference?.phase))
       return PAGE_STATES.EMPTY;
     return PAGE_STATES.READY;
