@@ -589,3 +589,5 @@ fn stop_target_rejects_stale_instance_account_and_generation() -> Result<()> {
     }
     Ok(())
 }
+#[path = "doctor_lock_tests.rs"]
+mod doctor_lock_tests;

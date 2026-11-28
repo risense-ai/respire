@@ -54,7 +54,8 @@ export function overview(root, ctx) {
       '<span class="badge" role="status" data-runtime-connection></span>' +
         i18nMessages.mdea3a195d4b5e4d1,
     ) +
-    '<div class="metrics" data-overview-metrics></div></div>' +
+    '<div class="metrics" data-overview-metrics></div>' +
+    '<div data-overview-status-error></div></div>' +
     '<section class="section-gap" data-overview-stats></section>' +
     '<div class="section-gap" data-overview-details></div>' +
     panel(
@@ -64,6 +65,7 @@ export function overview(root, ctx) {
     '<div data-overview-onboarding></div>';
   const connection = $("[data-runtime-connection]", root);
   const metricsRoot = $("[data-overview-metrics]", root);
+  const statusErrorBanner = $("[data-overview-status-error]", root);
   const statsView = stats($("[data-overview-stats]", root), ctx);
   const detailsRoot = $("[data-overview-details]", root);
   const runtimeStatus = $("[data-runtime-status]", root);
@@ -89,6 +91,9 @@ export function overview(root, ctx) {
   }
   function update() {
     statsView.update();
+    statusErrorBanner.innerHTML = ctx.statusError
+      ? `${i18nMessages.m0bb307125afa6949}${h(ctx.statusError)}</p>`
+      : "";
     const state = ctx.desktop || {},
       s = ctx.status?.summary || {},
       health = state.health || {},
@@ -253,11 +258,6 @@ export function overview(root, ctx) {
           )
           .join("")}</div></div>`
       : "";
-    if (ctx.statusError)
-      onboarding.insertAdjacentHTML(
-        "beforeend",
-        `${i18nMessages.m0bb307125afa6949}${h(ctx.statusError)}</p>`,
-      );
   }
   root.addEventListener("click", (event) => {
     const button = event.target.closest("button");

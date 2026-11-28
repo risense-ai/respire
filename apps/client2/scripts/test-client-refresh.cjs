@@ -48,7 +48,7 @@ const writes = () => fields.map(e => e.writes);
 let count = 0;
 async function test(name, fn) { await fn(); console.log(`PASS ${++count}: ${name}`); }
 (async () => {
-  desktop = { connected: true, version: '2.0.0-dev.test', platform: 'windows/amd64', health: { bin: 'fixture' } };
+  desktop = { connected: true, version: '2.0.0-dev.test', platform: 'windows/amd64', health: { bin: 'fixture', account_id: 'fixture-account', instance_id: 'fixture-instance' } };
   status = { summary: { local_alive: 12, workspace: 'normal', sync_live: { phase: 'idle', pending: 0, conflicts: 0 } } };
   await test('initial English values and existing call order', async () => {
     await refresh();
@@ -106,8 +106,10 @@ async function test(name, fn) { await fn(); console.log(`PASS ${++count}: ${name
   await test('missing element still throws instead of hiding selector failures', async () => {
     assert.throws(() => setRefreshText(null, 'value'), TypeError);
   });
-  await test('status error retains existing observer translation behavior', async () => {
+  await test('same-scope status failure keeps the last count and shows a translated error until recovery', async () => {
     failure = true; await refresh(); assert.equal(ctx.statusError, 'status failed');
+    assert.equal(ctx.status, status);
+    assert.equal(elements['#nav-memory-count'].textContent, '13');
     assert.equal(elements['#sync-summary'].textContent, i18nMessages.m23dfe4404e8a5ebe);
     i18n.applyTranslations(); assert.equal(elements['#sync-summary'].textContent, 'Status read failed');
     // Known existing English-error rewrite is intentionally not changed here.
@@ -115,13 +117,32 @@ async function test(name, fn) { await fn(); console.log(`PASS ${++count}: ${name
     assert.equal(elements['#sync-summary'].writes, before + 1);
     i18n.applyTranslations(); assert.equal(elements['#sync-summary'].textContent, 'Status read failed');
     failure = false; await refresh(); assert.equal(ctx.statusError, '');
+    assert.equal(elements['#sync-summary'].textContent, 'Sync idle · pending 2 · conflicts 0');
+  });
+  await test('failed status refresh after an instance change clears the previous status', async () => {
+    desktop.health.instance_id = 'new-instance'; failure = true; await refresh();
+    assert.equal(ctx.status, null);
+    assert.equal(ctx.statusScope, '');
+    assert.equal(ctx.statusError, 'status failed');
+    assert.equal(elements['#nav-memory-count'].textContent, '—');
+    failure = false; await refresh(); assert.equal(ctx.status, status);
   });
   await test('disconnect skips runtime request and reconnect updates', async () => {
     desktop.connected = false; events.length = 0; await refresh();
     assert.deepEqual(events, ['state', 'appearance', 'view.update', 'nav']);
     assert.equal(elements['#connection-label'].textContent, 'Runtime disconnected');
     assert.equal(elements['#status-summary'].textContent, 'Runtime disconnected');
+    assert.equal(ctx.status, null);
+    assert.equal(ctx.statusScope, '');
+    assert.equal(elements['#nav-memory-count'].textContent, '—');
     desktop.connected = true; await refresh(); assert.equal(elements['#connection-label'].textContent, 'Runtime connected');
+  });
+  await test('Overview shows status errors next to the metrics', async () => {
+    const overview = fs.readFileSync(path.join(root, 'internal/desktop/frontend/pages/overview.js'), 'utf8');
+    assert.match(overview, /<div data-overview-summary>[\s\S]*?<div class="metrics" data-overview-metrics><\/div>'\s*\+\s*'<div data-overview-status-error><\/div><\/div>'/);
+    assert.match(overview, /const statusErrorBanner = \$\("\[data-overview-status-error\]", root\)/);
+    assert.match(overview, /statusErrorBanner\.innerHTML = ctx\.statusError\s*\? `\$\{i18nMessages\.m0bb307125afa6949\}\$\{h\(ctx\.statusError\)\}<\/p>`\s*: ""/);
+    assert.doesNotMatch(overview, /onboarding\.insertAdjacentHTML/);
   });
   await test('Overview keeps one localized connection indicator through disconnect and reconnect', async () => {
     const overview = read('pages/overview.js');
