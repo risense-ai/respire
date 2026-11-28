@@ -6,7 +6,7 @@ import {join} from 'node:path';
 import {runScenario} from '../../referee/test-cases/runner.mjs';
 import {withRuntime} from '../../referee/test-cases/targets.mjs';
 
-const catalogPath = '/Xenova/bge-small-zh-v1.5/resolve/75c43b069aac4d136ba6bc1122f995fedcfd2781/tokenizer.json';
+const catalogPath = '/Xenova/bge-base-zh-v1.5/resolve/71e50dc531959f9e04ebf190ea25b00261a0a186/tokenizer.json';
 // The test cancels before completion. No synthetic bytes can pass catalog integrity verification.
 const chunk = Buffer.alloc(16 * 1024, 0x61);
 const limit = 128 * 1024;
@@ -24,7 +24,7 @@ export async function runDownload(binary, scenario) {
     }
     const record = {bytes: 0};
     transfers.push(record);
-    res.writeHead(200, {'Content-Type': 'application/octet-stream', 'Content-Length': '439125'});
+    res.writeHead(200, {'Content-Type': 'application/octet-stream', 'Content-Length': '439124'});
     res.flushHeaders();
     const timer = setInterval(() => {
       if (record.bytes >= limit || res.writableNeedDrain) return;
@@ -51,7 +51,7 @@ export async function runDownload(binary, scenario) {
           operations.push(result.data.operation_id);
         }
         return result;
-      }}, {downloadModel:'bge-small-zh-v1.5'});
+      }}, {downloadModel:'bge-base-zh-v1.5'});
       assert.equal(operations.length, 2);
       assert.equal(new Set(operations).size, 2);
       for (const id of operations) {
