@@ -111,6 +111,7 @@
 
 .wizard-step-content {
   overflow: auto;
+  overflow-wrap: anywhere;
   scrollbar-gutter: stable;
   padding-inline: 3px;
 }

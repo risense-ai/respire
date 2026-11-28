@@ -58,3 +58,11 @@
 - **Symptom**: Status banners shift controls, and hidden variant selection can enable the wrong weights or fail a switch.
 - **Practice**: Float notices, reserve space for variant options, and pass the selected variant through download, probe, and enable.
 - **Status**: OpenSpec `007` proposes the layout and model lifecycle changes.
+
+### L-009: Desktop Text Overflow at Narrow & Standard Window Widths
+<!-- respire-lessons-audit: category=desktop-text-overflow -->
+
+- **Symptom**: Long Overview notes, memory titles, diary counts, and model card text crossed their container edges at desktop widths.
+- **Root Cause**: Some text could not wrap, and some flex and grid items could not shrink to fit their columns.
+- **Guardrail Target**: Run `test-desktop-text-overflow-e2e.mjs` through `run-frontend-ci.mjs` to check local text bounds and page widths at 1180, 1024, and 800 pixels in Chromium, including onboarding cards.
+- **Status**: The Client2 frontend CI runner includes the regression test.
